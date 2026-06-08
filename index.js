@@ -578,7 +578,8 @@ app.post('/webhook', (req, res) => {
   procesarMensaje(mensaje, remitente);
 });
 
-app.listen(3000, () => {
-  console.log('Servidor escuchando en puerto 3000');
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Servidor escuchando en puerto ${PORT}`);
   loginConReintentos().catch(() => {});
 });
