@@ -12,6 +12,10 @@ const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_A
 const GYM_API = 'https://hockeyvivo.up.railway.app';
 let GYM_TOKEN = null;
 
+const TWILIO_FROM = process.env.TWILIO_WHATSAPP_NUMBER?.startsWith('whatsapp:')
+  ? process.env.TWILIO_WHATSAPP_NUMBER
+  : `whatsapp:${process.env.TWILIO_WHATSAPP_NUMBER}`;
+
 // Memoria conversacional por número de WhatsApp
 const conversaciones = new Map(); // { from: { messages: [], lastSeen: Date } }
 const EXPIRACION_MS = 24 * 60 * 60 * 1000; // 24 horas
@@ -405,7 +409,7 @@ async function ejecutarTool(nombre, input, remitente) {
         console.log(`[Twilio] Enviando a Cosaco — from: ${process.env.TWILIO_WHATSAPP_NUMBER} | to: ${process.env.COSACO_WHATSAPP}`);
         try {
           const msgResult = await twilioClient.messages.create({
-            from: process.env.TWILIO_WHATSAPP_NUMBER,
+            from: TWILIO_FROM,
             to: process.env.COSACO_WHATSAPP,
             body: mensajeCosaco,
           });
@@ -475,7 +479,7 @@ async function procesarMensaje(mensaje, remitente) {
     console.log(`Respuesta de Claude: ${texto}`);
 
     await twilioClient.messages.create({
-      from: process.env.TWILIO_WHATSAPP_NUMBER,
+      from: TWILIO_FROM,
       to: remitente,
       body: texto,
     });
@@ -510,7 +514,7 @@ async function manejarConfirmacionPago(confirmado) {
       console.log('Pago registrado:', JSON.stringify(resultado));
 
       await twilioClient.messages.create({
-        from: process.env.TWILIO_WHATSAPP_NUMBER,
+        from: TWILIO_FROM,
         to: pago.cliente_from,
         body: `✅ Pago registrado: ${pago.cliente_nombre} - $${pago.monto} - ${pago.metodo} - ${pago.fecha_pago} 🏑`,
       });
@@ -521,7 +525,7 @@ async function manejarConfirmacionPago(confirmado) {
     console.log(`Cosaco rechazó pago de ${pago.cliente_nombre}`);
     try {
       await twilioClient.messages.create({
-        from: process.env.TWILIO_WHATSAPP_NUMBER,
+        from: TWILIO_FROM,
         to: pago.cliente_from,
         body: `Quedá tranquilo/a, en breve un integrante del equipo se comunica con vos para resolverlo 🏑`,
       });
@@ -539,7 +543,7 @@ async function manejarConfirmacionPago(confirmado) {
       `¿Confirmás? SÍ o NO`;
     try {
       await twilioClient.messages.create({
-        from: process.env.TWILIO_WHATSAPP_NUMBER,
+        from: TWILIO_FROM,
         to: process.env.COSACO_WHATSAPP,
         body: mensajeCosaco,
       });
