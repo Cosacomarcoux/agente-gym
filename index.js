@@ -701,6 +701,47 @@ async function manejarConfirmacionPago(confirmado) {
   }
 }
 
+app.get('/test-jobs', async (req, res) => {
+  if (req.query.secret !== 'hockeyvivo') {
+    return res.status(403).json({ error: 'Acceso denegado' });
+  }
+  const job = req.query.job;
+  if (!job) {
+    return res.status(400).json({ error: 'Parámetro job requerido: recordatorio, mora, suspension, cumpleanos' });
+  }
+
+  try {
+    const r = await fetch(`${GYM_API}/clientes?buscar=Roberto+Marcoux`, {
+      headers: { Authorization: `Bearer ${GYM_TOKEN}` }
+    });
+    const data = await r.json();
+    const c = Array.isArray(data) && data.length > 0 ? data[0] : null;
+    if (!c) return res.status(404).json({ error: 'Cliente Roberto Marcoux no encontrado' });
+
+    const nombre = c.nombre.split(' ')[0];
+    let msg;
+
+    if (job === 'recordatorio') {
+      msg = `Hola ${nombre}! 👋 Te recordamos que mañana vence tu cuota de Hockey Vivo.\n💰 Monto: $${c.costo?.toLocaleString('es-AR') || 'consultar'}\nPara renovar, realizá tu transferencia o acercate al gimnasio.\n¡Gracias y nos vemos en el entrenamiento! 🏑`;
+    } else if (job === 'mora') {
+      msg = `Hola ${nombre}! 👋\nTe extrañamos en Hockey Vivo Gym, y vimos que aún no se acreditó tu pago. ¿Fue un error, o necesitás ayuda con algo?\nSabés que contás con nosotros para lo que necesites.\nUn abrazo 🏑`;
+    } else if (job === 'suspension') {
+      msg = `Hola ${nombre}.\nHan pasado 10 días desde el vencimiento de tu plan, y con mucha pena tendremos que liberar tu cupo en Hockey Vivo Gym.\nPero queremos que sepas que las puertas siempre están abiertas para vos, ¡te queremos de vuelta! Hablá con nosotros para buscar un nuevo turno que te quede cómodo.\n¡Te esperamos! 🏑`;
+    } else if (job === 'cumpleanos') {
+      msg = `¡Feliz cumpleaños ${nombre}! 🎉🎂\nTodo el equipo de Hockey Vivo te desea un día increíble.\n¡Que este año esté lleno de goles y alegrías! 🏑⚽`;
+    } else {
+      return res.status(400).json({ error: `Job desconocido: ${job}` });
+    }
+
+    await enviarWhatsApp(c.telefono, msg);
+    console.log(`[test-jobs] Job "${job}" ejecutado para ${c.nombre}`);
+    res.json({ ok: true, job, cliente: c.nombre, telefono: c.telefono, mensaje: msg });
+  } catch (err) {
+    console.error('[test-jobs] Error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.post('/webhook', (req, res) => {
   console.log('req.body completo:', req.body);
   const mensaje = req.body.Body;
