@@ -702,6 +702,42 @@ cron.schedule('0 10 24 * *', async () => {
   }
 });
 
+// Día 9 → mora grupo 5 (5 días sin pagar)
+cron.schedule('0 10 9 * *', async () => {
+  console.log('🔔 Job: mora grupo 5');
+  const clientes = await clientesPorGrupo(5);
+  for (const c of clientes) {
+    if (c.dias_vencido < 1) continue;
+    const nombre = c.nombre.split(' ')[0];
+    const msg = `Hola ${nombre}! 👋\nTe extrañamos en Hockey Vivo Gym, y vimos que aún no se acreditó tu pago. ¿Fue un error, o necesitás ayuda con algo?\nSabés que contás con nosotros para lo que necesites.\nUn abrazo 🏑`;
+    await enviarWhatsApp(c.telefono, msg);
+  }
+});
+
+// Día 19 → mora grupo 15 (5 días sin pagar)
+cron.schedule('0 10 19 * *', async () => {
+  console.log('🔔 Job: mora grupo 15');
+  const clientes = await clientesPorGrupo(15);
+  for (const c of clientes) {
+    if (c.dias_vencido < 1) continue;
+    const nombre = c.nombre.split(' ')[0];
+    const msg = `Hola ${nombre}! 👋\nTe extrañamos en Hockey Vivo Gym, y vimos que aún no se acreditó tu pago. ¿Fue un error, o necesitás ayuda con algo?\nSabés que contás con nosotros para lo que necesites.\nUn abrazo 🏑`;
+    await enviarWhatsApp(c.telefono, msg);
+  }
+});
+
+// Día 29 → mora grupo 25 (5 días sin pagar)
+cron.schedule('0 10 29 * *', async () => {
+  console.log('🔔 Job: mora grupo 25');
+  const clientes = await clientesPorGrupo(25);
+  for (const c of clientes) {
+    if (c.dias_vencido < 1) continue;
+    const nombre = c.nombre.split(' ')[0];
+    const msg = `Hola ${nombre}! 👋\nTe extrañamos en Hockey Vivo Gym, y vimos que aún no se acreditó tu pago. ¿Fue un error, o necesitás ayuda con algo?\nSabés que contás con nosotros para lo que necesites.\nUn abrazo 🏑`;
+    await enviarWhatsApp(c.telefono, msg);
+  }
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Servidor escuchando en puerto ${PORT}`);
