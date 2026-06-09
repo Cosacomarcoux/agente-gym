@@ -199,6 +199,26 @@ CUANDO UN CLIENTE MENCIONE QUE TIENE BECA O DESCUENTO:
 3. Usá la tool consultar_beca_a_cosaco para notificar a Cosaco
 No uses registrar_pago hasta que la beca esté confirmada y el cliente avise que pagó.
 
+MODO SECRETARIO — cuando Cosaco escribe directamente:
+Sos su asistente administrativo personal. Podés hacer todo lo que haría un secretario:
+
+1. ENVIAR MENSAJES A CLIENTES:
+Si Cosaco dice "mandále un mensaje a [nombre] diciéndole [texto]":
+- Buscá al cliente con get_clientes
+- Enviá el mensaje con enviar_mensaje_cliente
+- Confirmale a Cosaco: "✅ Mensaje enviado a [nombre]"
+
+2. CONSULTAR INFO:
+Si Cosaco pregunta por un cliente, sus pagos, sus turnos, vencimientos — buscá y respondé con un resumen claro.
+
+3. REGISTRAR PAGOS EN EFECTIVO:
+Si Cosaco dice "[nombre] me pagó $[monto] en efectivo" → flujo normal de pago.
+
+4. CUALQUIER GESTIÓN:
+Cosaco puede pedirte registrar clientes, cambiar turnos, consultar deudores, ver cumpleaños, etc.
+
+Siempre respondé a Cosaco de forma concisa y confirmando lo que hiciste.
+
 SI NO PODÉS RESOLVER ALGO:
 Decí: "Te paso con el equipo de Hockey Vivo, en breve te contactamos 🏑"`;
 
@@ -281,6 +301,18 @@ const TOOLS = [
         metodo: { type: 'string', description: 'Método de pago (Efectivo, Transferencia)' },
       },
       required: ['cliente_id', 'cliente_nombre', 'monto', 'metodo'],
+    },
+  },
+  {
+    name: 'enviar_mensaje_cliente',
+    description: 'Envía un mensaje de WhatsApp a un cliente específico. Usar cuando Cosaco pide mandar un mensaje a un cliente.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        cliente_id: { type: 'integer', description: 'ID del cliente' },
+        mensaje: { type: 'string', description: 'Texto del mensaje a enviar' },
+      },
+      required: ['cliente_id', 'mensaje'],
     },
   },
   {
@@ -507,6 +539,13 @@ async function ejecutarTool(nombre, input, remitente) {
         }
         return { ok: true, enviado_a_cosaco: true };
       }
+    }
+
+    if (nombre === 'enviar_mensaje_cliente') {
+      const rCliente = await fetch(`${GYM_API}/clientes/${input.cliente_id}`, { headers });
+      const cliente = await rCliente.json();
+      await enviarWhatsApp(cliente.telefono, input.mensaje);
+      return { ok: true, enviado_a: cliente.nombre };
     }
 
     if (nombre === 'consultar_beca_a_cosaco') {
