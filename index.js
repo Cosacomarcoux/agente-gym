@@ -132,7 +132,7 @@ Cuando alguien quiera registrar un pago o vos lo indiques:
 3. Usar la tool consultar_pago_a_cosaco (NO uses registrar_pago directamente)
 4. Responder al cliente: "✅ Pago enviado para confirmación. En breve queda registrado 🏑"
 IMPORTANTE: Nunca uses registrar_pago directamente desde una conversación con un cliente. Siempre pasá por consultar_pago_a_cosaco.
-Si el cliente no especificó fecha de pago, usá la fecha de hoy automáticamente (no la pidas).
+La fecha de pago se calcula automáticamente (no la pidas al cliente): si el cliente está Suspendido o no tiene fecha de vencimiento, se usa la fecha de hoy; si está Vigente, se usa su última fecha de vencimiento.
 
 CUANDO REGISTRES O ASIGNES TURNOS (cliente nuevo o existente):
 Al confirmar, siempre incluí un resumen de TODOS los turnos asignados actualmente. Usá get_turnos para obtener los nombres y horarios, y mostrá el mensaje así:
@@ -372,6 +372,9 @@ async function ejecutarTool(nombre, input, remitente) {
     if (nombre === 'registrar_pago') {
       const rCliente = await fetch(`${GYM_API}/clientes/${input.cliente_id}`, { headers });
       const cliente = await rCliente.json();
+      const hoy = new Date().toISOString().split('T')[0];
+      const fecha_pago = input.fecha_pago
+        || (cliente.estado === 'Suspendido' || !cliente.fecha_vencimiento ? hoy : cliente.fecha_vencimiento);
       const r = await fetch(`${GYM_API}/pagos`, {
         method: 'POST',
         headers,
@@ -379,7 +382,7 @@ async function ejecutarTool(nombre, input, remitente) {
           cliente_id: input.cliente_id,
           monto: input.monto,
           metodo: input.metodo || 'Transferencia',
-          fecha_pago: input.fecha_pago || new Date().toISOString().split('T')[0],
+          fecha_pago,
           plan: cliente.plan,
         }),
       });
@@ -387,7 +390,12 @@ async function ejecutarTool(nombre, input, remitente) {
     }
 
     if (nombre === 'consultar_pago_a_cosaco') {
-      const fecha_pago = new Date().toISOString().split('T')[0];
+      const rCliente = await fetch(`${GYM_API}/clientes/${input.cliente_id}`, { headers });
+      const cliente = await rCliente.json();
+      const hoy = new Date().toISOString().split('T')[0];
+      const fecha_pago = cliente.estado === 'Suspendido' || !cliente.fecha_vencimiento
+        ? hoy
+        : cliente.fecha_vencimiento;
       const nuevoPago = {
         cliente_id: input.cliente_id,
         cliente_nombre: input.cliente_nombre,
