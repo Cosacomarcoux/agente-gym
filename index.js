@@ -132,6 +132,7 @@ Cuando alguien quiera registrar un pago o vos lo indiques:
 3. Usar la tool consultar_pago_a_cosaco (NO uses registrar_pago directamente)
 4. Responder al cliente: "✅ Pago enviado para confirmación. En breve queda registrado 🏑"
 IMPORTANTE: Nunca uses registrar_pago directamente desde una conversación con un cliente. Siempre pasá por consultar_pago_a_cosaco.
+Si el cliente no especificó fecha de pago, usá la fecha de hoy automáticamente (no la pidas).
 
 CUANDO REGISTRES O ASIGNES TURNOS (cliente nuevo o existente):
 Al confirmar, siempre incluí un resumen de TODOS los turnos asignados actualmente. Usá get_turnos para obtener los nombres y horarios, y mostrá el mensaje así:
@@ -369,6 +370,8 @@ async function ejecutarTool(nombre, input, remitente) {
     }
 
     if (nombre === 'registrar_pago') {
+      const rCliente = await fetch(`${GYM_API}/clientes/${input.cliente_id}`, { headers });
+      const cliente = await rCliente.json();
       const r = await fetch(`${GYM_API}/pagos`, {
         method: 'POST',
         headers,
@@ -376,7 +379,8 @@ async function ejecutarTool(nombre, input, remitente) {
           cliente_id: input.cliente_id,
           monto: input.monto,
           metodo: input.metodo || 'Transferencia',
-          fecha_pago: input.fecha_pago,
+          fecha_pago: input.fecha_pago || new Date().toISOString().split('T')[0],
+          plan: cliente.plan,
         }),
       });
       return await r.json();
@@ -500,6 +504,8 @@ async function manejarConfirmacionPago(confirmado) {
         'Authorization': `Bearer ${GYM_TOKEN}`,
         'Content-Type': 'application/json',
       };
+      const rCliente = await fetch(`${GYM_API}/clientes/${pago.cliente_id}`, { headers });
+      const cliente = await rCliente.json();
       const r = await fetch(`${GYM_API}/pagos`, {
         method: 'POST',
         headers,
@@ -508,6 +514,7 @@ async function manejarConfirmacionPago(confirmado) {
           monto: pago.monto,
           metodo: pago.metodo,
           fecha_pago: pago.fecha_pago,
+          plan: cliente.plan,
         }),
       });
       const resultado = await r.json();
