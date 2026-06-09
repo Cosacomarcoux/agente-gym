@@ -25,6 +25,10 @@ const EXPIRACION_MS = 24 * 60 * 60 * 1000; // 24 horas
 let pagoEnEspera = null; // { cliente_id, cliente_nombre, cliente_from, monto, metodo, fecha_pago }
 const colaPagendientes = []; // cola FIFO de pagos
 
+// Suspensiones pendientes de confirmación por Cosaco
+const suspencionesPendientes = new Map();
+// clave: cliente_id como string, valor: { cliente_id, cliente_nombre, telefono, timestamp, esperandoConfirmacion }
+
 function limpiarConversacionesViejas() {
   const ahora = Date.now();
   for (const [key, val] of conversaciones) {
@@ -635,6 +639,38 @@ app.post('/webhook', (req, res) => {
     // Si no es SÍ/NO, procesar como mensaje normal de Cosaco
   }
 
+  // Detectar si es Cosaco respondiendo a una suspensión pendiente
+  if (remitente === process.env.COSACO_WHATSAPP) {
+    const suspensionEsperando = [...suspencionesPendientes.values()].find(s => s.esperandoConfirmacion);
+    if (suspensionEsperando) {
+      const respuesta = mensaje.trim().toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+      (async () => {
+        if (respuesta === 'SI' || respuesta === 'S') {
+          await fetch(`${GYM_API}/clientes/${suspensionEsperando.cliente_id}/suspender`, {
+            method: 'DELETE',
+            headers: { Authorization: `Bearer ${GYM_TOKEN}` }
+          });
+          console.log(`✅ Cliente ${suspensionEsperando.cliente_nombre} suspendido`);
+          await enviarWhatsApp(process.env.COSACO_WHATSAPP.replace('whatsapp:+54', ''),
+            `✅ Servicio de ${suspensionEsperando.cliente_nombre} suspendido correctamente.`);
+        } else {
+          await enviarWhatsApp(process.env.COSACO_WHATSAPP.replace('whatsapp:+54', ''),
+            `👍 Ok, ${suspensionEsperando.cliente_nombre} no fue suspendido.`);
+        }
+
+        // Limpiar y pasar al siguiente
+        suspencionesPendientes.delete(suspensionEsperando.cliente_id.toString());
+        const siguiente = [...suspencionesPendientes.values()].find(s => !s.esperandoConfirmacion);
+        if (siguiente) {
+          await enviarWhatsApp(process.env.COSACO_WHATSAPP.replace('whatsapp:+54', ''),
+            `⚠️ Siguiente: ${siguiente.cliente_nombre} lleva 10 días sin pagar. ¿Suspendo su servicio?\nRespondé SÍ o NO`);
+          suspencionesPendientes.set(siguiente.cliente_id.toString(), { ...siguiente, esperandoConfirmacion: true });
+        }
+      })().catch(err => console.error('Error manejando suspensión:', err));
+      return;
+    }
+  }
+
   // Procesar en background
   procesarMensaje(mensaje, remitente);
 });
@@ -736,6 +772,71 @@ cron.schedule('0 10 29 * *', async () => {
     const msg = `Hola ${nombre}! 👋\nTe extrañamos en Hockey Vivo Gym, y vimos que aún no se acreditó tu pago. ¿Fue un error, o necesitás ayuda con algo?\nSabés que contás con nosotros para lo que necesites.\nUn abrazo 🏑`;
     await enviarWhatsApp(c.telefono, msg);
   }
+});
+
+function programarSuspensiones(clientes) {
+  for (const c of clientes) {
+    suspencionesPendientes.set(c.id.toString(), {
+      cliente_id: c.id,
+      cliente_nombre: c.nombre,
+      telefono: c.telefono,
+      timestamp: Date.now()
+    });
+  }
+  setTimeout(async () => {
+    for (const [cliente_id, datos] of suspencionesPendientes.entries()) {
+      if (datos.esperandoConfirmacion) continue;
+      await enviarWhatsApp(process.env.COSACO_WHATSAPP.replace('whatsapp:+54', ''),
+        `⚠️ ${datos.cliente_nombre} lleva 10 días sin pagar. ¿Suspendo su servicio?\nRespondé SÍ o NO`);
+      suspencionesPendientes.set(cliente_id, { ...datos, esperandoConfirmacion: true });
+      break; // enviar de a uno
+    }
+  }, 60 * 60 * 1000); // 1 hora
+}
+
+// Día 15 → 10 días vencido grupo 5
+cron.schedule('0 10 15 * *', async () => {
+  console.log('🔔 Job: suspensión grupo 5');
+  const clientes = await clientesPorGrupo(5);
+  const morosos = [];
+  for (const c of clientes) {
+    if (c.dias_vencido < 1) continue;
+    const nombre = c.nombre.split(' ')[0];
+    const msg = `Hola ${nombre}.\nHan pasado 10 días desde el vencimiento de tu plan, y con mucha pena tendremos que liberar tu cupo en Hockey Vivo Gym.\nPero queremos que sepas que las puertas siempre están abiertas para vos, ¡te queremos de vuelta! Hablá con nosotros para buscar un nuevo turno que te quede cómodo.\n¡Te esperamos! 🏑`;
+    await enviarWhatsApp(c.telefono, msg);
+    morosos.push(c);
+  }
+  programarSuspensiones(morosos);
+});
+
+// Día 25 → 10 días vencido grupo 15
+cron.schedule('0 10 25 * *', async () => {
+  console.log('🔔 Job: suspensión grupo 15');
+  const clientes = await clientesPorGrupo(15);
+  const morosos = [];
+  for (const c of clientes) {
+    if (c.dias_vencido < 1) continue;
+    const nombre = c.nombre.split(' ')[0];
+    const msg = `Hola ${nombre}.\nHan pasado 10 días desde el vencimiento de tu plan, y con mucha pena tendremos que liberar tu cupo en Hockey Vivo Gym.\nPero queremos que sepas que las puertas siempre están abiertas para vos, ¡te queremos de vuelta! Hablá con nosotros para buscar un nuevo turno que te quede cómodo.\n¡Te esperamos! 🏑`;
+    await enviarWhatsApp(c.telefono, msg);
+    morosos.push(c);
+  }
+  programarSuspensiones(morosos);
+});
+
+// Día 5 → 10 días vencido grupo 25
+cron.schedule('0 10 5 * *', async () => {
+  console.log('🔔 Job: suspensión grupo 25');
+  const clientes = await clientesPorGrupo(25);
+  const morosos = [];
+  for (const c of clientes) {
+    if (c.dias_vencido < 1) continue;
+    const nombre = c.nombre.split(' ')[0];
+    const msg = `Hola ${nombre}.\nHan pasado 10 días desde el vencimiento de tu plan, y con mucha pena tendremos que liberar tu cupo en Hockey Vivo Gym.\nPero queremos que sepas que las puertas siempre están abiertas para vos, ¡te queremos de vuelta! Hablá con nosotros para buscar un nuevo turno que te quede cómodo.\n¡Te esperamos! 🏑`;
+    await enviarWhatsApp(c.telefono, msg);
+    morosos.push(c);
+  }
+  programarSuspensiones(morosos);
 });
 
 const PORT = process.env.PORT || 3000;
