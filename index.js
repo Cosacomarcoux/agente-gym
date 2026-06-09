@@ -82,6 +82,25 @@ async function loginConReintentos(intentos = 10, esperaInicial = 10000) {
   console.warn('No se pudo hacer login tras todos los intentos. Se reintentará en cada request.');
 }
 
+// Calcula la fecha de vencimiento: mes siguiente, checkpoint (5, 15 o 25)
+// más cercano por ceiling al día de pago.
+// Ej: día 2 → 5, día 9 → 15, día 20 → 25, día 27 → 25
+function calcularFechaVencimiento(fecha_pago) {
+  const fecha = new Date(fecha_pago + 'T00:00:00');
+  const dia = fecha.getDate();
+
+  let checkpointDia;
+  if (dia <= 5) checkpointDia = 5;
+  else if (dia <= 15) checkpointDia = 15;
+  else checkpointDia = 25;
+
+  let mesVenc = fecha.getMonth() + 1; // avanzar al mes siguiente (0-indexed)
+  let anioVenc = fecha.getFullYear();
+  if (mesVenc > 11) { mesVenc = 0; anioVenc++; }
+
+  return new Date(anioVenc, mesVenc, checkpointDia).toISOString().split('T')[0];
+}
+
 const SYSTEM_PROMPT = `Sos el asistente virtual del gimnasio Hockey Vivo en Santiago del Estero, Argentina. Atendés consultas de clientes y potenciales alumnos por WhatsApp. Respondés en español argentino, de forma amable y breve. Usá emojis con moderación.
 
 DATOS DEL GIMNASIO (usá solo cuando te pregunten puntualmente por esto):
@@ -383,6 +402,8 @@ async function ejecutarTool(nombre, input, remitente) {
           monto: input.monto,
           metodo: input.metodo || 'Transferencia',
           fecha_pago,
+          fecha_inicio: fecha_pago,
+          fecha_vencimiento: calcularFechaVencimiento(fecha_pago),
           plan: cliente.plan,
         }),
       });
@@ -522,6 +543,8 @@ async function manejarConfirmacionPago(confirmado) {
           monto: pago.monto,
           metodo: pago.metodo,
           fecha_pago: pago.fecha_pago,
+          fecha_inicio: pago.fecha_pago,
+          fecha_vencimiento: calcularFechaVencimiento(pago.fecha_pago),
           plan: cliente.plan,
         }),
       });
