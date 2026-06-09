@@ -2,6 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const twilio = require('twilio');
 const Anthropic = require('@anthropic-ai/sdk');
+const cron = require('node-cron');
 
 const app = express();
 app.use(express.urlencoded({ extended: true }));
@@ -636,6 +637,69 @@ app.post('/webhook', (req, res) => {
 
   // Procesar en background
   procesarMensaje(mensaje, remitente);
+});
+
+async function enviarWhatsApp(telefono, mensaje) {
+  try {
+    let tel = telefono.toString().replace(/\D/g, '');
+    if (tel.startsWith('549')) tel = tel.slice(2); // queda 9XXXXXXXXXX
+    if (tel.startsWith('54')) tel = tel.slice(2);  // queda XXXXXXXXXX
+    const to = `whatsapp:+54${tel}`;
+    await twilioClient.messages.create({ from: TWILIO_FROM, to, body: mensaje });
+    console.log(`✅ Mensaje enviado a ${to}`);
+  } catch (err) {
+    console.error(`❌ Error enviando a ${telefono}: ${err.message}`);
+  }
+}
+
+async function clientesPorGrupo(diaGrupo) {
+  try {
+    const r = await fetch(`${GYM_API}/vencimientos`, {
+      headers: { Authorization: `Bearer ${GYM_TOKEN}` }
+    });
+    const data = await r.json();
+    return data.filter(c => {
+      if (!c.fecha_vencimiento || c.estado !== 'Vigente') return false;
+      const dia = new Date(c.fecha_vencimiento + 'T12:00:00').getDate();
+      return dia === diaGrupo;
+    });
+  } catch (err) {
+    console.error('Error obteniendo clientes:', err.message);
+    return [];
+  }
+}
+
+// Día 4 → recordatorio grupo 5
+cron.schedule('0 10 4 * *', async () => {
+  console.log('🔔 Job: recordatorio grupo 5');
+  const clientes = await clientesPorGrupo(5);
+  for (const c of clientes) {
+    if (c.dias_vencido > 0) continue;
+    const msg = `Hola ${c.nombre.split(' ')[0]}! 👋 Te recordamos que mañana vence tu cuota de Hockey Vivo.\n💰 Monto: $${c.costo?.toLocaleString('es-AR') || 'consultar'}\nPara renovar, realizá tu transferencia o acercate al gimnasio.\n¡Gracias y nos vemos en el entrenamiento! 🏑`;
+    await enviarWhatsApp(c.telefono, msg);
+  }
+});
+
+// Día 14 → recordatorio grupo 15
+cron.schedule('0 10 14 * *', async () => {
+  console.log('🔔 Job: recordatorio grupo 15');
+  const clientes = await clientesPorGrupo(15);
+  for (const c of clientes) {
+    if (c.dias_vencido > 0) continue;
+    const msg = `Hola ${c.nombre.split(' ')[0]}! 👋 Te recordamos que mañana vence tu cuota de Hockey Vivo.\n💰 Monto: $${c.costo?.toLocaleString('es-AR') || 'consultar'}\nPara renovar, realizá tu transferencia o acercate al gimnasio.\n¡Gracias y nos vemos en el entrenamiento! 🏑`;
+    await enviarWhatsApp(c.telefono, msg);
+  }
+});
+
+// Día 24 → recordatorio grupo 25
+cron.schedule('0 10 24 * *', async () => {
+  console.log('🔔 Job: recordatorio grupo 25');
+  const clientes = await clientesPorGrupo(25);
+  for (const c of clientes) {
+    if (c.dias_vencido > 0) continue;
+    const msg = `Hola ${c.nombre.split(' ')[0]}! 👋 Te recordamos que mañana vence tu cuota de Hockey Vivo.\n💰 Monto: $${c.costo?.toLocaleString('es-AR') || 'consultar'}\nPara renovar, realizá tu transferencia o acercate al gimnasio.\n¡Gracias y nos vemos en el entrenamiento! 🏑`;
+    await enviarWhatsApp(c.telefono, msg);
+  }
 });
 
 const PORT = process.env.PORT || 3000;
