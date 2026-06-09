@@ -839,6 +839,37 @@ cron.schedule('0 10 5 * *', async () => {
   programarSuspensiones(morosos);
 });
 
+// Job cumpleaños — todos los días a las 9am
+cron.schedule('0 9 * * *', async () => {
+  console.log('🎂 Job: cumpleaños');
+  try {
+    const r = await fetch(`${GYM_API}/cumpleanos`, {
+      headers: { Authorization: `Bearer ${GYM_TOKEN}` }
+    });
+    const data = await r.json();
+
+    const hoy = new Date();
+    const diaHoy = hoy.getDate();
+    const mesHoy = hoy.getMonth() + 1;
+
+    const cumpleanosHoy = data.filter(c => {
+      if (!c.fecha_nacimiento) return false;
+      const fecha = new Date(c.fecha_nacimiento + 'T12:00:00');
+      return fecha.getDate() === diaHoy && (fecha.getMonth() + 1) === mesHoy;
+    });
+
+    for (const c of cumpleanosHoy) {
+      const nombre = c.nombre.split(' ')[0];
+      const msg = `¡Feliz cumpleaños ${nombre}! 🎉🎂\nTodo el equipo de Hockey Vivo te desea un día increíble.\n¡Que este año esté lleno de goles y alegrías! 🏑⚽`;
+      await enviarWhatsApp(c.telefono, msg);
+    }
+
+    console.log(`🎂 Cumpleaños enviados: ${cumpleanosHoy.length}`);
+  } catch (err) {
+    console.error('Error en job cumpleaños:', err.message);
+  }
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Servidor escuchando en puerto ${PORT}`);
