@@ -29,6 +29,10 @@ const colaPagendientes = []; // cola FIFO de pagos
 const suspencionesPendientes = new Map();
 // clave: cliente_id como string, valor: { cliente_id, cliente_nombre, telefono, timestamp, esperandoConfirmacion }
 
+// Becas pendientes de confirmación por Cosaco
+const becasPendientes = new Map();
+// clave: cliente_from (whatsapp del cliente), valor: { cliente_id, cliente_nombre, cliente_from, costo, plan, tipo_beca?, monto_final? }
+
 function limpiarConversacionesViejas() {
   const ahora = Date.now();
   for (const [key, val] of conversaciones) {
@@ -189,6 +193,12 @@ Si querés cambiar o agregar algún día, avisame acá mismo. ¡Te esperamos en 
 
 Siempre mostrá día y horario de cada turno, nunca solo el ID.
 
+CUANDO UN CLIENTE MENCIONE QUE TIENE BECA O DESCUENTO:
+1. Respondele: "Perfecto, dejame confirmarlo con el equipo y te avisamos en breve 🏑"
+2. Usá get_clientes para obtener el ID y datos del cliente
+3. Usá la tool consultar_beca_a_cosaco para notificar a Cosaco
+No uses registrar_pago hasta que la beca esté confirmada y el cliente avise que pagó.
+
 SI NO PODÉS RESOLVER ALGO:
 Decí: "Te paso con el equipo de Hockey Vivo, en breve te contactamos 🏑"`;
 
@@ -271,6 +281,20 @@ const TOOLS = [
         metodo: { type: 'string', description: 'Método de pago (Efectivo, Transferencia)' },
       },
       required: ['cliente_id', 'cliente_nombre', 'monto', 'metodo'],
+    },
+  },
+  {
+    name: 'consultar_beca_a_cosaco',
+    description: 'Notifica a Cosaco que un cliente dice tener beca o descuento, para que confirme el tipo. Usá esta tool cuando un cliente mencione que tiene beca.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        cliente_id: { type: 'integer', description: 'ID del cliente' },
+        cliente_nombre: { type: 'string', description: 'Nombre completo del cliente' },
+        costo: { type: 'number', description: 'Costo mensual del plan del cliente' },
+        plan: { type: 'integer', description: 'Número de plan del cliente' },
+      },
+      required: ['cliente_id', 'cliente_nombre', 'costo', 'plan'],
     },
   },
 ];
@@ -417,12 +441,15 @@ async function ejecutarTool(nombre, input, remitente) {
       const hoy = new Date().toISOString().split('T')[0];
       const fecha_pago = input.fecha_pago
         || (cliente.estado === 'Suspendido' || !cliente.fecha_vencimiento ? hoy : cliente.fecha_vencimiento);
+      // Si hay beca confirmada para este cliente, usar el monto_final
+      const becaCliente = becasPendientes.get(remitente);
+      const monto = (becaCliente?.monto_final !== undefined) ? becaCliente.monto_final : input.monto;
       const r = await fetch(`${GYM_API}/pagos`, {
         method: 'POST',
         headers,
         body: JSON.stringify({
           cliente_id: input.cliente_id,
-          monto: input.monto,
+          monto,
           metodo: input.metodo || 'Transferencia',
           fecha_pago,
           fecha_inicio: fecha_pago,
@@ -430,7 +457,10 @@ async function ejecutarTool(nombre, input, remitente) {
           plan: cliente.plan,
         }),
       });
-      return await r.json();
+      const resultado = await r.json();
+      // Limpiar beca pendiente una vez registrado el pago
+      if (becaCliente) becasPendientes.delete(remitente);
+      return resultado;
     }
 
     if (nombre === 'consultar_pago_a_cosaco') {
@@ -477,6 +507,23 @@ async function ejecutarTool(nombre, input, remitente) {
         }
         return { ok: true, enviado_a_cosaco: true };
       }
+    }
+
+    if (nombre === 'consultar_beca_a_cosaco') {
+      becasPendientes.set(remitente, {
+        cliente_id: input.cliente_id,
+        cliente_nombre: input.cliente_nombre,
+        cliente_from: remitente,
+        costo: input.costo,
+        plan: input.plan,
+      });
+      await twilioClient.messages.create({
+        from: TWILIO_FROM,
+        to: process.env.COSACO_WHATSAPP,
+        body: `⚠️ ${input.cliente_nombre} dice que tiene beca.\n¿Qué tipo le corresponde?\nRespondé: SIN BECA, 50% o 100%`,
+      });
+      console.log(`Consulta de beca enviada a Cosaco para ${input.cliente_nombre}`);
+      return { ok: true };
     }
 
     return { error: `Tool desconocida: ${nombre}` };
@@ -668,6 +715,49 @@ app.post('/webhook', (req, res) => {
         }
       })().catch(err => console.error('Error manejando suspensión:', err));
       return;
+    }
+  }
+
+  // Detectar si es Cosaco respondiendo a una consulta de beca
+  if (remitente === process.env.COSACO_WHATSAPP && becasPendientes.size > 0) {
+    const respuestaNorm = mensaje.trim().toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    const esBeca = respuestaNorm === 'SIN BECA' || respuestaNorm === '50%' || respuestaNorm === '100%';
+    if (esBeca) {
+      // Tomar la primera beca pendiente sin tipo confirmado
+      const becaEntry = [...becasPendientes.entries()].find(([, b]) => !b.tipo_beca);
+      if (becaEntry) {
+        const [clienteFrom, beca] = becaEntry;
+        (async () => {
+          let monto;
+          let tipoBeca;
+          if (respuestaNorm === 'SIN BECA') {
+            monto = beca.costo;
+            tipoBeca = 'SIN BECA';
+          } else if (respuestaNorm === '50%') {
+            monto = Math.round(beca.costo / 2);
+            tipoBeca = '50%';
+          } else {
+            monto = 0;
+            tipoBeca = '100%';
+          }
+
+          // Actualizar becasPendientes con tipo y monto confirmado
+          becasPendientes.set(clienteFrom, { ...beca, tipo_beca: tipoBeca, monto_final: monto });
+
+          // Notificar al cliente
+          const msgCliente = tipoBeca === 'SIN BECA'
+            ? `✅ Confirmado ${beca.cliente_nombre.split(' ')[0]}! No tenés beca asignada.\nTu cuota este mes es $${monto.toLocaleString('es-AR')}.\n¿Ya realizaste el pago? Si es así, avisanos para registrarlo 🏑`
+            : `✅ Confirmado ${beca.cliente_nombre.split(' ')[0]}! Tu beca es del ${tipoBeca}.\nTu cuota este mes es $${monto.toLocaleString('es-AR')}.\n¿Ya realizaste el pago? Si es así, avisanos para registrarlo 🏑`;
+          await twilioClient.messages.create({ from: TWILIO_FROM, to: clienteFrom, body: msgCliente });
+
+          // Notificar a Cosaco
+          await enviarWhatsApp(process.env.COSACO_WHATSAPP.replace('whatsapp:+54', ''),
+            `✅ Beca confirmada. Le avisé a ${beca.cliente_nombre} que su cuota es $${monto.toLocaleString('es-AR')}`);
+
+          console.log(`Beca ${tipoBeca} confirmada para ${beca.cliente_nombre}, monto: $${monto}`);
+        })().catch(err => console.error('Error manejando beca:', err));
+        return;
+      }
     }
   }
 
