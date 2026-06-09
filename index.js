@@ -722,11 +722,11 @@ app.get('/test-jobs', async (req, res) => {
     let msg;
 
     if (job === 'recordatorio') {
-      msg = `Hola ${nombre}! 👋 Te recordamos que mañana vence tu cuota de Hockey Vivo.\n💰 Monto: $${c.costo?.toLocaleString('es-AR') || 'consultar'}\nPara renovar, realizá tu transferencia o acercate al gimnasio.\n¡Gracias y nos vemos en el entrenamiento! 🏑`;
+      msg = `Hola ${nombre}! 👋 Mañana vence tu plan en Hockey Vivo Gym.\n\nCada entrenamiento que hacés es un paso que te acerca a la mejor versión de tu juego. Ese trabajo no se detiene — y nosotros tampoco.\n\nPara seguir, estos son los planes:\n🏑 3 veces por semana: $39.000\n🏑 2 veces por semana: $35.000\n🏑 1 vez por semana: $29.000\n\nTransferí al alias: hockeyvivo\n\nConfirmando el pago, tu lugar queda asegurado y el proceso continúa. 💪`;
     } else if (job === 'mora') {
-      msg = `Hola ${nombre}! 👋\nTe extrañamos en Hockey Vivo Gym, y vimos que aún no se acreditó tu pago. ¿Fue un error, o necesitás ayuda con algo?\nSabés que contás con nosotros para lo que necesites.\nUn abrazo 🏑`;
+      msg = `Hola ${nombre}! 👋 Te extrañamos en Hockey Vivo Gym y vimos que todavía no se acreditó tu pago. ¿Fue un error o necesitás ayuda con algo? Sabés que siempre podés contar con nosotros. Un abrazo! 🏑`;
     } else if (job === 'suspension') {
-      msg = `Hola ${nombre}.\nHan pasado 10 días desde el vencimiento de tu plan, y con mucha pena tendremos que liberar tu cupo en Hockey Vivo Gym.\nPero queremos que sepas que las puertas siempre están abiertas para vos, ¡te queremos de vuelta! Hablá con nosotros para buscar un nuevo turno que te quede cómodo.\n¡Te esperamos! 🏑`;
+      msg = `Hola ${nombre}. Han pasado 10 días desde que venció tu plan y con mucha pena vamos a tener que liberar tu cupo en Hockey Vivo Gym. Pero las puertas siempre están abiertas para vos — ¡te queremos de vuelta! Cuando quieras volver, hablanos y buscamos el turno que mejor te quede. ¡Te esperamos! 🏑`;
     } else if (job === 'cumpleanos') {
       msg = `¡Feliz cumpleaños ${nombre}! 🎉🎂\nTodo el equipo de Hockey Vivo te desea un día increíble.\n¡Que este año esté lleno de goles y alegrías! 🏑⚽`;
     } else {
@@ -881,7 +881,7 @@ cron.schedule('0 10 4 * *', async () => {
   const clientes = await clientesPorGrupo(5);
   for (const c of clientes) {
     if (c.dias_vencido > 0) continue;
-    const msg = `Hola ${c.nombre.split(' ')[0]}! 👋 Te recordamos que mañana vence tu cuota de Hockey Vivo.\n💰 Monto: $${c.costo?.toLocaleString('es-AR') || 'consultar'}\nPara renovar, realizá tu transferencia o acercate al gimnasio.\n¡Gracias y nos vemos en el entrenamiento! 🏑`;
+    const msg = `Hola ${c.nombre.split(' ')[0]}! 👋 Mañana vence tu plan en Hockey Vivo Gym.\n\nCada entrenamiento que hacés es un paso que te acerca a la mejor versión de tu juego. Ese trabajo no se detiene — y nosotros tampoco.\n\nPara seguir, estos son los planes:\n🏑 3 veces por semana: $39.000\n🏑 2 veces por semana: $35.000\n🏑 1 vez por semana: $29.000\n\nTransferí al alias: hockeyvivo\n\nConfirmando el pago, tu lugar queda asegurado y el proceso continúa. 💪`;
     await enviarWhatsApp(c.telefono, msg);
   }
 });
@@ -892,7 +892,7 @@ cron.schedule('0 10 14 * *', async () => {
   const clientes = await clientesPorGrupo(15);
   for (const c of clientes) {
     if (c.dias_vencido > 0) continue;
-    const msg = `Hola ${c.nombre.split(' ')[0]}! 👋 Te recordamos que mañana vence tu cuota de Hockey Vivo.\n💰 Monto: $${c.costo?.toLocaleString('es-AR') || 'consultar'}\nPara renovar, realizá tu transferencia o acercate al gimnasio.\n¡Gracias y nos vemos en el entrenamiento! 🏑`;
+    const msg = `Hola ${c.nombre.split(' ')[0]}! 👋 Mañana vence tu plan en Hockey Vivo Gym.\n\nCada entrenamiento que hacés es un paso que te acerca a la mejor versión de tu juego. Ese trabajo no se detiene — y nosotros tampoco.\n\nPara seguir, estos son los planes:\n🏑 3 veces por semana: $39.000\n🏑 2 veces por semana: $35.000\n🏑 1 vez por semana: $29.000\n\nTransferí al alias: hockeyvivo\n\nConfirmando el pago, tu lugar queda asegurado y el proceso continúa. 💪`;
     await enviarWhatsApp(c.telefono, msg);
   }
 });
@@ -903,7 +903,7 @@ cron.schedule('0 10 24 * *', async () => {
   const clientes = await clientesPorGrupo(25);
   for (const c of clientes) {
     if (c.dias_vencido > 0) continue;
-    const msg = `Hola ${c.nombre.split(' ')[0]}! 👋 Te recordamos que mañana vence tu cuota de Hockey Vivo.\n💰 Monto: $${c.costo?.toLocaleString('es-AR') || 'consultar'}\nPara renovar, realizá tu transferencia o acercate al gimnasio.\n¡Gracias y nos vemos en el entrenamiento! 🏑`;
+    const msg = `Hola ${c.nombre.split(' ')[0]}! 👋 Mañana vence tu plan en Hockey Vivo Gym.\n\nCada entrenamiento que hacés es un paso que te acerca a la mejor versión de tu juego. Ese trabajo no se detiene — y nosotros tampoco.\n\nPara seguir, estos son los planes:\n🏑 3 veces por semana: $39.000\n🏑 2 veces por semana: $35.000\n🏑 1 vez por semana: $29.000\n\nTransferí al alias: hockeyvivo\n\nConfirmando el pago, tu lugar queda asegurado y el proceso continúa. 💪`;
     await enviarWhatsApp(c.telefono, msg);
   }
 });
@@ -915,7 +915,7 @@ cron.schedule('0 10 9 * *', async () => {
   for (const c of clientes) {
     if (c.dias_vencido < 1) continue;
     const nombre = c.nombre.split(' ')[0];
-    const msg = `Hola ${nombre}! 👋\nTe extrañamos en Hockey Vivo Gym, y vimos que aún no se acreditó tu pago. ¿Fue un error, o necesitás ayuda con algo?\nSabés que contás con nosotros para lo que necesites.\nUn abrazo 🏑`;
+    const msg = `Hola ${nombre}! 👋 Te extrañamos en Hockey Vivo Gym y vimos que todavía no se acreditó tu pago. ¿Fue un error o necesitás ayuda con algo? Sabés que siempre podés contar con nosotros. Un abrazo! 🏑`;
     await enviarWhatsApp(c.telefono, msg);
   }
 });
@@ -927,7 +927,7 @@ cron.schedule('0 10 19 * *', async () => {
   for (const c of clientes) {
     if (c.dias_vencido < 1) continue;
     const nombre = c.nombre.split(' ')[0];
-    const msg = `Hola ${nombre}! 👋\nTe extrañamos en Hockey Vivo Gym, y vimos que aún no se acreditó tu pago. ¿Fue un error, o necesitás ayuda con algo?\nSabés que contás con nosotros para lo que necesites.\nUn abrazo 🏑`;
+    const msg = `Hola ${nombre}! 👋 Te extrañamos en Hockey Vivo Gym y vimos que todavía no se acreditó tu pago. ¿Fue un error o necesitás ayuda con algo? Sabés que siempre podés contar con nosotros. Un abrazo! 🏑`;
     await enviarWhatsApp(c.telefono, msg);
   }
 });
@@ -939,7 +939,7 @@ cron.schedule('0 10 29 * *', async () => {
   for (const c of clientes) {
     if (c.dias_vencido < 1) continue;
     const nombre = c.nombre.split(' ')[0];
-    const msg = `Hola ${nombre}! 👋\nTe extrañamos en Hockey Vivo Gym, y vimos que aún no se acreditó tu pago. ¿Fue un error, o necesitás ayuda con algo?\nSabés que contás con nosotros para lo que necesites.\nUn abrazo 🏑`;
+    const msg = `Hola ${nombre}! 👋 Te extrañamos en Hockey Vivo Gym y vimos que todavía no se acreditó tu pago. ¿Fue un error o necesitás ayuda con algo? Sabés que siempre podés contar con nosotros. Un abrazo! 🏑`;
     await enviarWhatsApp(c.telefono, msg);
   }
 });
@@ -972,7 +972,7 @@ cron.schedule('0 10 15 * *', async () => {
   for (const c of clientes) {
     if (c.dias_vencido < 1) continue;
     const nombre = c.nombre.split(' ')[0];
-    const msg = `Hola ${nombre}.\nHan pasado 10 días desde el vencimiento de tu plan, y con mucha pena tendremos que liberar tu cupo en Hockey Vivo Gym.\nPero queremos que sepas que las puertas siempre están abiertas para vos, ¡te queremos de vuelta! Hablá con nosotros para buscar un nuevo turno que te quede cómodo.\n¡Te esperamos! 🏑`;
+    const msg = `Hola ${nombre}. Han pasado 10 días desde que venció tu plan y con mucha pena vamos a tener que liberar tu cupo en Hockey Vivo Gym. Pero las puertas siempre están abiertas para vos — ¡te queremos de vuelta! Cuando quieras volver, hablanos y buscamos el turno que mejor te quede. ¡Te esperamos! 🏑`;
     await enviarWhatsApp(c.telefono, msg);
     morosos.push(c);
   }
@@ -987,7 +987,7 @@ cron.schedule('0 10 25 * *', async () => {
   for (const c of clientes) {
     if (c.dias_vencido < 1) continue;
     const nombre = c.nombre.split(' ')[0];
-    const msg = `Hola ${nombre}.\nHan pasado 10 días desde el vencimiento de tu plan, y con mucha pena tendremos que liberar tu cupo en Hockey Vivo Gym.\nPero queremos que sepas que las puertas siempre están abiertas para vos, ¡te queremos de vuelta! Hablá con nosotros para buscar un nuevo turno que te quede cómodo.\n¡Te esperamos! 🏑`;
+    const msg = `Hola ${nombre}. Han pasado 10 días desde que venció tu plan y con mucha pena vamos a tener que liberar tu cupo en Hockey Vivo Gym. Pero las puertas siempre están abiertas para vos — ¡te queremos de vuelta! Cuando quieras volver, hablanos y buscamos el turno que mejor te quede. ¡Te esperamos! 🏑`;
     await enviarWhatsApp(c.telefono, msg);
     morosos.push(c);
   }
@@ -1002,7 +1002,7 @@ cron.schedule('0 10 5 * *', async () => {
   for (const c of clientes) {
     if (c.dias_vencido < 1) continue;
     const nombre = c.nombre.split(' ')[0];
-    const msg = `Hola ${nombre}.\nHan pasado 10 días desde el vencimiento de tu plan, y con mucha pena tendremos que liberar tu cupo en Hockey Vivo Gym.\nPero queremos que sepas que las puertas siempre están abiertas para vos, ¡te queremos de vuelta! Hablá con nosotros para buscar un nuevo turno que te quede cómodo.\n¡Te esperamos! 🏑`;
+    const msg = `Hola ${nombre}. Han pasado 10 días desde que venció tu plan y con mucha pena vamos a tener que liberar tu cupo en Hockey Vivo Gym. Pero las puertas siempre están abiertas para vos — ¡te queremos de vuelta! Cuando quieras volver, hablanos y buscamos el turno que mejor te quede. ¡Te esperamos! 🏑`;
     await enviarWhatsApp(c.telefono, msg);
     morosos.push(c);
   }
