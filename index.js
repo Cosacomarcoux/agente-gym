@@ -719,23 +719,23 @@ app.get('/test-jobs', async (req, res) => {
     if (!c) return res.status(404).json({ error: 'Cliente Roberto Marcoux no encontrado' });
 
     const nombre = c.nombre.split(' ')[0];
-    let msg;
+    let templateSid;
 
     if (job === 'recordatorio') {
-      msg = `Hola ${nombre}! 👋 Mañana vence tu plan en Hockey Vivo Gym.\n\nCada entrenamiento que hacés es un paso que te acerca a la mejor versión de tu juego. Ese trabajo no se detiene — y nosotros tampoco.\n\nPara seguir, estos son los planes:\n🏑 3 veces por semana: $39.000\n🏑 2 veces por semana: $35.000\n🏑 1 vez por semana: $29.000\n\nTransferí al alias: hockeyvivo\n\nConfirmando el pago, tu lugar queda asegurado y el proceso continúa. 💪`;
+      templateSid = process.env.TEMPLATE_RECORDATORIO;
     } else if (job === 'mora') {
-      msg = `Hola ${nombre}! 👋 Te extrañamos en Hockey Vivo Gym y vimos que todavía no se acreditó tu pago. ¿Fue un error o necesitás ayuda con algo? Sabés que siempre podés contar con nosotros. Un abrazo! 🏑`;
+      templateSid = process.env.TEMPLATE_MORA;
     } else if (job === 'suspension') {
-      msg = `Hola ${nombre}. Han pasado 10 días desde que venció tu plan y con mucha pena vamos a tener que liberar tu cupo en Hockey Vivo Gym. Pero las puertas siempre están abiertas para vos — ¡te queremos de vuelta! Cuando quieras volver, hablanos y buscamos el turno que mejor te quede. ¡Te esperamos! 🏑`;
+      templateSid = process.env.TEMPLATE_SUSPENSION;
     } else if (job === 'cumpleanos') {
-      msg = `¡Feliz cumpleaños ${nombre}! 🎉🎂\nTodo el equipo de Hockey Vivo te desea un día increíble.\n¡Que este año esté lleno de goles y alegrías! 🏑⚽`;
+      templateSid = process.env.TEMPLATE_CUMPLEANOS;
     } else {
       return res.status(400).json({ error: `Job desconocido: ${job}` });
     }
 
-    await enviarWhatsApp(c.telefono, msg);
+    await enviarTemplate(c.telefono, templateSid, { "1": nombre });
     console.log(`[test-jobs] Job "${job}" ejecutado para ${c.nombre}`);
-    res.json({ ok: true, job, cliente: c.nombre, telefono: c.telefono, mensaje: msg });
+    res.json({ ok: true, job, cliente: c.nombre, telefono: c.telefono, template: templateSid });
   } catch (err) {
     console.error('[test-jobs] Error:', err.message);
     res.status(500).json({ error: err.message });
@@ -858,6 +858,25 @@ async function enviarWhatsApp(telefono, mensaje) {
   }
 }
 
+async function enviarTemplate(telefono, templateNombre, variables) {
+  try {
+    let tel = telefono.toString().replace(/\D/g, '');
+    if (tel.startsWith('549')) tel = tel.slice(2);
+    if (tel.startsWith('54')) tel = tel.slice(2);
+    const to = `whatsapp:+54${tel}`;
+
+    await twilioClient.messages.create({
+      from: process.env.TWILIO_WHATSAPP_NUMBER,
+      to,
+      contentSid: templateNombre,
+      contentVariables: JSON.stringify(variables)
+    });
+    console.log(`✅ Template enviado a ${to}`);
+  } catch (err) {
+    console.error(`❌ Error enviando template a ${telefono}: ${err.message}`);
+  }
+}
+
 async function clientesPorGrupo(diaGrupo) {
   try {
     const r = await fetch(`${GYM_API}/vencimientos`, {
@@ -881,8 +900,7 @@ cron.schedule('0 10 4 * *', async () => {
   const clientes = await clientesPorGrupo(5);
   for (const c of clientes) {
     if (c.dias_vencido > 0) continue;
-    const msg = `Hola ${c.nombre.split(' ')[0]}! 👋 Mañana vence tu plan en Hockey Vivo Gym.\n\nCada entrenamiento que hacés es un paso que te acerca a la mejor versión de tu juego. Ese trabajo no se detiene — y nosotros tampoco.\n\nPara seguir, estos son los planes:\n🏑 3 veces por semana: $39.000\n🏑 2 veces por semana: $35.000\n🏑 1 vez por semana: $29.000\n\nTransferí al alias: hockeyvivo\n\nConfirmando el pago, tu lugar queda asegurado y el proceso continúa. 💪`;
-    await enviarWhatsApp(c.telefono, msg);
+    await enviarTemplate(c.telefono, process.env.TEMPLATE_RECORDATORIO, { "1": c.nombre.split(' ')[0] });
   }
 });
 
@@ -892,8 +910,7 @@ cron.schedule('0 10 14 * *', async () => {
   const clientes = await clientesPorGrupo(15);
   for (const c of clientes) {
     if (c.dias_vencido > 0) continue;
-    const msg = `Hola ${c.nombre.split(' ')[0]}! 👋 Mañana vence tu plan en Hockey Vivo Gym.\n\nCada entrenamiento que hacés es un paso que te acerca a la mejor versión de tu juego. Ese trabajo no se detiene — y nosotros tampoco.\n\nPara seguir, estos son los planes:\n🏑 3 veces por semana: $39.000\n🏑 2 veces por semana: $35.000\n🏑 1 vez por semana: $29.000\n\nTransferí al alias: hockeyvivo\n\nConfirmando el pago, tu lugar queda asegurado y el proceso continúa. 💪`;
-    await enviarWhatsApp(c.telefono, msg);
+    await enviarTemplate(c.telefono, process.env.TEMPLATE_RECORDATORIO, { "1": c.nombre.split(' ')[0] });
   }
 });
 
@@ -903,8 +920,7 @@ cron.schedule('0 10 24 * *', async () => {
   const clientes = await clientesPorGrupo(25);
   for (const c of clientes) {
     if (c.dias_vencido > 0) continue;
-    const msg = `Hola ${c.nombre.split(' ')[0]}! 👋 Mañana vence tu plan en Hockey Vivo Gym.\n\nCada entrenamiento que hacés es un paso que te acerca a la mejor versión de tu juego. Ese trabajo no se detiene — y nosotros tampoco.\n\nPara seguir, estos son los planes:\n🏑 3 veces por semana: $39.000\n🏑 2 veces por semana: $35.000\n🏑 1 vez por semana: $29.000\n\nTransferí al alias: hockeyvivo\n\nConfirmando el pago, tu lugar queda asegurado y el proceso continúa. 💪`;
-    await enviarWhatsApp(c.telefono, msg);
+    await enviarTemplate(c.telefono, process.env.TEMPLATE_RECORDATORIO, { "1": c.nombre.split(' ')[0] });
   }
 });
 
@@ -914,9 +930,7 @@ cron.schedule('0 10 9 * *', async () => {
   const clientes = await clientesPorGrupo(5);
   for (const c of clientes) {
     if (c.dias_vencido < 1) continue;
-    const nombre = c.nombre.split(' ')[0];
-    const msg = `Hola ${nombre}! 👋 Te extrañamos en Hockey Vivo Gym y vimos que todavía no se acreditó tu pago. ¿Fue un error o necesitás ayuda con algo? Sabés que siempre podés contar con nosotros. Un abrazo! 🏑`;
-    await enviarWhatsApp(c.telefono, msg);
+    await enviarTemplate(c.telefono, process.env.TEMPLATE_MORA, { "1": c.nombre.split(' ')[0] });
   }
 });
 
@@ -926,9 +940,7 @@ cron.schedule('0 10 19 * *', async () => {
   const clientes = await clientesPorGrupo(15);
   for (const c of clientes) {
     if (c.dias_vencido < 1) continue;
-    const nombre = c.nombre.split(' ')[0];
-    const msg = `Hola ${nombre}! 👋 Te extrañamos en Hockey Vivo Gym y vimos que todavía no se acreditó tu pago. ¿Fue un error o necesitás ayuda con algo? Sabés que siempre podés contar con nosotros. Un abrazo! 🏑`;
-    await enviarWhatsApp(c.telefono, msg);
+    await enviarTemplate(c.telefono, process.env.TEMPLATE_MORA, { "1": c.nombre.split(' ')[0] });
   }
 });
 
@@ -938,9 +950,7 @@ cron.schedule('0 10 29 * *', async () => {
   const clientes = await clientesPorGrupo(25);
   for (const c of clientes) {
     if (c.dias_vencido < 1) continue;
-    const nombre = c.nombre.split(' ')[0];
-    const msg = `Hola ${nombre}! 👋 Te extrañamos en Hockey Vivo Gym y vimos que todavía no se acreditó tu pago. ¿Fue un error o necesitás ayuda con algo? Sabés que siempre podés contar con nosotros. Un abrazo! 🏑`;
-    await enviarWhatsApp(c.telefono, msg);
+    await enviarTemplate(c.telefono, process.env.TEMPLATE_MORA, { "1": c.nombre.split(' ')[0] });
   }
 });
 
@@ -971,9 +981,7 @@ cron.schedule('0 10 15 * *', async () => {
   const morosos = [];
   for (const c of clientes) {
     if (c.dias_vencido < 1) continue;
-    const nombre = c.nombre.split(' ')[0];
-    const msg = `Hola ${nombre}. Han pasado 10 días desde que venció tu plan y con mucha pena vamos a tener que liberar tu cupo en Hockey Vivo Gym. Pero las puertas siempre están abiertas para vos — ¡te queremos de vuelta! Cuando quieras volver, hablanos y buscamos el turno que mejor te quede. ¡Te esperamos! 🏑`;
-    await enviarWhatsApp(c.telefono, msg);
+    await enviarTemplate(c.telefono, process.env.TEMPLATE_SUSPENSION, { "1": c.nombre.split(' ')[0] });
     morosos.push(c);
   }
   programarSuspensiones(morosos);
@@ -986,9 +994,7 @@ cron.schedule('0 10 25 * *', async () => {
   const morosos = [];
   for (const c of clientes) {
     if (c.dias_vencido < 1) continue;
-    const nombre = c.nombre.split(' ')[0];
-    const msg = `Hola ${nombre}. Han pasado 10 días desde que venció tu plan y con mucha pena vamos a tener que liberar tu cupo en Hockey Vivo Gym. Pero las puertas siempre están abiertas para vos — ¡te queremos de vuelta! Cuando quieras volver, hablanos y buscamos el turno que mejor te quede. ¡Te esperamos! 🏑`;
-    await enviarWhatsApp(c.telefono, msg);
+    await enviarTemplate(c.telefono, process.env.TEMPLATE_SUSPENSION, { "1": c.nombre.split(' ')[0] });
     morosos.push(c);
   }
   programarSuspensiones(morosos);
@@ -1001,9 +1007,7 @@ cron.schedule('0 10 5 * *', async () => {
   const morosos = [];
   for (const c of clientes) {
     if (c.dias_vencido < 1) continue;
-    const nombre = c.nombre.split(' ')[0];
-    const msg = `Hola ${nombre}. Han pasado 10 días desde que venció tu plan y con mucha pena vamos a tener que liberar tu cupo en Hockey Vivo Gym. Pero las puertas siempre están abiertas para vos — ¡te queremos de vuelta! Cuando quieras volver, hablanos y buscamos el turno que mejor te quede. ¡Te esperamos! 🏑`;
-    await enviarWhatsApp(c.telefono, msg);
+    await enviarTemplate(c.telefono, process.env.TEMPLATE_SUSPENSION, { "1": c.nombre.split(' ')[0] });
     morosos.push(c);
   }
   programarSuspensiones(morosos);
@@ -1029,9 +1033,7 @@ cron.schedule('0 9 * * *', async () => {
     });
 
     for (const c of cumpleanosHoy) {
-      const nombre = c.nombre.split(' ')[0];
-      const msg = `¡Feliz cumpleaños ${nombre}! 🎉🎂\nTodo el equipo de Hockey Vivo te desea un día increíble.\n¡Que este año esté lleno de goles y alegrías! 🏑⚽`;
-      await enviarWhatsApp(c.telefono, msg);
+      await enviarTemplate(c.telefono, process.env.TEMPLATE_CUMPLEANOS, { "1": c.nombre.split(' ')[0] });
     }
 
     console.log(`🎂 Cumpleaños enviados: ${cumpleanosHoy.length}`);
