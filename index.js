@@ -219,6 +219,12 @@ Cosaco puede pedirte registrar clientes, cambiar turnos, consultar deudores, ver
 
 Siempre respondé a Cosaco de forma concisa y confirmando lo que hiciste.
 
+CUANDO COSACO PIDA SUSPENDER A UN CLIENTE (ejemplo: "suspendé a Romina" o "dá de baja a María"):
+1. Buscá al cliente con get_clientes
+2. Confirmale a Cosaco: "¿Confirmás que querés suspender a [nombre]? Respondé SÍ o NO"
+3. Si Cosaco confirma con SÍ, usá suspender_cliente para suspenderlo
+4. Confirmale: "✅ [nombre] fue suspendido correctamente"
+
 SI NO PODÉS RESOLVER ALGO:
 Decí: "Te paso con el equipo de Hockey Vivo, en breve te contactamos 🏑"`;
 
@@ -327,6 +333,18 @@ const TOOLS = [
         plan: { type: 'integer', description: 'Número de plan del cliente' },
       },
       required: ['cliente_id', 'cliente_nombre', 'costo', 'plan'],
+    },
+  },
+  {
+    name: 'suspender_cliente',
+    description: 'Suspende el servicio de un cliente. Usar solo cuando Cosaco confirme explícitamente que quiere suspender al cliente.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        cliente_id: { type: 'integer', description: 'ID del cliente a suspender' },
+        cliente_nombre: { type: 'string', description: 'Nombre completo del cliente' },
+      },
+      required: ['cliente_id', 'cliente_nombre'],
     },
   },
 ];
@@ -546,6 +564,15 @@ async function ejecutarTool(nombre, input, remitente) {
       const cliente = await rCliente.json();
       await enviarWhatsApp(cliente.telefono, input.mensaje);
       return { ok: true, enviado_a: cliente.nombre };
+    }
+
+    if (nombre === 'suspender_cliente') {
+      const r = await fetch(`${GYM_API}/clientes/${input.cliente_id}/suspender`, {
+        method: 'DELETE',
+        headers,
+      });
+      if (!r.ok) return { error: `Error suspendiendo cliente: ${await r.text()}` };
+      return { ok: true, nombre: input.cliente_nombre };
     }
 
     if (nombre === 'consultar_beca_a_cosaco') {
