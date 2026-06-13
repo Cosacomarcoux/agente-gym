@@ -906,7 +906,7 @@ async function enviarWhatsApp(telefono, mensaje) {
   }
 }
 
-async function enviarTemplate(telefono, templateNombre, variables) {
+async function enviarTemplate(telefono, templateSid, variables) {
   try {
     let tel = telefono.toString().replace(/\D/g, '');
     if (tel.startsWith('549')) tel = tel.slice(2);
@@ -916,7 +916,7 @@ async function enviarTemplate(telefono, templateNombre, variables) {
     await twilioClient.messages.create({
       from: process.env.TWILIO_WHATSAPP_NUMBER,
       to,
-      contentSid: templateNombre,
+      contentSid: templateSid,
       contentVariables: JSON.stringify(variables)
     });
     console.log(`✅ Template enviado a ${to}`);
