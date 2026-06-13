@@ -795,6 +795,36 @@ app.get('/test-jobs', async (req, res) => {
       templateSid = process.env.TEMPLATE_SUSPENSION;
     } else if (job === 'cumpleanos') {
       templateSid = process.env.TEMPLATE_CUMPLEANOS;
+    } else if (job === 'informe') {
+      const hoy = new Date().toLocaleDateString('es-AR');
+      let informe = `📊 *Informe del día — ${hoy}*\n\n`;
+      informe += `💬 Mensajes atendidos: ${actividadDia.mensajesAtendidos}\n\n`;
+      if (actividadDia.nuevosClientes.length > 0) {
+        informe += `✅ Nuevos clientes (${actividadDia.nuevosClientes.length}):\n`;
+        actividadDia.nuevosClientes.forEach(n => informe += `• ${n}\n`);
+        informe += '\n';
+      } else {
+        informe += `✅ Nuevos clientes: ninguno\n\n`;
+      }
+      if (actividadDia.pagosRegistrados.length > 0) {
+        const total = actividadDia.pagosRegistrados.reduce((sum, p) => sum + p.monto, 0);
+        informe += `💰 Pagos registrados (${actividadDia.pagosRegistrados.length}) — Total: $${total.toLocaleString('es-AR')}:\n`;
+        actividadDia.pagosRegistrados.forEach(p => informe += `• ${p.nombre}: $${p.monto.toLocaleString('es-AR')}\n`);
+        informe += '\n';
+      } else {
+        informe += `💰 Pagos registrados: ninguno\n\n`;
+      }
+      if (actividadDia.turnosCambiados.length > 0) {
+        informe += `🔄 Cambios de turno (${actividadDia.turnosCambiados.length}):\n`;
+        actividadDia.turnosCambiados.forEach(n => informe += `• ${n}\n`);
+        informe += '\n';
+      } else {
+        informe += `🔄 Cambios de turno: ninguno\n\n`;
+      }
+      informe += `_Hasta mañana Cosaco! 🏑_`;
+      await enviarWhatsApp(process.env.COSACO_WHATSAPP.replace('whatsapp:+54', ''), informe);
+      console.log('[test-jobs] Informe enviado a Cosaco');
+      return res.json({ ok: true, job: 'informe', informe });
     } else {
       return res.status(400).json({ error: `Job desconocido: ${job}` });
     }
