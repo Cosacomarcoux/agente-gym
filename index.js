@@ -3,6 +3,8 @@ const express = require('express');
 const twilio = require('twilio');
 const Anthropic = require('@anthropic-ai/sdk');
 const cron = require('node-cron');
+const fs = require('fs');
+const path = require('path');
 
 const app = express();
 app.use(express.urlencoded({ extended: true }));
@@ -689,6 +691,7 @@ async function procesarMensaje(mensaje, remitente) {
       to: remitente,
       body: texto,
     });
+    guardarMensaje(remitente, null, texto, 'agente');
     actividadDia.mensajesAtendidos++;
     console.log(`Mensaje enviado a ${remitente}`);
   } catch (error) {
@@ -870,7 +873,9 @@ app.post('/webhook', (req, res) => {
   console.log('req.body completo:', req.body);
   const mensaje = req.body.Body;
   const remitente = req.body.From;
+  const profileName = req.body.ProfileName || remitente;
   console.log(`Mensaje recibido de ${remitente}: ${mensaje}`);
+  guardarMensaje(remitente, profileName, mensaje, 'cliente');
 
   // Responder inmediatamente a Twilio con TwiML vacío
   const twiml = new twilio.twiml.MessagingResponse();
@@ -979,6 +984,32 @@ async function enviarWhatsApp(telefono, mensaje) {
     console.log(`✅ Mensaje enviado a ${to}`);
   } catch (err) {
     console.error(`❌ Error enviando a ${telefono}: ${err.message}`);
+  }
+}
+
+const CONV_FILE = path.join(__dirname, 'conversaciones.json');
+
+function guardarMensaje(from, nombre, texto, rol) {
+  try {
+    let conv = {};
+    if (fs.existsSync(CONV_FILE)) {
+      conv = JSON.parse(fs.readFileSync(CONV_FILE, 'utf8'));
+    }
+    if (!conv[from]) {
+      conv[from] = {
+        nombre: nombre || from,
+        telefono: from.replace('whatsapp:', ''),
+        ultimo_mensaje: new Date().toISOString(),
+        mensajes: [],
+      };
+    }
+    const ts = new Date().toISOString();
+    conv[from].ultimo_mensaje = ts;
+    if (nombre && nombre !== from) conv[from].nombre = nombre;
+    conv[from].mensajes.push({ rol, texto, timestamp: ts });
+    fs.writeFileSync(CONV_FILE, JSON.stringify(conv, null, 2));
+  } catch (err) {
+    console.error('Error guardando mensaje:', err.message);
   }
 }
 
@@ -1240,6 +1271,158 @@ cron.schedule('0 2 * * *', async () => {
   actividadDia.fecha = new Date().toDateString();
 
   console.log('📊 Informe diario enviado a Cosaco');
+});
+
+// Panel de conversaciones
+app.get('/panel', (req, res) => {
+  let conv = {};
+  if (fs.existsSync(CONV_FILE)) {
+    conv = JSON.parse(fs.readFileSync(CONV_FILE, 'utf8'));
+  }
+
+  const hilos = Object.entries(conv)
+    .map(([from, data]) => ({ from, ...data }))
+    .sort((a, b) => new Date(b.ultimo_mensaje) - new Date(a.ultimo_mensaje));
+
+  function tiempoRelativo(iso) {
+    const diff = Date.now() - new Date(iso).getTime();
+    const min = Math.floor(diff / 60000);
+    if (min < 1) return 'ahora';
+    if (min < 60) return `hace ${min}m`;
+    const hs = Math.floor(min / 60);
+    if (hs < 24) return `hace ${hs}h`;
+    return `hace ${Math.floor(hs / 24)}d`;
+  }
+
+  const listaHTML = hilos.map(h => {
+    const ultimo = h.mensajes[h.mensajes.length - 1];
+    const preview = ultimo ? ultimo.texto.slice(0, 60) + (ultimo.texto.length > 60 ? '…' : '') : '';
+    return `<div class="hilo" onclick="abrirHilo('${h.from}')">
+      <div class="hilo-nombre">${h.nombre}</div>
+      <div class="hilo-preview">${preview}</div>
+      <div class="hilo-tiempo">${tiempoRelativo(h.ultimo_mensaje)}</div>
+    </div>`;
+  }).join('');
+
+  const hilosJSON = JSON.stringify(hilos).replace(/</g, '\\u003c');
+
+  res.send(`<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Panel de Conversaciones</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f0f2f5; }
+    .app { display: flex; height: 100vh; max-width: 900px; margin: 0 auto; background: #fff; }
+    .sidebar { width: 340px; border-right: 1px solid #e0e0e0; display: flex; flex-direction: column; }
+    .sidebar-header { background: #075e54; color: #fff; padding: 16px; font-size: 18px; font-weight: 600; }
+    .hilos { overflow-y: auto; flex: 1; }
+    .hilo { padding: 14px 16px; border-bottom: 1px solid #f0f0f0; cursor: pointer; }
+    .hilo:hover, .hilo.activo { background: #f5f5f5; }
+    .hilo-nombre { font-weight: 600; font-size: 15px; color: #111; }
+    .hilo-preview { font-size: 13px; color: #667; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .hilo-tiempo { font-size: 11px; color: #999; margin-top: 2px; }
+    .chat { flex: 1; display: flex; flex-direction: column; }
+    .chat-header { background: #075e54; color: #fff; padding: 14px 16px; font-size: 16px; font-weight: 600; }
+    .mensajes { flex: 1; overflow-y: auto; padding: 16px; background: #e5ddd5; }
+    .msg { max-width: 75%; margin-bottom: 10px; padding: 8px 12px; border-radius: 8px; font-size: 14px; line-height: 1.4; word-wrap: break-word; }
+    .msg.cliente { background: #fff; align-self: flex-start; border-radius: 0 8px 8px 8px; }
+    .msg.agente, .msg.agente-cosaco { background: #dcf8c6; align-self: flex-end; margin-left: auto; border-radius: 8px 0 8px 8px; }
+    .msg-rol { font-size: 10px; color: #999; margin-bottom: 2px; }
+    .msg-time { font-size: 10px; color: #999; margin-top: 4px; text-align: right; }
+    .mensajes-wrap { display: flex; flex-direction: column; }
+    .input-area { padding: 10px 16px; background: #f0f2f5; display: flex; gap: 8px; }
+    .input-area input { flex: 1; padding: 10px 14px; border-radius: 24px; border: none; font-size: 14px; outline: none; }
+    .input-area button { background: #075e54; color: #fff; border: none; border-radius: 50%; width: 42px; height: 42px; font-size: 18px; cursor: pointer; }
+    .placeholder { display: flex; align-items: center; justify-content: center; height: 100%; color: #999; font-size: 15px; }
+    @media (max-width: 600px) {
+      .sidebar { width: 100%; display: none; }
+      .sidebar.visible { display: flex; }
+      .chat { display: none; }
+      .chat.visible { display: flex; }
+    }
+  </style>
+</head>
+<body>
+<div class="app">
+  <div class="sidebar" id="sidebar">
+    <div class="sidebar-header">Conversaciones</div>
+    <div class="hilos">${listaHTML}</div>
+  </div>
+  <div class="chat" id="chat">
+    <div class="chat-header" id="chat-header">Seleccioná una conversación</div>
+    <div class="mensajes" id="mensajes"><div class="placeholder">← Seleccioná una conversación</div></div>
+    <div class="input-area" id="input-area" style="display:none">
+      <input type="text" id="msg-input" placeholder="Escribí un mensaje..." onkeydown="if(event.key==='Enter')enviar()">
+      <button onclick="enviar()">➤</button>
+    </div>
+  </div>
+</div>
+<script>
+  const hilos = ${hilosJSON};
+  let fromActual = null;
+
+  function abrirHilo(from) {
+    fromActual = from;
+    const h = hilos.find(x => x.from === from);
+    if (!h) return;
+    document.querySelectorAll('.hilo').forEach(el => el.classList.remove('activo'));
+    document.querySelector('.hilo[onclick*="' + CSS.escape(from) + '"]')?.classList.add('activo');
+    document.getElementById('chat-header').textContent = h.nombre;
+    const wrap = document.createElement('div');
+    wrap.className = 'mensajes-wrap';
+    h.mensajes.forEach(m => {
+      const div = document.createElement('div');
+      div.className = 'msg ' + m.rol;
+      const hora = new Date(m.timestamp).toLocaleTimeString('es-AR', {hour:'2-digit', minute:'2-digit'});
+      div.innerHTML = (m.rol !== 'cliente' ? '<div class="msg-rol">' + (m.rol === 'agente-cosaco' ? 'Cosaco' : 'Agente') + '</div>' : '') +
+        '<div>' + m.texto.replace(/\\n/g, '<br>') + '</div>' +
+        '<div class="msg-time">' + hora + '</div>';
+      wrap.appendChild(div);
+    });
+    const cont = document.getElementById('mensajes');
+    cont.innerHTML = '';
+    cont.appendChild(wrap);
+    cont.scrollTop = cont.scrollHeight;
+    document.getElementById('input-area').style.display = 'flex';
+  }
+
+  async function enviar() {
+    const input = document.getElementById('msg-input');
+    const texto = input.value.trim();
+    if (!texto || !fromActual) return;
+    const h = hilos.find(x => x.from === fromActual);
+    input.value = '';
+    const r = await fetch('/panel/enviar', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ telefono: h.telefono, mensaje: texto })
+    });
+    const data = await r.json();
+    if (data.ok) location.reload();
+  }
+</script>
+</body>
+</html>`);
+});
+
+app.post('/panel/enviar', async (req, res) => {
+  const { telefono, mensaje } = req.body;
+  if (!telefono || !mensaje) return res.status(400).json({ error: 'Faltan telefono o mensaje' });
+  try {
+    let tel = telefono.toString().replace(/\D/g, '');
+    if (tel.startsWith('549')) tel = tel.slice(2);
+    if (tel.startsWith('54')) tel = tel.slice(2);
+    const to = `whatsapp:+54${tel}`;
+    await twilioClient.messages.create({ from: TWILIO_FROM, to, body: mensaje });
+    guardarMensaje(to, null, mensaje, 'agente-cosaco');
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Error enviando desde panel:', err.message);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 const PORT = process.env.PORT || 3000;
