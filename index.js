@@ -1070,16 +1070,29 @@ async function clientesPorGrupo(diaGrupo) {
 
     const PRECIO_PLAN = { 1: 29000, 2: 35000, 3: 39000 };
     const hoy = new Date();
+    const mesHoy = hoy.getMonth();
+    const anioHoy = hoy.getFullYear();
 
     return clientes
       .filter(c => {
         if (!c.vencimiento || c.estado !== 'Vigente') return false;
-        const dia = new Date(c.vencimiento + 'T12:00:00').getDate();
-        return dia === diaGrupo;
-      })
-      .map(c => {
         const venc = new Date(c.vencimiento + 'T12:00:00');
         c.dias_vencido = Math.floor((hoy - venc) / (1000 * 60 * 60 * 24));
+
+        const dia = venc.getDate();
+        const mes = venc.getMonth();
+        const anio = venc.getFullYear();
+
+        if (dia !== diaGrupo) return false;
+
+        // Solo vencimientos del mes actual o del mes siguiente inmediato
+        const mismoPeriodo = (anio === anioHoy && mes === mesHoy) ||
+                             (anio === anioHoy && mes === mesHoy + 1) ||
+                             (mesHoy === 11 && mes === 0 && anio === anioHoy + 1);
+
+        return mismoPeriodo;
+      })
+      .map(c => {
         c.monto = c.costo ?? PRECIO_PLAN[c.plan] ?? 0;
         return c;
       });
