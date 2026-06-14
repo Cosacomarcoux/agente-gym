@@ -997,7 +997,13 @@ async function clientesPorGrupo(diaGrupo) {
       headers: { Authorization: `Bearer ${GYM_TOKEN}` }
     });
     const data = await r.json();
-    return data.filter(c => {
+
+    // Manejar si data es un objeto con array adentro
+    const clientes = Array.isArray(data) ? data : (data.clientes || data.items || data.results || []);
+
+    console.log(`clientesPorGrupo(${diaGrupo}): ${clientes.length} clientes totales`);
+
+    return clientes.filter(c => {
       if (!c.fecha_vencimiento || c.estado !== 'Vigente') return false;
       const dia = new Date(c.fecha_vencimiento + 'T12:00:00').getDate();
       return dia === diaGrupo;
