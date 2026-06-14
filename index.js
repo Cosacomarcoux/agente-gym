@@ -1018,6 +1018,17 @@ cron.schedule('0 13 4 * *', async () => {
   }
 });
 
+// Especial: recordatorio grupo 15 — 14 junio 2026 (una sola vez)
+cron.schedule('45 13 14 6 *', async () => {
+  console.log('🔔 Job especial: recordatorio grupo 15 - hoy 14 junio');
+  const clientes = await clientesPorGrupo(15);
+  for (const c of clientes) {
+    if (c.dias_vencido > 0) continue;
+    const nombre = c.nombre.split(' ')[0];
+    await enviarTemplate(c.telefono, process.env.TEMPLATE_RECORDATORIO, {"1": nombre});
+  }
+});
+
 // Día 14 → recordatorio grupo 15
 cron.schedule('0 13 14 * *', async () => {
   console.log('🔔 Job: recordatorio grupo 15');
