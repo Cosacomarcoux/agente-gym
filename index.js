@@ -1004,11 +1004,21 @@ async function clientesPorGrupo(diaGrupo) {
 
     console.log(`clientesPorGrupo(${diaGrupo}): ${clientes.length} clientes en ${key}`);
 
-    return clientes.filter(c => {
-      if (!c.vencimiento || c.estado !== 'Vigente') return false;
-      const dia = new Date(c.vencimiento + 'T12:00:00').getDate();
-      return dia === diaGrupo;
-    });
+    const PRECIO_PLAN = { 1: 29000, 2: 35000, 3: 39000 };
+    const hoy = new Date();
+
+    return clientes
+      .filter(c => {
+        if (!c.vencimiento || c.estado !== 'Vigente') return false;
+        const dia = new Date(c.vencimiento + 'T12:00:00').getDate();
+        return dia === diaGrupo;
+      })
+      .map(c => {
+        const venc = new Date(c.vencimiento + 'T12:00:00');
+        c.dias_vencido = Math.floor((hoy - venc) / (1000 * 60 * 60 * 24));
+        c.monto = c.costo ?? PRECIO_PLAN[c.plan] ?? 0;
+        return c;
+      });
   } catch (err) {
     console.error('Error obteniendo clientes:', err.message);
     return [];
