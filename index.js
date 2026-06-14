@@ -991,7 +991,7 @@ async function clientesPorGrupo(diaGrupo) {
 }
 
 // Día 4 → recordatorio grupo 5
-cron.schedule('0 10 4 * *', async () => {
+cron.schedule('0 13 4 * *', async () => {
   console.log('🔔 Job: recordatorio grupo 5');
   const clientes = await clientesPorGrupo(5);
   for (const c of clientes) {
@@ -1001,7 +1001,7 @@ cron.schedule('0 10 4 * *', async () => {
 });
 
 // Día 14 → recordatorio grupo 15
-cron.schedule('0 10 14 * *', async () => {
+cron.schedule('0 13 14 * *', async () => {
   console.log('🔔 Job: recordatorio grupo 15');
   const clientes = await clientesPorGrupo(15);
   for (const c of clientes) {
@@ -1011,7 +1011,7 @@ cron.schedule('0 10 14 * *', async () => {
 });
 
 // Día 24 → recordatorio grupo 25
-cron.schedule('0 10 24 * *', async () => {
+cron.schedule('0 13 24 * *', async () => {
   console.log('🔔 Job: recordatorio grupo 25');
   const clientes = await clientesPorGrupo(25);
   for (const c of clientes) {
@@ -1021,7 +1021,7 @@ cron.schedule('0 10 24 * *', async () => {
 });
 
 // Día 9 → mora grupo 5 (5 días sin pagar)
-cron.schedule('0 10 9 * *', async () => {
+cron.schedule('0 13 9 * *', async () => {
   console.log('🔔 Job: mora grupo 5');
   const clientes = await clientesPorGrupo(5);
   for (const c of clientes) {
@@ -1031,7 +1031,7 @@ cron.schedule('0 10 9 * *', async () => {
 });
 
 // Día 19 → mora grupo 15 (5 días sin pagar)
-cron.schedule('0 10 19 * *', async () => {
+cron.schedule('0 13 19 * *', async () => {
   console.log('🔔 Job: mora grupo 15');
   const clientes = await clientesPorGrupo(15);
   for (const c of clientes) {
@@ -1041,7 +1041,7 @@ cron.schedule('0 10 19 * *', async () => {
 });
 
 // Día 29 → mora grupo 25 (5 días sin pagar)
-cron.schedule('0 10 29 * *', async () => {
+cron.schedule('0 13 29 * *', async () => {
   console.log('🔔 Job: mora grupo 25');
   const clientes = await clientesPorGrupo(25);
   for (const c of clientes) {
@@ -1071,7 +1071,7 @@ function programarSuspensiones(clientes) {
 }
 
 // Día 15 → 10 días vencido grupo 5
-cron.schedule('0 10 15 * *', async () => {
+cron.schedule('0 13 15 * *', async () => {
   console.log('🔔 Job: suspensión grupo 5');
   const clientes = await clientesPorGrupo(5);
   const morosos = [];
@@ -1084,7 +1084,7 @@ cron.schedule('0 10 15 * *', async () => {
 });
 
 // Día 25 → 10 días vencido grupo 15
-cron.schedule('0 10 25 * *', async () => {
+cron.schedule('0 13 25 * *', async () => {
   console.log('🔔 Job: suspensión grupo 15');
   const clientes = await clientesPorGrupo(15);
   const morosos = [];
@@ -1097,7 +1097,7 @@ cron.schedule('0 10 25 * *', async () => {
 });
 
 // Día 5 → 10 días vencido grupo 25
-cron.schedule('0 10 5 * *', async () => {
+cron.schedule('0 13 5 * *', async () => {
   console.log('🔔 Job: suspensión grupo 25');
   const clientes = await clientesPorGrupo(25);
   const morosos = [];
@@ -1110,7 +1110,7 @@ cron.schedule('0 10 5 * *', async () => {
 });
 
 // Job cumpleaños — todos los días a las 9am
-cron.schedule('0 9 * * *', async () => {
+cron.schedule('0 12 * * *', async () => {
   console.log('🎂 Job: cumpleaños');
   try {
     const r = await fetch(`${GYM_API}/cumpleanos`, {
@@ -1141,7 +1141,7 @@ cron.schedule('0 9 * * *', async () => {
 });
 
 // Informe diario a las 23hs
-cron.schedule('0 23 * * *', async () => {
+cron.schedule('0 2 * * *', async () => {
   const hoy = new Date().toLocaleDateString('es-AR');
 
   let informe = `📊 *Informe del día — ${hoy}*\n\n`;
