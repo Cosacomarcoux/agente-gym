@@ -788,7 +788,18 @@ app.get('/test-jobs', async (req, res) => {
     let templateSid;
 
     if (job === 'recordatorio') {
-      templateSid = process.env.TEMPLATE_RECORDATORIO;
+      const clientes = await clientesPorGrupo(15);
+      console.log(`Clientes grupo 15 encontrados: ${clientes.length}`);
+      if (clientes.length === 0) {
+        return res.json({ ok: false, mensaje: 'No hay clientes con vencimiento el día 15' });
+      }
+      const prueba = clientes.slice(0, 2);
+      for (const c of prueba) {
+        const nombre = c.nombre.split(' ')[0];
+        await enviarTemplate(c.telefono, process.env.TEMPLATE_RECORDATORIO, {"1": nombre});
+        console.log(`✅ Enviado a ${c.nombre}`);
+      }
+      return res.json({ ok: true, enviados: prueba.map(c => c.nombre) });
     } else if (job === 'mora') {
       templateSid = process.env.TEMPLATE_MORA;
     } else if (job === 'suspension') {
