@@ -773,7 +773,7 @@ app.get('/test-jobs', async (req, res) => {
   }
   const job = req.query.job;
   if (!job) {
-    return res.status(400).json({ error: 'Parámetro job requerido: recordatorio, mora, suspension, cumpleanos' });
+    return res.status(400).json({ error: 'Parámetro job requerido: recordatorio, mora, suspension, cumpleanos, informe, todos' });
   }
 
   try {
@@ -825,6 +825,24 @@ app.get('/test-jobs', async (req, res) => {
       await enviarWhatsApp(process.env.COSACO_WHATSAPP.replace('whatsapp:+54', ''), informe);
       console.log('[test-jobs] Informe enviado a Cosaco');
       return res.json({ ok: true, job: 'informe', informe });
+    } else if (job === 'todos') {
+      const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+      const jobs = ['recordatorio', 'mora', 'suspension', 'cumpleanos', 'informe'];
+      const resultados = [];
+      for (const j of jobs) {
+        try {
+          const url = `http://localhost:${PORT}/test-jobs?secret=hockeyvivo&job=${j}`;
+          const resp = await fetch(url);
+          const resultado = await resp.json();
+          resultados.push({ job: j, ok: resp.ok, resultado });
+          console.log(`[test-jobs/todos] Job "${j}" completado`);
+        } catch (err) {
+          resultados.push({ job: j, ok: false, error: err.message });
+          console.error(`[test-jobs/todos] Error en job "${j}":`, err.message);
+        }
+        await delay(2000);
+      }
+      return res.json({ ok: true, job: 'todos', resultados });
     } else {
       return res.status(400).json({ error: `Job desconocido: ${job}` });
     }
