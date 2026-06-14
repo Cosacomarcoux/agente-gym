@@ -257,7 +257,21 @@ CUANDO COSACO PIDA SUSPENDER A UN CLIENTE (ejemplo: "suspendé a Romina" o "dá 
 4. Confirmale: "✅ [nombre] fue suspendido correctamente"
 
 SI NO PODÉS RESOLVER ALGO:
-Decí: "Te paso con el equipo de Hockey Vivo, en breve te contactamos 🏑"`;
+Decí: "Te paso con el equipo de Hockey Vivo, en breve te contactamos 🏑"
+
+INTENCIÓN DE PAGO vs PAGO REALIZADO:
+Diferenciá claramente entre:
+- "Quiero pagar", "quisiera pagar", "voy a pagar", "puedo pagar" → es una INTENCIÓN futura. Preguntá: "¿Cuándo vas a realizar el pago? Podés hacerlo por transferencia al alias hockeyvivo o en efectivo en el gimnasio 🏑"
+- "Pagué", "ya pagué", "transferí", "hice el pago", manda comprobante → es un PAGO REALIZADO. Iniciá el flujo de confirmación.
+
+NOMBRES AMBIGUOS:
+Cuando alguien mencione un nombre incompleto, apodo, solo apellido, o nombre de otra persona:
+1. Primero buscá en get_clientes usando el número de teléfono del remitente para ver si es un cliente registrado
+2. Si encontrás al cliente → confirmá: "¿Me estás hablando de [nombre completo]?"
+3. Si no encontrás → buscá con el nombre/apellido que dieron en get_clientes?buscar=[nombre]
+4. Si encontrás uno solo → confirmá: "¿Me estás hablando de [nombre completo]?"
+5. Si encontrás varios → mostrá las opciones: "¿De cuál me hablás? • Emilia Medina • María Medina"
+6. Si no encontrás nada → pedí el nombre completo amablemente`;
 
 const TOOLS = [
   {
@@ -875,12 +889,21 @@ app.post('/webhook', (req, res) => {
   const remitente = req.body.From;
   const profileName = req.body.ProfileName || remitente;
   console.log(`Mensaje recibido de ${remitente}: ${mensaje}`);
-  guardarMensaje(remitente, profileName, mensaje, 'cliente');
+  guardarMensaje(remitente, profileName, mensaje || '[imagen]', 'cliente');
 
   // Responder inmediatamente a Twilio con TwiML vacío
   const twiml = new twilio.twiml.MessagingResponse();
   res.type('text/xml');
   res.send(twiml.toString());
+
+  // Detectar imagen sin texto
+  if (parseInt(req.body.NumMedia) > 0 && (!mensaje || mensaje.trim() === '')) {
+    const respuestaImagen = 'Hola! 👋 Recibí tu imagen pero no puedo leerla directamente. ¿Me podés escribir de qué se trata? Por ejemplo: "Pagué el mes de junio por $35.000" y con eso te ayudo enseguida 🏑';
+    twilioClient.messages.create({ from: TWILIO_FROM, to: remitente, body: respuestaImagen })
+      .then(() => guardarMensaje(remitente, null, respuestaImagen, 'agente'))
+      .catch(err => console.error('Error respondiendo imagen:', err.message));
+    return;
+  }
 
   // Detectar si es Cosaco respondiendo a una confirmación de pago
   if (remitente === process.env.COSACO_WHATSAPP && pagoEnEspera) {
