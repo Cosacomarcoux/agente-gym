@@ -998,14 +998,15 @@ async function clientesPorGrupo(diaGrupo) {
     });
     const data = await r.json();
 
-    // Manejar si data es un objeto con array adentro
-    const clientes = Array.isArray(data) ? data : (data.clientes || data.items || data.results || []);
+    // La API devuelve { dia5: [...], dia15: [...], dia25: [...] }
+    const key = `dia${diaGrupo}`;
+    const clientes = Array.isArray(data) ? data : (data[key] || []);
 
-    console.log(`clientesPorGrupo(${diaGrupo}): ${clientes.length} clientes totales`);
+    console.log(`clientesPorGrupo(${diaGrupo}): ${clientes.length} clientes en ${key}`);
 
     return clientes.filter(c => {
-      if (!c.fecha_vencimiento || c.estado !== 'Vigente') return false;
-      const dia = new Date(c.fecha_vencimiento + 'T12:00:00').getDate();
+      if (!c.vencimiento || c.estado !== 'Vigente') return false;
+      const dia = new Date(c.vencimiento + 'T12:00:00').getDate();
       return dia === diaGrupo;
     });
   } catch (err) {
