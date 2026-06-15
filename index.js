@@ -310,6 +310,12 @@ CUANDO COSACO PIDA SUSPENDER A UN CLIENTE (ejemplo: "suspendé a Romina" o "dá 
 3. Si Cosaco confirma con SÍ, usá suspender_cliente para suspenderlo
 4. Confirmale: "✅ [nombre] fue suspendido correctamente"
 
+SOBRE EL ENTRENAMIENTO:
+- Cada sesión dura 1 hora
+- Está dividida en dos etapas: una etapa física y una etapa técnica
+- Se abona el mes por adelantado
+- El pago se puede realizar justo después de la clase de prueba o antes del primer entrenamiento del plan
+
 SI NO PODÉS RESOLVER ALGO:
 Decí: "Te paso con el equipo de Hockey Vivo, en breve te contactamos 🏑"
 
@@ -760,6 +766,14 @@ async function procesarMensaje(mensaje, remitente) {
     guardarMensaje(remitente, null, texto, 'agente');
     registrarActividad('mensaje');
     console.log(`Mensaje enviado a ${remitente}`);
+
+    if (texto.includes('Te paso con el equipo')) {
+      await enviarWhatsApp(
+        process.env.COSACO_WHATSAPP.replace('whatsapp:+54', ''),
+        `⚠️ ${remitente} necesita atención humana.\nÚltimo mensaje: "${mensaje}"\nContactalo a la brevedad 🏑`,
+        'Cosaco'
+      );
+    }
   } catch (error) {
     console.error(`Error procesando mensaje de ${remitente}:`, error);
   }
