@@ -744,11 +744,23 @@ async function ejecutarTool(nombre, input, remitente) {
 
     if (nombre === 'enviar_mensaje_masivo') {
       const diaNorm = input.dia_semana.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-      const rTurnos = await fetch(`${GYM_API}/turnos`, { headers });
+
+      // GET /turnos trae alumnos embebidos (id, nombre, estado) pero sin teléfono
+      const [rTurnos, rClientes] = await Promise.all([
+        fetch(`${GYM_API}/turnos`, { headers }),
+        fetch(`${GYM_API}/clientes`, { headers }),
+      ]);
       const turnos = await rTurnos.json();
+      const todosClientes = await rClientes.json();
+
+      // Índice id → teléfono para lookup eficiente
+      const telefonoPorId = {};
+      for (const c of (Array.isArray(todosClientes) ? todosClientes : [])) {
+        if (c.id && c.telefono) telefonoPorId[c.id] = c.telefono;
+      }
 
       const turnosDelDia = (Array.isArray(turnos) ? turnos : []).filter(t => {
-        const diaTurno = (t.dia || t.nombre || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+        const diaTurno = (t.dia_semana || t.dia || t.nombre || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
         return diaTurno.includes(diaNorm);
       });
 
@@ -758,18 +770,20 @@ async function ejecutarTool(nombre, input, remitente) {
 
       const enviados = [];
       const sinTelefono = [];
+      const yaEnviados = new Set(); // evitar duplicados si un cliente está en varios turnos del día
 
       for (const turno of turnosDelDia) {
-        const rClientes = await fetch(`${GYM_API}/turnos/${turno.id}/clientes`, { headers });
-        if (!rClientes.ok) continue;
-        const clientes = await rClientes.json();
+        for (const alumno of (turno.alumnos || [])) {
+          if (yaEnviados.has(alumno.id)) continue;
+          yaEnviados.add(alumno.id);
 
-        for (const c of (Array.isArray(clientes) ? clientes : [])) {
-          if (!c.telefono) { sinTelefono.push(c.nombre); continue; }
-          const nombre = (c.nombre || '').split(' ')[0];
-          await enviarTemplate(c.telefono, process.env.TEMPLATE_MENSAJE_HOCKEYVIVO,
-            { "1": nombre, "2": input.mensaje }, `[Mensaje masivo] ${input.mensaje}`);
-          enviados.push(c.nombre);
+          const tel = telefonoPorId[alumno.id];
+          if (!tel) { sinTelefono.push(alumno.nombre); continue; }
+
+          const nombreCorto = (alumno.nombre || '').split(' ')[0];
+          await enviarTemplate(tel, process.env.TEMPLATE_MENSAJE_HOCKEYVIVO,
+            { "1": nombreCorto, "2": input.mensaje }, `[Mensaje masivo] ${input.mensaje}`);
+          enviados.push(alumno.nombre);
         }
       }
 
