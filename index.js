@@ -1660,6 +1660,23 @@ app.get('/panel/hilo', async (req, res) => {
 });
 
 // Historial de actividad diaria
+app.get('/panel/db-check', async (req, res) => {
+  if (req.query.secret !== 'hockeyvivo') return res.status(403).json({ error: 'Acceso denegado' });
+  try {
+    const hoy = new Date().toISOString().split('T')[0];
+    const [suspensiones, actividad] = await Promise.all([
+      pool.query('SELECT * FROM suspensiones_pendientes ORDER BY timestamp ASC'),
+      pool.query('SELECT * FROM actividad_dia WHERE fecha = $1', [hoy]),
+    ]);
+    res.json({
+      suspensiones_pendientes: suspensiones.rows,
+      actividad_hoy: actividad.rows[0] || null,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/panel/actividad', async (req, res) => {
   try {
     const { rows } = await pool.query(
