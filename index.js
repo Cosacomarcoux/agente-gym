@@ -1406,7 +1406,8 @@ app.get('/panel', async (req, res) => {
     body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f0f2f5; }
     .app { display: flex; height: 100vh; max-width: 900px; margin: 0 auto; background: #fff; }
     .sidebar { width: 340px; border-right: 1px solid #e0e0e0; display: flex; flex-direction: column; }
-    .sidebar-header { background: #075e54; color: #fff; padding: 16px; font-size: 18px; font-weight: 600; }
+    .sidebar-header { background: #075e54; color: #fff; padding: 16px; font-size: 18px; font-weight: 600; display: flex; justify-content: space-between; align-items: center; }
+    .btn-actividad { background: #054d44; color: #fff; text-decoration: none; font-size: 13px; font-weight: 600; padding: 5px 11px; border-radius: 6px; white-space: nowrap; }
     .hilos { overflow-y: auto; flex: 1; }
     .hilo { padding: 14px 16px; border-bottom: 1px solid #f0f0f0; cursor: pointer; }
     .hilo:hover, .hilo.activo { background: #f5f5f5; }
@@ -1437,7 +1438,7 @@ app.get('/panel', async (req, res) => {
 <body>
 <div class="app">
   <div class="sidebar" id="sidebar">
-    <div class="sidebar-header">Conversaciones</div>
+    <div class="sidebar-header"><span>Conversaciones</span><a class="btn-actividad" href="/panel/actividad">📊 Actividad</a></div>
     <div class="hilos">${listaHTML}</div>
   </div>
   <div class="chat" id="chat">
