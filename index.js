@@ -325,6 +325,9 @@ SOBRE EL ENTRENAMIENTO:
 - Se abona el mes por adelantado
 - El pago se puede realizar justo después de la clase de prueba o antes del primer entrenamiento del plan
 
+MENSAJES MASIVOS:
+Para enviar mensajes masivos a clientes de un día específico, SIEMPRE usá la tool enviar_mensaje_masivo. NUNCA confirmes que enviaste mensajes sin haber llamado esta tool primero.
+
 SI NO PODÉS RESOLVER ALGO:
 Decí: "Te paso con el equipo de Hockey Vivo, en breve te contactamos 🏑"
 
@@ -474,6 +477,18 @@ const TOOLS = [
         cliente_nombre: { type: 'string', description: 'Nombre completo del cliente' },
       },
       required: ['cliente_id', 'cliente_nombre'],
+    },
+  },
+  {
+    name: 'enviar_mensaje_masivo',
+    description: 'Envía un mensaje masivo a todos los clientes de un día específico de la semana. Usá esta tool cuando Cosaco quiera comunicarse con todos los alumnos de un día.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        dia_semana: { type: 'string', description: 'Día de la semana en minúsculas: lunes, martes, miercoles, jueves, viernes' },
+        mensaje: { type: 'string', description: 'Texto del mensaje a enviar a los clientes' },
+      },
+      required: ['dia_semana', 'mensaje'],
     },
   },
 ];
@@ -727,6 +742,41 @@ async function ejecutarTool(nombre, input, remitente) {
       return { ok: true };
     }
 
+    if (nombre === 'enviar_mensaje_masivo') {
+      const diaNorm = input.dia_semana.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+      const rTurnos = await fetch(`${GYM_API}/turnos`, { headers });
+      const turnos = await rTurnos.json();
+
+      const turnosDelDia = (Array.isArray(turnos) ? turnos : []).filter(t => {
+        const diaTurno = (t.dia || t.nombre || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+        return diaTurno.includes(diaNorm);
+      });
+
+      if (turnosDelDia.length === 0) {
+        return { ok: false, mensaje: `No se encontraron turnos para el día "${input.dia_semana}"` };
+      }
+
+      const enviados = [];
+      const sinTelefono = [];
+
+      for (const turno of turnosDelDia) {
+        const rClientes = await fetch(`${GYM_API}/turnos/${turno.id}/clientes`, { headers });
+        if (!rClientes.ok) continue;
+        const clientes = await rClientes.json();
+
+        for (const c of (Array.isArray(clientes) ? clientes : [])) {
+          if (!c.telefono) { sinTelefono.push(c.nombre); continue; }
+          const nombre = (c.nombre || '').split(' ')[0];
+          await enviarTemplate(c.telefono, process.env.TEMPLATE_MENSAJE_HOCKEYVIVO,
+            { "1": nombre, "2": input.mensaje }, `[Mensaje masivo] ${input.mensaje}`);
+          enviados.push(c.nombre);
+        }
+      }
+
+      console.log(`📢 Mensaje masivo ${input.dia_semana}: ${enviados.length} enviados, ${sinTelefono.length} sin teléfono`);
+      return { ok: true, enviados, sin_telefono: sinTelefono };
+    }
+
     return { error: `Tool desconocida: ${nombre}` };
   } catch (err) {
     return { error: err.message };
@@ -748,7 +798,7 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
     let respuesta;
     while (true) {
       respuesta = await anthropic.messages.create({
-        model: 'claude-sonnet-4-6',
+        model: 'claude-haiku-4-5-20251001',
         max_tokens: 1024,
         system: SYSTEM_PROMPT,
         tools: TOOLS,
