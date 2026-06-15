@@ -1121,7 +1121,12 @@ async function clientesPorGrupo(diaGrupo, tipoJob = 'recordatorio') {
 
     return clientes
       .filter(c => {
-        if (!c.vencimiento || c.estado !== 'Vigente') return false;
+        if (!c.vencimiento) return false;
+        if (tipoJob === 'recordatorio') {
+          if (c.estado !== 'Vigente') return false;
+        } else {
+          if (c.estado !== 'Vigente' && c.estado !== 'Vencido') return false;
+        }
         const venc = new Date(c.vencimiento + 'T12:00:00');
         const dias = Math.floor((hoy - venc) / (1000 * 60 * 60 * 24));
         c.dias_vencido = dias;
