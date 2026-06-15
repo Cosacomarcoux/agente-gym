@@ -862,7 +862,7 @@ app.get('/test-jobs', async (req, res) => {
       }
       for (const c of clientes) {
         const nombre = c.nombre.split(' ')[0];
-        await enviarTemplate(c.telefono, process.env.TEMPLATE_RECORDATORIO, {"1": nombre}, '[Recordatorio de vencimiento]');
+        await enviarTemplate(c.telefono, process.env.TEMPLATE_RECORDATORIO, {"1": nombre}, 'Hoy vence tu plan');
         console.log(`✅ Enviado a ${c.nombre}`);
       }
       return res.json({ ok: true, enviados: clientes.map(c => c.nombre) });
@@ -1134,7 +1134,7 @@ async function clientesPorGrupo(diaGrupo, tipoJob = 'recordatorio') {
         if (venc.getDate() !== diaGrupo) return false;
 
         if (tipoJob === 'recordatorio') {
-          // Vence mañana o hoy (dias_vencido entre -1 y 0)
+          // Vence hoy (dias_vencido entre -1 y 0)
           return dias >= -1 && dias <= 0;
         } else if (tipoJob === 'mora') {
           // Venció hace 4-6 días
@@ -1160,7 +1160,7 @@ cron.schedule('0 13 4 * *', async () => {
   console.log('🔔 Job: recordatorio grupo 5');
   const clientes = await clientesPorGrupo(5, 'recordatorio');
   for (const c of clientes) {
-    await enviarTemplate(c.telefono, process.env.TEMPLATE_RECORDATORIO, { "1": c.nombre.split(' ')[0] }, '[Recordatorio de vencimiento]');
+    await enviarTemplate(c.telefono, process.env.TEMPLATE_RECORDATORIO, { "1": c.nombre.split(' ')[0] }, 'Hoy vence tu plan');
   }
 });
 
@@ -1170,7 +1170,7 @@ cron.schedule('45 13 14 6 *', async () => {
   const clientes = await clientesPorGrupo(15, 'recordatorio');
   for (const c of clientes) {
     const nombre = c.nombre.split(' ')[0];
-    await enviarTemplate(c.telefono, process.env.TEMPLATE_RECORDATORIO, {"1": nombre}, '[Recordatorio de vencimiento]');
+    await enviarTemplate(c.telefono, process.env.TEMPLATE_RECORDATORIO, {"1": nombre}, 'Hoy vence tu plan');
   }
 });
 
@@ -1179,7 +1179,7 @@ cron.schedule('0 13 14 * *', async () => {
   console.log('🔔 Job: recordatorio grupo 15');
   const clientes = await clientesPorGrupo(15, 'recordatorio');
   for (const c of clientes) {
-    await enviarTemplate(c.telefono, process.env.TEMPLATE_RECORDATORIO, { "1": c.nombre.split(' ')[0] }, '[Recordatorio de vencimiento]');
+    await enviarTemplate(c.telefono, process.env.TEMPLATE_RECORDATORIO, { "1": c.nombre.split(' ')[0] }, 'Hoy vence tu plan');
   }
 });
 
@@ -1188,7 +1188,7 @@ cron.schedule('0 13 24 * *', async () => {
   console.log('🔔 Job: recordatorio grupo 25');
   const clientes = await clientesPorGrupo(25, 'recordatorio');
   for (const c of clientes) {
-    await enviarTemplate(c.telefono, process.env.TEMPLATE_RECORDATORIO, { "1": c.nombre.split(' ')[0] }, '[Recordatorio de vencimiento]');
+    await enviarTemplate(c.telefono, process.env.TEMPLATE_RECORDATORIO, { "1": c.nombre.split(' ')[0] }, 'Hoy vence tu plan');
   }
 });
 
