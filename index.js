@@ -1522,6 +1522,117 @@ app.get('/panel/hilo', async (req, res) => {
   }
 });
 
+// Historial de actividad diaria
+app.get('/panel/actividad', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT fecha, mensajes_atendidos, nuevos_clientes, pagos_registrados, turnos_cambiados
+       FROM actividad_dia
+       ORDER BY fecha DESC
+       LIMIT 30`
+    );
+
+    const diasHTML = rows.map(row => {
+      const fecha = new Date(row.fecha + 'T12:00:00').toLocaleDateString('es-AR', {
+        weekday: 'long', year: 'numeric', month: 'long', day: 'numeric'
+      });
+      const nuevos = row.nuevos_clientes || [];
+      const pagos  = row.pagos_registrados || [];
+      const turnos = row.turnos_cambiados || [];
+      const total  = pagos.reduce((s, p) => s + (p.monto || 0), 0);
+
+      const liNuevos = nuevos.length
+        ? nuevos.map(n => `<li>${n}</li>`).join('')
+        : '<li class="vacio">Ninguno</li>';
+
+      const liPagos = pagos.length
+        ? pagos.map(p => `<li><span class="pago-nombre">${p.nombre}</span><span class="pago-monto">$${Number(p.monto).toLocaleString('es-AR')}</span></li>`).join('')
+        : '<li class="vacio">Ninguno</li>';
+
+      const liTurnos = turnos.length
+        ? turnos.map(n => `<li>${n}</li>`).join('')
+        : '<li class="vacio">Ninguno</li>';
+
+      const totalHTML = pagos.length
+        ? `<div class="total-dia">Total cobrado: <strong>$${total.toLocaleString('es-AR')}</strong></div>`
+        : '';
+
+      return `<div class="dia-card">
+  <div class="dia-header">
+    <span class="dia-fecha">${fecha}</span>
+    <span class="dia-badge">${row.mensajes_atendidos} mensaje${row.mensajes_atendidos !== 1 ? 's' : ''}</span>
+  </div>
+  <div class="dia-body">
+    <div class="seccion">
+      <div class="seccion-titulo">✅ Nuevos clientes (${nuevos.length})</div>
+      <ul>${liNuevos}</ul>
+    </div>
+    <div class="seccion">
+      <div class="seccion-titulo">💰 Pagos registrados (${pagos.length})</div>
+      <ul>${liPagos}</ul>
+      ${totalHTML}
+    </div>
+    <div class="seccion">
+      <div class="seccion-titulo">🔄 Cambios de turno (${turnos.length})</div>
+      <ul>${liTurnos}</ul>
+    </div>
+  </div>
+</div>`;
+    }).join('');
+
+    const contenido = rows.length
+      ? diasHTML
+      : '<div class="empty">No hay actividad registrada aún.</div>';
+
+    res.send(`<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Actividad Diaria — Hockey Vivo</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f0f2f5; min-height: 100vh; }
+    header { background: #075e54; color: #fff; padding: 16px 20px; display: flex; align-items: center; gap: 16px; position: sticky; top: 0; z-index: 10; }
+    header a { color: #fff; text-decoration: none; font-size: 20px; line-height: 1; }
+    header h1 { font-size: 18px; font-weight: 600; }
+    .container { max-width: 720px; margin: 0 auto; padding: 20px 16px 40px; }
+    .dia-card { background: #fff; border-radius: 12px; margin-bottom: 16px; box-shadow: 0 1px 4px rgba(0,0,0,.08); overflow: hidden; }
+    .dia-header { background: #075e54; color: #fff; padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; }
+    .dia-fecha { font-weight: 600; font-size: 15px; text-transform: capitalize; }
+    .dia-badge { background: rgba(255,255,255,.2); border-radius: 20px; padding: 3px 10px; font-size: 12px; white-space: nowrap; }
+    .dia-body { padding: 14px 16px; display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; }
+    .seccion { }
+    .seccion-titulo { font-size: 12px; font-weight: 700; color: #555; text-transform: uppercase; letter-spacing: .4px; margin-bottom: 6px; }
+    ul { list-style: none; padding: 0; }
+    ul li { font-size: 14px; color: #222; padding: 2px 0; }
+    ul li.vacio { color: #aaa; font-style: italic; }
+    .pago-nombre { display: block; }
+    .pago-monto { display: block; font-weight: 600; color: #075e54; font-size: 13px; }
+    .total-dia { margin-top: 8px; font-size: 13px; color: #333; border-top: 1px solid #eee; padding-top: 6px; }
+    .empty { text-align: center; color: #999; padding: 60px 0; font-size: 15px; }
+    @media (max-width: 540px) {
+      .dia-body { grid-template-columns: 1fr; }
+      .dia-header { flex-direction: column; align-items: flex-start; gap: 4px; }
+    }
+  </style>
+</head>
+<body>
+<header>
+  <a href="/panel" title="Volver">&#8592;</a>
+  <h1>Actividad Diaria</h1>
+</header>
+<div class="container">
+  ${contenido}
+</div>
+</body>
+</html>`);
+  } catch (err) {
+    console.error('Error en GET /panel/actividad:', err.message);
+    res.status(500).send('Error cargando actividad: ' + err.message);
+  }
+});
+
 app.post('/panel/enviar', async (req, res) => {
   const { telefono, mensaje } = req.body;
   if (!telefono || !mensaje) return res.status(400).json({ error: 'Faltan telefono o mensaje' });
