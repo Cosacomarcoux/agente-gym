@@ -873,7 +873,17 @@ app.get('/test-jobs', async (req, res) => {
     } else if (job === 'mora') {
       templateSid = process.env.TEMPLATE_MORA;
     } else if (job === 'suspension') {
-      templateSid = process.env.TEMPLATE_SUSPENSION;
+      const clientesSusp = await clientesPorGrupo(5, 'suspension');
+      console.log(`Clientes suspensión grupo 5: ${clientesSusp.length}`);
+      if (clientesSusp.length === 0) {
+        return res.json({ ok: false, mensaje: 'No hay clientes con 10 días vencidos en grupo 5' });
+      }
+      for (const c of clientesSusp) {
+        const nombre = c.nombre.split(' ')[0];
+        await enviarTemplate(c.telefono, process.env.TEMPLATE_SUSPENSION, {"1": nombre});
+        console.log(`✅ Enviado suspensión a ${c.nombre}`);
+      }
+      return res.json({ ok: true, enviados: clientesSusp.map(c => c.nombre) });
     } else if (job === 'cumpleanos') {
       templateSid = process.env.TEMPLATE_CUMPLEANOS;
     } else if (job === 'informe') {
