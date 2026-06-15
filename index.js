@@ -859,7 +859,7 @@ app.get('/test-jobs', async (req, res) => {
     let templateSid;
 
     if (job === 'recordatorio') {
-      const clientes = await clientesPorGrupo(15);
+      const clientes = await clientesPorGrupo(15, 'recordatorio');
       console.log(`Clientes grupo 15 encontrados: ${clientes.length}`);
       if (clientes.length === 0) {
         return res.json({ ok: false, mensaje: 'No hay clientes con vencimiento el día 15' });
@@ -1093,7 +1093,7 @@ async function enviarTemplate(telefono, templateSid, variables) {
   }
 }
 
-async function clientesPorGrupo(diaGrupo) {
+async function clientesPorGrupo(diaGrupo, tipoJob = 'recordatorio') {
   try {
     const r = await fetch(`${GYM_API}/vencimientos`, {
       headers: { Authorization: `Bearer ${GYM_TOKEN}` }
@@ -1104,31 +1104,31 @@ async function clientesPorGrupo(diaGrupo) {
     const key = `dia${diaGrupo}`;
     const clientes = Array.isArray(data) ? data : (data[key] || []);
 
-    console.log(`clientesPorGrupo(${diaGrupo}): ${clientes.length} clientes en ${key}`);
+    console.log(`clientesPorGrupo(${diaGrupo}, ${tipoJob}): ${clientes.length} clientes en ${key}`);
 
     const PRECIO_PLAN = { 1: 29000, 2: 35000, 3: 39000 };
     const hoy = new Date();
-    const mesHoy = hoy.getMonth();
-    const anioHoy = hoy.getFullYear();
 
     return clientes
       .filter(c => {
         if (!c.vencimiento || c.estado !== 'Vigente') return false;
         const venc = new Date(c.vencimiento + 'T12:00:00');
-        c.dias_vencido = Math.floor((hoy - venc) / (1000 * 60 * 60 * 24));
+        const dias = Math.floor((hoy - venc) / (1000 * 60 * 60 * 24));
+        c.dias_vencido = dias;
 
-        const dia = venc.getDate();
-        const mes = venc.getMonth();
-        const anio = venc.getFullYear();
+        if (venc.getDate() !== diaGrupo) return false;
 
-        if (dia !== diaGrupo) return false;
-
-        // Solo vencimientos del mes actual o del mes siguiente inmediato
-        const mismoPeriodo = (anio === anioHoy && mes === mesHoy) ||
-                             (anio === anioHoy && mes === mesHoy + 1) ||
-                             (mesHoy === 11 && mes === 0 && anio === anioHoy + 1);
-
-        return mismoPeriodo;
+        if (tipoJob === 'recordatorio') {
+          // Vence mañana o hoy (dias_vencido entre -1 y 0)
+          return dias >= -1 && dias <= 0;
+        } else if (tipoJob === 'mora') {
+          // Venció hace 4-6 días
+          return dias >= 4 && dias <= 6;
+        } else if (tipoJob === 'suspension') {
+          // Venció hace 9-11 días
+          return dias >= 9 && dias <= 11;
+        }
+        return false;
       })
       .map(c => {
         c.monto = c.costo ?? PRECIO_PLAN[c.plan] ?? 0;
@@ -1143,9 +1143,8 @@ async function clientesPorGrupo(diaGrupo) {
 // Día 4 → recordatorio grupo 5
 cron.schedule('0 13 4 * *', async () => {
   console.log('🔔 Job: recordatorio grupo 5');
-  const clientes = await clientesPorGrupo(5);
+  const clientes = await clientesPorGrupo(5, 'recordatorio');
   for (const c of clientes) {
-    if (c.dias_vencido > 0) continue;
     await enviarTemplate(c.telefono, process.env.TEMPLATE_RECORDATORIO, { "1": c.nombre.split(' ')[0] });
   }
 });
@@ -1153,9 +1152,8 @@ cron.schedule('0 13 4 * *', async () => {
 // Especial: recordatorio grupo 15 — 14 junio 2026 (una sola vez)
 cron.schedule('45 13 14 6 *', async () => {
   console.log('🔔 Job especial: recordatorio grupo 15 - hoy 14 junio');
-  const clientes = await clientesPorGrupo(15);
+  const clientes = await clientesPorGrupo(15, 'recordatorio');
   for (const c of clientes) {
-    if (c.dias_vencido > 0) continue;
     const nombre = c.nombre.split(' ')[0];
     await enviarTemplate(c.telefono, process.env.TEMPLATE_RECORDATORIO, {"1": nombre});
   }
@@ -1164,9 +1162,8 @@ cron.schedule('45 13 14 6 *', async () => {
 // Día 14 → recordatorio grupo 15
 cron.schedule('0 13 14 * *', async () => {
   console.log('🔔 Job: recordatorio grupo 15');
-  const clientes = await clientesPorGrupo(15);
+  const clientes = await clientesPorGrupo(15, 'recordatorio');
   for (const c of clientes) {
-    if (c.dias_vencido > 0) continue;
     await enviarTemplate(c.telefono, process.env.TEMPLATE_RECORDATORIO, { "1": c.nombre.split(' ')[0] });
   }
 });
@@ -1174,39 +1171,35 @@ cron.schedule('0 13 14 * *', async () => {
 // Día 24 → recordatorio grupo 25
 cron.schedule('0 13 24 * *', async () => {
   console.log('🔔 Job: recordatorio grupo 25');
-  const clientes = await clientesPorGrupo(25);
+  const clientes = await clientesPorGrupo(25, 'recordatorio');
   for (const c of clientes) {
-    if (c.dias_vencido > 0) continue;
     await enviarTemplate(c.telefono, process.env.TEMPLATE_RECORDATORIO, { "1": c.nombre.split(' ')[0] });
   }
 });
 
-// Día 9 → mora grupo 5 (5 días sin pagar)
+// Día 9 → mora grupo 5 (4-6 días sin pagar)
 cron.schedule('0 13 9 * *', async () => {
   console.log('🔔 Job: mora grupo 5');
-  const clientes = await clientesPorGrupo(5);
+  const clientes = await clientesPorGrupo(5, 'mora');
   for (const c of clientes) {
-    if (c.dias_vencido < 1) continue;
     await enviarTemplate(c.telefono, process.env.TEMPLATE_MORA, { "1": c.nombre.split(' ')[0] });
   }
 });
 
-// Día 19 → mora grupo 15 (5 días sin pagar)
+// Día 19 → mora grupo 15 (4-6 días sin pagar)
 cron.schedule('0 13 19 * *', async () => {
   console.log('🔔 Job: mora grupo 15');
-  const clientes = await clientesPorGrupo(15);
+  const clientes = await clientesPorGrupo(15, 'mora');
   for (const c of clientes) {
-    if (c.dias_vencido < 1) continue;
     await enviarTemplate(c.telefono, process.env.TEMPLATE_MORA, { "1": c.nombre.split(' ')[0] });
   }
 });
 
-// Día 29 → mora grupo 25 (5 días sin pagar)
+// Día 29 → mora grupo 25 (4-6 días sin pagar)
 cron.schedule('0 13 29 * *', async () => {
   console.log('🔔 Job: mora grupo 25');
-  const clientes = await clientesPorGrupo(25);
+  const clientes = await clientesPorGrupo(25, 'mora');
   for (const c of clientes) {
-    if (c.dias_vencido < 1) continue;
     await enviarTemplate(c.telefono, process.env.TEMPLATE_MORA, { "1": c.nombre.split(' ')[0] });
   }
 });
@@ -1231,43 +1224,34 @@ function programarSuspensiones(clientes) {
   }, 60 * 60 * 1000); // 1 hora
 }
 
-// Día 15 → 10 días vencido grupo 5
+// Día 15 → 9-11 días vencido grupo 5
 cron.schedule('0 13 15 * *', async () => {
   console.log('🔔 Job: suspensión grupo 5');
-  const clientes = await clientesPorGrupo(5);
-  const morosos = [];
+  const clientes = await clientesPorGrupo(5, 'suspension');
   for (const c of clientes) {
-    if (c.dias_vencido < 1) continue;
     await enviarTemplate(c.telefono, process.env.TEMPLATE_SUSPENSION, { "1": c.nombre.split(' ')[0] });
-    morosos.push(c);
   }
-  programarSuspensiones(morosos);
+  programarSuspensiones(clientes);
 });
 
-// Día 25 → 10 días vencido grupo 15
+// Día 25 → 9-11 días vencido grupo 15
 cron.schedule('0 13 25 * *', async () => {
   console.log('🔔 Job: suspensión grupo 15');
-  const clientes = await clientesPorGrupo(15);
-  const morosos = [];
+  const clientes = await clientesPorGrupo(15, 'suspension');
   for (const c of clientes) {
-    if (c.dias_vencido < 1) continue;
     await enviarTemplate(c.telefono, process.env.TEMPLATE_SUSPENSION, { "1": c.nombre.split(' ')[0] });
-    morosos.push(c);
   }
-  programarSuspensiones(morosos);
+  programarSuspensiones(clientes);
 });
 
-// Día 5 → 10 días vencido grupo 25
+// Día 5 → 9-11 días vencido grupo 25
 cron.schedule('0 13 5 * *', async () => {
   console.log('🔔 Job: suspensión grupo 25');
-  const clientes = await clientesPorGrupo(25);
-  const morosos = [];
+  const clientes = await clientesPorGrupo(25, 'suspension');
   for (const c of clientes) {
-    if (c.dias_vencido < 1) continue;
     await enviarTemplate(c.telefono, process.env.TEMPLATE_SUSPENSION, { "1": c.nombre.split(' ')[0] });
-    morosos.push(c);
   }
-  programarSuspensiones(morosos);
+  programarSuspensiones(clientes);
 });
 
 // Job cumpleaños — todos los días a las 9am
