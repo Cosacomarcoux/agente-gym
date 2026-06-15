@@ -922,6 +922,27 @@ app.get('/test-jobs', async (req, res) => {
       return res.json({ ok: true, enviados: clientes.map(c => c.nombre) });
     } else if (job === 'mora') {
       templateSid = process.env.TEMPLATE_MORA;
+    } else if (job === 'notificar_suspensiones') {
+      const result = await pool.query(
+        `SELECT * FROM suspensiones_pendientes WHERE notificado_cosaco = false ORDER BY timestamp ASC`
+      );
+      if (result.rows.length === 0) {
+        return res.json({ ok: false, mensaje: 'No hay suspensiones pendientes sin notificar' });
+      }
+      const notificados = [];
+      for (const s of result.rows) {
+        await enviarWhatsApp(
+          process.env.COSACO_WHATSAPP.replace('whatsapp:+54', ''),
+          `⚠️ ${s.cliente_nombre} lleva 10 días sin pagar. ¿Suspendo su servicio?\nRespondé SÍ o NO`,
+          'Cosaco'
+        );
+        await pool.query(
+          `UPDATE suspensiones_pendientes SET notificado_cosaco = true, esperando_confirmacion = true WHERE id = $1`,
+          [s.id]
+        );
+        notificados.push(s.cliente_nombre);
+      }
+      return res.json({ ok: true, notificados });
     } else if (job === 'suspension') {
       const clientesSusp = await clientesPorGrupo(5, 'suspension');
       console.log(`Clientes suspensión grupo 5: ${clientesSusp.length}`);
