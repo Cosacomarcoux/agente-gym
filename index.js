@@ -164,41 +164,10 @@ async function loginConReintentos(intentos = 10, esperaInicial = 10000) {
   console.warn('No se pudo hacer login tras todos los intentos. Se reintentará en cada request.');
 }
 
-function calcularFechaVencimiento(fecha_pago, fecha_vencimiento_actual) {
-
-  // Si el cliente ya tiene grupo asignado, mantenerlo
-  if (fecha_vencimiento_actual) {
-    const diaGrupo = new Date(fecha_vencimiento_actual + 'T12:00:00').getDate();
-    const base = new Date(fecha_pago + 'T12:00:00');
-    const vencimiento = new Date(base.getFullYear(), base.getMonth() + 1, diaGrupo);
-    return vencimiento.toISOString().split('T')[0];
-  }
-
-  // Cliente nuevo: calcular grupo según día de pago
-  const fecha = new Date(fecha_pago + 'T12:00:00');
-  const dia = fecha.getDate();
-
-  let diaVencimiento;
-  let mesesAdelante;
-
-  if (dia >= 6 && dia <= 15) {
-    // Grupo 15 — vence el 15 del mes siguiente
-    diaVencimiento = 15;
-    mesesAdelante = 1;
-  } else if (dia >= 16 && dia <= 25) {
-    // Grupo 25 — vence el 25 del mes siguiente
-    diaVencimiento = 25;
-    mesesAdelante = 1;
-  } else {
-    // Grupo 5 — del 26 al 31 o del 1 al 5
-    // Si paga del 26 al 31 → salta 2 meses (ej: 26 abril → 5 junio)
-    // Si paga del 1 al 5 → mes siguiente (ej: 3 mayo → 5 junio)
-    diaVencimiento = 5;
-    mesesAdelante = dia >= 26 ? 2 : 1;
-  }
-
-  const vencimiento = new Date(fecha.getFullYear(), fecha.getMonth() + mesesAdelante, diaVencimiento);
-  return vencimiento.toISOString().split('T')[0];
+function calcularFechaInicio(cliente) {
+  const hoy = new Date().toISOString().split('T')[0];
+  if (cliente.estado === 'Suspendido' || !cliente.fecha_vencimiento) return hoy;
+  return cliente.fecha_vencimiento;
 }
 
 const SYSTEM_PROMPT = `Sos el asistente virtual del gimnasio Hockey Vivo en Santiago del Estero, Argentina. Atendés consultas de clientes y potenciales alumnos por WhatsApp. Respondés en español argentino, de forma amable y breve. Usá emojis con moderación.
@@ -640,8 +609,6 @@ async function ejecutarTool(nombre, input, remitente) {
       const rCliente = await fetch(`${GYM_API}/clientes/${input.cliente_id}`, { headers });
       const cliente = await rCliente.json();
       const hoy = new Date().toISOString().split('T')[0];
-      const fecha_pago = input.fecha_pago
-        || (cliente.estado === 'Suspendido' || !cliente.fecha_vencimiento ? hoy : cliente.fecha_vencimiento);
       // Si hay beca confirmada para este cliente, usar el monto_final
       const becaCliente = becasPendientes.get(remitente);
       const monto = (becaCliente?.monto_final !== undefined) ? becaCliente.monto_final : input.monto;
@@ -652,9 +619,8 @@ async function ejecutarTool(nombre, input, remitente) {
           cliente_id: input.cliente_id,
           monto,
           metodo: input.metodo || 'Transferencia',
-          fecha_pago,
-          fecha_inicio: fecha_pago,
-          fecha_vencimiento: calcularFechaVencimiento(fecha_pago, cliente.fecha_vencimiento),
+          fecha_pago: hoy,
+          fecha_inicio: calcularFechaInicio(cliente),
           plan: cliente.plan,
         }),
       });
@@ -880,6 +846,7 @@ async function manejarConfirmacionPago(confirmado) {
       };
       const rCliente = await fetch(`${GYM_API}/clientes/${pago.cliente_id}`, { headers });
       const cliente = await rCliente.json();
+      const hoy = new Date().toISOString().split('T')[0];
       const r = await fetch(`${GYM_API}/pagos`, {
         method: 'POST',
         headers,
@@ -887,9 +854,8 @@ async function manejarConfirmacionPago(confirmado) {
           cliente_id: pago.cliente_id,
           monto: pago.monto,
           metodo: pago.metodo,
-          fecha_pago: pago.fecha_pago,
-          fecha_inicio: pago.fecha_pago,
-          fecha_vencimiento: calcularFechaVencimiento(pago.fecha_pago, cliente.fecha_vencimiento),
+          fecha_pago: hoy,
+          fecha_inicio: calcularFechaInicio(cliente),
           plan: cliente.plan,
         }),
       });
