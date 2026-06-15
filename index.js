@@ -5,10 +5,32 @@ const Anthropic = require('@anthropic-ai/sdk');
 const cron = require('node-cron');
 const fs = require('fs');
 const path = require('path');
+const { Pool } = require('pg');
 
 const app = express();
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false,
+});
+
+async function initDB() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS conversaciones (
+      id SERIAL PRIMARY KEY,
+      telefono VARCHAR(50) NOT NULL,
+      nombre VARCHAR(200),
+      rol VARCHAR(20) NOT NULL,
+      texto TEXT NOT NULL,
+      timestamp TIMESTAMPTZ DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_telefono ON conversaciones(telefono);
+    CREATE INDEX IF NOT EXISTS idx_timestamp ON conversaciones(timestamp);
+  `);
+  console.log('Tabla conversaciones lista en PostgreSQL');
+}
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
@@ -1010,30 +1032,11 @@ async function enviarWhatsApp(telefono, mensaje) {
   }
 }
 
-const CONV_FILE = path.join(__dirname, 'conversaciones.json');
-
 function guardarMensaje(from, nombre, texto, rol) {
-  try {
-    let conv = {};
-    if (fs.existsSync(CONV_FILE)) {
-      conv = JSON.parse(fs.readFileSync(CONV_FILE, 'utf8'));
-    }
-    if (!conv[from]) {
-      conv[from] = {
-        nombre: nombre || from,
-        telefono: from.replace('whatsapp:', ''),
-        ultimo_mensaje: new Date().toISOString(),
-        mensajes: [],
-      };
-    }
-    const ts = new Date().toISOString();
-    conv[from].ultimo_mensaje = ts;
-    if (nombre && nombre !== from) conv[from].nombre = nombre;
-    conv[from].mensajes.push({ rol, texto, timestamp: ts });
-    fs.writeFileSync(CONV_FILE, JSON.stringify(conv, null, 2));
-  } catch (err) {
-    console.error('Error guardando mensaje:', err.message);
-  }
+  pool.query(
+    'INSERT INTO conversaciones (telefono, nombre, rol, texto) VALUES ($1, $2, $3, $4)',
+    [from, nombre && nombre !== from ? nombre : null, rol, texto]
+  ).catch(err => console.error('Error guardando mensaje en DB:', err.message));
 }
 
 async function enviarTemplate(telefono, templateSid, variables) {
@@ -1310,39 +1313,54 @@ cron.schedule('0 2 * * *', async () => {
 });
 
 // Panel de conversaciones
-app.get('/panel', (req, res) => {
-  let conv = {};
-  if (fs.existsSync(CONV_FILE)) {
-    conv = JSON.parse(fs.readFileSync(CONV_FILE, 'utf8'));
-  }
+app.get('/panel', async (req, res) => {
+  try {
+    // Obtener última fila por teléfono (último mensaje + nombre más reciente no nulo)
+    const { rows: hilos } = await pool.query(`
+      SELECT
+        c.telefono,
+        COALESCE(
+          (SELECT nombre FROM conversaciones n WHERE n.telefono = c.telefono AND n.nombre IS NOT NULL ORDER BY n.timestamp DESC LIMIT 1),
+          c.telefono
+        ) AS nombre,
+        c.texto   AS ultimo_texto,
+        c.rol     AS ultimo_rol,
+        c.timestamp AS ultimo_timestamp
+      FROM conversaciones c
+      WHERE c.id = (
+        SELECT id FROM conversaciones sub
+        WHERE sub.telefono = c.telefono
+        ORDER BY sub.timestamp DESC LIMIT 1
+      )
+      ORDER BY c.timestamp DESC
+    `);
 
-  const hilos = Object.entries(conv)
-    .map(([from, data]) => ({ from, ...data }))
-    .sort((a, b) => new Date(b.ultimo_mensaje) - new Date(a.ultimo_mensaje));
+    function tiempoRelativo(ts) {
+      const diff = Date.now() - new Date(ts).getTime();
+      const min = Math.floor(diff / 60000);
+      if (min < 1) return 'ahora';
+      if (min < 60) return `hace ${min}m`;
+      const hs = Math.floor(min / 60);
+      if (hs < 24) return `hace ${hs}h`;
+      return `hace ${Math.floor(hs / 24)}d`;
+    }
 
-  function tiempoRelativo(iso) {
-    const diff = Date.now() - new Date(iso).getTime();
-    const min = Math.floor(diff / 60000);
-    if (min < 1) return 'ahora';
-    if (min < 60) return `hace ${min}m`;
-    const hs = Math.floor(min / 60);
-    if (hs < 24) return `hace ${hs}h`;
-    return `hace ${Math.floor(hs / 24)}d`;
-  }
+    const listaHTML = hilos.map(h => {
+      const preview = (h.ultimo_texto || '').slice(0, 60) + ((h.ultimo_texto || '').length > 60 ? '…' : '');
+      const nombreEsc = h.nombre.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      const telefonoEsc = h.telefono.replace(/'/g, "\\'");
+      return `<div class="hilo" onclick="abrirHilo('${telefonoEsc}')">
+        <div class="hilo-nombre">${nombreEsc}</div>
+        <div class="hilo-preview">${preview.replace(/</g, '&lt;')}</div>
+        <div class="hilo-tiempo">${tiempoRelativo(h.ultimo_timestamp)}</div>
+      </div>`;
+    }).join('');
 
-  const listaHTML = hilos.map(h => {
-    const ultimo = h.mensajes[h.mensajes.length - 1];
-    const preview = ultimo ? ultimo.texto.slice(0, 60) + (ultimo.texto.length > 60 ? '…' : '') : '';
-    return `<div class="hilo" onclick="abrirHilo('${h.from}')">
-      <div class="hilo-nombre">${h.nombre}</div>
-      <div class="hilo-preview">${preview}</div>
-      <div class="hilo-tiempo">${tiempoRelativo(h.ultimo_mensaje)}</div>
-    </div>`;
-  }).join('');
+    const hilosMetaJSON = JSON.stringify(
+      hilos.map(h => ({ telefono: h.telefono, nombre: h.nombre }))
+    ).replace(/</g, '\\u003c');
 
-  const hilosJSON = JSON.stringify(hilos).replace(/</g, '\\u003c');
-
-  res.send(`<!DOCTYPE html>
+    res.send(`<!DOCTYPE html>
 <html lang="es">
 <head>
   <meta charset="UTF-8">
@@ -1397,19 +1415,25 @@ app.get('/panel', (req, res) => {
   </div>
 </div>
 <script>
-  const hilos = ${hilosJSON};
-  let fromActual = null;
+  const hilosMeta = ${hilosMetaJSON};
+  let telefonoActual = null;
+  let nombreActual = null;
 
-  function abrirHilo(from) {
-    fromActual = from;
-    const h = hilos.find(x => x.from === from);
-    if (!h) return;
+  async function abrirHilo(telefono) {
+    telefonoActual = telefono;
+    const meta = hilosMeta.find(x => x.telefono === telefono);
+    nombreActual = meta ? meta.nombre : telefono;
     document.querySelectorAll('.hilo').forEach(el => el.classList.remove('activo'));
-    document.querySelector('.hilo[onclick*="' + CSS.escape(from) + '"]')?.classList.add('activo');
-    document.getElementById('chat-header').textContent = h.nombre;
+    event.currentTarget.classList.add('activo');
+    document.getElementById('chat-header').textContent = nombreActual;
+    document.getElementById('mensajes').innerHTML = '<div class="placeholder">Cargando...</div>';
+
+    const r = await fetch('/panel/hilo?telefono=' + encodeURIComponent(telefono));
+    const data = await r.json();
+
     const wrap = document.createElement('div');
     wrap.className = 'mensajes-wrap';
-    h.mensajes.forEach(m => {
+    (data.mensajes || []).forEach(m => {
       const div = document.createElement('div');
       div.className = 'msg ' + m.rol;
       const hora = new Date(m.timestamp).toLocaleTimeString('es-AR', {hour:'2-digit', minute:'2-digit'});
@@ -1428,13 +1452,12 @@ app.get('/panel', (req, res) => {
   async function enviar() {
     const input = document.getElementById('msg-input');
     const texto = input.value.trim();
-    if (!texto || !fromActual) return;
-    const h = hilos.find(x => x.from === fromActual);
+    if (!texto || !telefonoActual) return;
     input.value = '';
     const r = await fetch('/panel/enviar', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ telefono: h.telefono, mensaje: texto })
+      body: JSON.stringify({ telefono: telefonoActual, mensaje: texto })
     });
     const data = await r.json();
     if (data.ok) location.reload();
@@ -1442,6 +1465,26 @@ app.get('/panel', (req, res) => {
 </script>
 </body>
 </html>`);
+  } catch (err) {
+    console.error('Error en GET /panel:', err.message);
+    res.status(500).send('Error cargando el panel: ' + err.message);
+  }
+});
+
+// Hilo completo de una conversación desde PostgreSQL
+app.get('/panel/hilo', async (req, res) => {
+  const { telefono } = req.query;
+  if (!telefono) return res.status(400).json({ error: 'Falta telefono' });
+  try {
+    const { rows } = await pool.query(
+      'SELECT rol, texto, timestamp FROM conversaciones WHERE telefono = $1 ORDER BY timestamp ASC',
+      [telefono]
+    );
+    res.json({ mensajes: rows });
+  } catch (err) {
+    console.error('Error en GET /panel/hilo:', err.message);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.post('/panel/enviar', async (req, res) => {
@@ -1464,5 +1507,6 @@ app.post('/panel/enviar', async (req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Servidor escuchando en puerto ${PORT}`);
+  initDB().catch(err => console.error('Error inicializando DB:', err.message));
   loginConReintentos().catch(() => {});
 });
