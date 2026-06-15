@@ -931,6 +931,12 @@ app.get('/test-jobs', async (req, res) => {
       for (const c of clientesSusp) {
         const nombre = c.nombre.split(' ')[0];
         await enviarTemplate(c.telefono, process.env.TEMPLATE_SUSPENSION, {"1": nombre}, '[Aviso de suspensión]');
+        await pool.query(
+          `INSERT INTO suspensiones_pendientes (cliente_id, cliente_nombre, telefono)
+           VALUES ($1, $2, $3)
+           ON CONFLICT DO NOTHING`,
+          [c.id, c.nombre, c.telefono]
+        );
         console.log(`✅ Enviado suspensión a ${c.nombre}`);
       }
       return res.json({ ok: true, enviados: clientesSusp.map(c => c.nombre) });
