@@ -34,6 +34,16 @@ async function initDB() {
       pagos_registrados JSONB DEFAULT '[]',
       turnos_cambiados JSONB DEFAULT '[]'
     );
+
+    CREATE TABLE IF NOT EXISTS suspensiones_pendientes (
+      id SERIAL PRIMARY KEY,
+      cliente_id INTEGER NOT NULL,
+      cliente_nombre VARCHAR(200),
+      telefono VARCHAR(50),
+      timestamp TIMESTAMPTZ DEFAULT NOW(),
+      esperando_confirmacion BOOLEAN DEFAULT FALSE,
+      notificado_cosaco BOOLEAN DEFAULT FALSE
+    );
   `);
   console.log('Tablas listas en PostgreSQL');
 }
@@ -89,7 +99,6 @@ let pagoEnEspera = null; // { cliente_id, cliente_nombre, cliente_from, monto, m
 const colaPagendientes = []; // cola FIFO de pagos
 
 // Suspensiones pendientes de confirmación por Cosaco
-const suspencionesPendientes = new Map();
 // clave: cliente_id como string, valor: { cliente_id, cliente_nombre, telefono, timestamp, esperandoConfirmacion }
 
 // Becas pendientes de confirmación por Cosaco
@@ -998,10 +1007,13 @@ app.post('/webhook', (req, res) => {
 
   // Detectar si es Cosaco respondiendo a una suspensión pendiente
   if (remitente === process.env.COSACO_WHATSAPP) {
-    const suspensionEsperando = [...suspencionesPendientes.values()].find(s => s.esperandoConfirmacion);
-    if (suspensionEsperando) {
-      const respuesta = mensaje.trim().toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-      (async () => {
+    (async () => {
+      const { rows } = await pool.query(
+        `SELECT * FROM suspensiones_pendientes WHERE esperando_confirmacion = true ORDER BY timestamp ASC LIMIT 1`
+      );
+      const suspensionEsperando = rows[0];
+      if (suspensionEsperando) {
+        const respuesta = mensaje.trim().toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
         if (respuesta === 'SI' || respuesta === 'S') {
           await fetch(`${GYM_API}/clientes/${suspensionEsperando.cliente_id}/suspender`, {
             method: 'DELETE',
@@ -1010,22 +1022,32 @@ app.post('/webhook', (req, res) => {
           console.log(`✅ Cliente ${suspensionEsperando.cliente_nombre} suspendido`);
           await enviarWhatsApp(process.env.COSACO_WHATSAPP.replace('whatsapp:+54', ''),
             `✅ Servicio de ${suspensionEsperando.cliente_nombre} suspendido correctamente.`);
-        } else {
+        } else if (respuesta === 'NO' || respuesta === 'N') {
           await enviarWhatsApp(process.env.COSACO_WHATSAPP.replace('whatsapp:+54', ''),
             `👍 Ok, ${suspensionEsperando.cliente_nombre} no fue suspendido.`);
+        } else {
+          return; // No es SÍ/NO, no procesar como suspensión
         }
 
-        // Limpiar y pasar al siguiente
-        suspencionesPendientes.delete(suspensionEsperando.cliente_id.toString());
-        const siguiente = [...suspencionesPendientes.values()].find(s => !s.esperandoConfirmacion);
-        if (siguiente) {
+        // Eliminar de la tabla y pasar al siguiente
+        await pool.query(`DELETE FROM suspensiones_pendientes WHERE id = $1`, [suspensionEsperando.id]);
+        const { rows: pendientes } = await pool.query(
+          `SELECT * FROM suspensiones_pendientes WHERE esperando_confirmacion = false ORDER BY timestamp ASC LIMIT 1`
+        );
+        if (pendientes.length > 0) {
+          const siguiente = pendientes[0];
           await enviarWhatsApp(process.env.COSACO_WHATSAPP.replace('whatsapp:+54', ''),
-            `⚠️ Siguiente: ${siguiente.cliente_nombre} lleva 10 días sin pagar. ¿Suspendo su servicio?\nRespondé SÍ o NO`);
-          suspencionesPendientes.set(siguiente.cliente_id.toString(), { ...siguiente, esperandoConfirmacion: true });
+            `⚠️ Siguiente: ${siguiente.cliente_nombre} lleva 10 días sin pagar. ¿Suspendo su servicio?\nRespondé SÍ o NO`,
+            'Cosaco'
+          );
+          await pool.query(
+            `UPDATE suspensiones_pendientes SET esperando_confirmacion = true, notificado_cosaco = true WHERE id = $1`,
+            [siguiente.id]
+          );
         }
-      })().catch(err => console.error('Error manejando suspensión:', err));
-      return;
-    }
+        return;
+      }
+    })().catch(err => console.error('Error manejando suspensión:', err));
   }
 
   // Detectar si es Cosaco respondiendo a una consulta de beca
@@ -1234,25 +1256,42 @@ cron.schedule('0 13 29 * *', async () => {
   }
 });
 
-function programarSuspensiones(clientes) {
+async function programarSuspensiones(clientes) {
   for (const c of clientes) {
-    suspencionesPendientes.set(c.id.toString(), {
-      cliente_id: c.id,
-      cliente_nombre: c.nombre,
-      telefono: c.telefono,
-      timestamp: Date.now()
-    });
+    await pool.query(
+      `INSERT INTO suspensiones_pendientes (cliente_id, cliente_nombre, telefono)
+       VALUES ($1, $2, $3)
+       ON CONFLICT DO NOTHING`,
+      [c.id, c.nombre, c.telefono]
+    );
+    console.log(`📋 Suspensión programada en DB: ${c.nombre}`);
   }
-  setTimeout(async () => {
-    for (const [cliente_id, datos] of suspencionesPendientes.entries()) {
-      if (datos.esperandoConfirmacion) continue;
-      await enviarWhatsApp(process.env.COSACO_WHATSAPP.replace('whatsapp:+54', ''),
-        `⚠️ ${datos.cliente_nombre} lleva 10 días sin pagar. ¿Suspendo su servicio?\nRespondé SÍ o NO`);
-      suspencionesPendientes.set(cliente_id, { ...datos, esperandoConfirmacion: true });
-      break; // enviar de a uno
-    }
-  }, 60 * 60 * 1000); // 1 hora
 }
+
+// Cada 15 minutos: notificar a Cosaco las suspensiones con más de 1 hora sin notificar
+cron.schedule('*/15 * * * *', async () => {
+  try {
+    const result = await pool.query(`
+      SELECT * FROM suspensiones_pendientes
+      WHERE notificado_cosaco = false
+      AND timestamp < NOW() - INTERVAL '1 hour'
+      ORDER BY timestamp ASC
+    `);
+    for (const s of result.rows) {
+      await enviarWhatsApp(
+        process.env.COSACO_WHATSAPP.replace('whatsapp:+54', ''),
+        `⚠️ ${s.cliente_nombre} lleva 10 días sin pagar. ¿Suspendo su servicio?\nRespondé SÍ o NO`,
+        'Cosaco'
+      );
+      await pool.query(
+        `UPDATE suspensiones_pendientes SET notificado_cosaco = true, esperando_confirmacion = true WHERE id = $1`,
+        [s.id]
+      );
+    }
+  } catch (err) {
+    console.error('Error en cron suspensiones pendientes:', err.message);
+  }
+});
 
 // Día 15 → 9-11 días vencido grupo 5
 cron.schedule('0 13 15 * *', async () => {
