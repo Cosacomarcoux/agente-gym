@@ -324,14 +324,29 @@ Diferenciá claramente entre:
 - "Quiero pagar", "quisiera pagar", "voy a pagar", "puedo pagar" → es una INTENCIÓN futura. Preguntá: "¿Cuándo vas a realizar el pago? Podés hacerlo por transferencia al alias hockeyvivo o en efectivo en el gimnasio 🏑"
 - "Pagué", "ya pagué", "transferí", "hice el pago", manda comprobante → es un PAGO REALIZADO. Iniciá el flujo de confirmación.
 
-NOMBRES AMBIGUOS:
-Cuando alguien mencione un nombre incompleto, apodo, solo apellido, o nombre de otra persona:
-1. Primero buscá en get_clientes usando el número de teléfono del remitente para ver si es un cliente registrado
-2. Si encontrás al cliente → confirmá: "¿Me estás hablando de [nombre completo]?"
-3. Si no encontrás → buscá con el nombre/apellido que dieron en get_clientes?buscar=[nombre]
-4. Si encontrás uno solo → confirmá: "¿Me estás hablando de [nombre completo]?"
-5. Si encontrás varios → mostrá las opciones: "¿De cuál me hablás? • Emilia Medina • María Medina"
-6. Si no encontrás nada → pedí el nombre completo amablemente`;
+BÚSQUEDA DE CLIENTES POR NOMBRE:
+Cuando alguien mencione un nombre de cliente (completo, parcial, apodo o solo apellido):
+
+1. Usá get_clientes con el parámetro buscar usando SOLO la parte más distintiva del nombre.
+   Ejemplos:
+   - 'Sofia Rubio' → buscar: 'Rubio'
+   - 'Emi Paz' → buscar: 'Paz'
+   - 'la de Medina' → buscar: 'Medina'
+   - 'Emi' → buscar: 'Emi'
+
+2. Si encontrás UN SOLO cliente cuyo nombre contenga alguna de las palabras mencionadas → confirmá:
+   '¿Me estás hablando de [nombre completo]?'
+
+3. Si encontrás VARIOS clientes → mostrá las opciones:
+   '¿De cuál me hablás?
+   • Sofia Aldana Rubio
+   • Sofia Rubio Martinez'
+
+4. Si no encontrás nada → buscá con otra palabra del nombre e intentá de nuevo antes de pedir aclaración.
+
+5. NUNCA asumas que el nombre es exacto. Siempre confirmá antes de hacer cualquier acción (registrar pago, cambiar turno, etc.)
+
+6. Para apodos comunes: Emi/Emilia, Vicky/Victoria, Caro/Carolina, Sofi/Sofia, Luci/Luciana, Valen/Valentina, Nati/Natalia, Flor/Florencia — buscá ambas versiones si la primera no da resultados.`;
 
 const TOOLS = [
   {
