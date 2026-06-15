@@ -709,7 +709,7 @@ async function ejecutarTool(nombre, input, remitente) {
   }
 }
 
-async function procesarMensaje(mensaje, remitente) {
+async function procesarMensaje(mensaje, remitente, profileName = null) {
   try {
     if (!GYM_TOKEN) {
       console.log('Sin token, intentando login...');
@@ -770,7 +770,7 @@ async function procesarMensaje(mensaje, remitente) {
     if (texto.includes('Te paso con el equipo')) {
       await enviarWhatsApp(
         process.env.COSACO_WHATSAPP.replace('whatsapp:+54', ''),
-        `⚠️ ${remitente} necesita atención humana.\nÚltimo mensaje: "${mensaje}"\nContactalo a la brevedad 🏑`,
+        `⚠️ ${profileName || remitente} necesita atención humana.\nÚltimo mensaje: "${mensaje}"\nContactalo a la brevedad 🏑`,
         'Cosaco'
       );
     }
@@ -1057,7 +1057,7 @@ app.post('/webhook', (req, res) => {
   }
 
   // Procesar en background
-  procesarMensaje(mensaje, remitente);
+  procesarMensaje(mensaje, remitente, profileName);
 });
 
 async function enviarWhatsApp(telefono, mensaje, nombre = null) {
