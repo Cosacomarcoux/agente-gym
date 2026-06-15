@@ -814,7 +814,7 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
       respuesta = await anthropic.messages.create({
         model: 'claude-haiku-4-5-20251001',
         max_tokens: 1024,
-        system: SYSTEM_PROMPT,
+        system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
         tools: TOOLS,
         messages: conv.messages,
       });
