@@ -657,6 +657,7 @@ async function ejecutarTool(nombre, input, remitente) {
             body: mensajeCosaco,
           });
           console.log(`[Twilio] Mensaje enviado OK — SID: ${msgResult.sid} | status: ${msgResult.status} | to: ${msgResult.to} | from: ${msgResult.from}`);
+          guardarMensaje(process.env.COSACO_WHATSAPP, null, mensajeCosaco, 'agente');
         } catch (twilioErr) {
           console.error(`[Twilio] ERROR al enviar a Cosaco — code: ${twilioErr.code} | status: ${twilioErr.status} | message: ${twilioErr.message}`);
           pagoEnEspera = null;
@@ -690,11 +691,8 @@ async function ejecutarTool(nombre, input, remitente) {
         costo: input.costo,
         plan: input.plan,
       });
-      await twilioClient.messages.create({
-        from: TWILIO_FROM,
-        to: process.env.COSACO_WHATSAPP,
-        body: `⚠️ ${input.cliente_nombre} dice que tiene beca.\n¿Qué tipo le corresponde?\nRespondé: SIN BECA, 50% o 100%`,
-      });
+      await enviarWhatsApp(process.env.COSACO_WHATSAPP,
+        `⚠️ ${input.cliente_nombre} dice que tiene beca.\n¿Qué tipo le corresponde?\nRespondé: SIN BECA, 50% o 100%`);
       console.log(`Consulta de beca enviada a Cosaco para ${input.cliente_nombre}`);
       return { ok: true };
     }
@@ -797,25 +795,17 @@ async function manejarConfirmacionPago(confirmado) {
       console.log('Pago registrado:', JSON.stringify(resultado));
       registrarActividad('pago', { nombre: pago.cliente_nombre, monto: pago.monto });
 
-      await twilioClient.messages.create({
-        from: TWILIO_FROM,
-        to: pago.cliente_from,
-        body: `✅ Pago registrado: ${pago.cliente_nombre} - $${pago.monto} - ${pago.metodo} - ${pago.fecha_pago} 🏑`,
-      });
+      await enviarWhatsApp(pago.cliente_from,
+        `✅ Pago registrado: ${pago.cliente_nombre} - $${pago.monto} - ${pago.metodo} - ${pago.fecha_pago} 🏑`,
+        pago.cliente_nombre);
     } catch (err) {
       console.error('Error registrando pago confirmado:', err);
     }
   } else {
     console.log(`Cosaco rechazó pago de ${pago.cliente_nombre}`);
-    try {
-      await twilioClient.messages.create({
-        from: TWILIO_FROM,
-        to: pago.cliente_from,
-        body: `Quedá tranquilo/a, en breve un integrante del equipo se comunica con vos para resolverlo 🏑`,
-      });
-    } catch (err) {
-      console.error('Error notificando cliente sobre pago rechazado:', err);
-    }
+    await enviarWhatsApp(pago.cliente_from,
+      `Quedá tranquilo/a, en breve un integrante del equipo se comunica con vos para resolverlo 🏑`,
+      pago.cliente_nombre);
   }
 
   // Procesar siguiente en cola
@@ -825,16 +815,8 @@ async function manejarConfirmacionPago(confirmado) {
       `💰 Siguiente pago a confirmar:\n` +
       `Cliente: ${pagoEnEspera.cliente_nombre} - $${pagoEnEspera.monto} - ${pagoEnEspera.metodo}\n` +
       `¿Confirmás? SÍ o NO`;
-    try {
-      await twilioClient.messages.create({
-        from: TWILIO_FROM,
-        to: process.env.COSACO_WHATSAPP,
-        body: mensajeCosaco,
-      });
-      console.log(`Siguiente pago en cola enviado a Cosaco: ${pagoEnEspera.cliente_nombre}`);
-    } catch (err) {
-      console.error('Error enviando siguiente pago a Cosaco:', err);
-    }
+    await enviarWhatsApp(process.env.COSACO_WHATSAPP, mensajeCosaco);
+    console.log(`Siguiente pago en cola enviado a Cosaco: ${pagoEnEspera.cliente_nombre}`);
   }
 }
 
@@ -1047,7 +1029,7 @@ app.post('/webhook', (req, res) => {
           const msgCliente = tipoBeca === 'SIN BECA'
             ? `✅ Confirmado ${beca.cliente_nombre.split(' ')[0]}! No tenés beca asignada.\nTu cuota este mes es $${monto.toLocaleString('es-AR')}.\n¿Ya realizaste el pago? Si es así, avisanos para registrarlo 🏑`
             : `✅ Confirmado ${beca.cliente_nombre.split(' ')[0]}! Tu beca es del ${tipoBeca}.\nTu cuota este mes es $${monto.toLocaleString('es-AR')}.\n¿Ya realizaste el pago? Si es así, avisanos para registrarlo 🏑`;
-          await twilioClient.messages.create({ from: TWILIO_FROM, to: clienteFrom, body: msgCliente });
+          await enviarWhatsApp(clienteFrom, msgCliente, beca.cliente_nombre.split(' ')[0]);
 
           // Notificar a Cosaco
           await enviarWhatsApp(process.env.COSACO_WHATSAPP.replace('whatsapp:+54', ''),
@@ -1064,7 +1046,7 @@ app.post('/webhook', (req, res) => {
   procesarMensaje(mensaje, remitente);
 });
 
-async function enviarWhatsApp(telefono, mensaje) {
+async function enviarWhatsApp(telefono, mensaje, nombre = null) {
   try {
     let tel = telefono.toString().replace(/\D/g, '');
     if (tel.startsWith('549')) tel = tel.slice(2); // queda 9XXXXXXXXXX
@@ -1072,6 +1054,7 @@ async function enviarWhatsApp(telefono, mensaje) {
     const to = `whatsapp:+54${tel}`;
     await twilioClient.messages.create({ from: TWILIO_FROM, to, body: mensaje });
     console.log(`✅ Mensaje enviado a ${to}`);
+    guardarMensaje(to, nombre, mensaje, 'agente');
   } catch (err) {
     console.error(`❌ Error enviando a ${telefono}: ${err.message}`);
   }
