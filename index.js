@@ -3,8 +3,6 @@ const express = require('express');
 const twilio = require('twilio');
 const Anthropic = require('@anthropic-ai/sdk');
 const cron = require('node-cron');
-const fs = require('fs');
-const path = require('path');
 const { Pool } = require('pg');
 
 const app = express();
@@ -28,8 +26,49 @@ async function initDB() {
     );
     CREATE INDEX IF NOT EXISTS idx_telefono ON conversaciones(telefono);
     CREATE INDEX IF NOT EXISTS idx_timestamp ON conversaciones(timestamp);
+
+    CREATE TABLE IF NOT EXISTS actividad_dia (
+      fecha DATE PRIMARY KEY,
+      mensajes_atendidos INTEGER DEFAULT 0,
+      nuevos_clientes JSONB DEFAULT '[]',
+      pagos_registrados JSONB DEFAULT '[]',
+      turnos_cambiados JSONB DEFAULT '[]'
+    );
   `);
-  console.log('Tabla conversaciones lista en PostgreSQL');
+  console.log('Tablas listas en PostgreSQL');
+}
+
+async function registrarActividad(tipo, dato) {
+  const hoy = new Date().toISOString().split('T')[0];
+  try {
+    await pool.query(
+      `INSERT INTO actividad_dia (fecha) VALUES ($1) ON CONFLICT (fecha) DO NOTHING`,
+      [hoy]
+    );
+    if (tipo === 'mensaje') {
+      await pool.query(
+        `UPDATE actividad_dia SET mensajes_atendidos = mensajes_atendidos + 1 WHERE fecha = $1`,
+        [hoy]
+      );
+    } else if (tipo === 'cliente') {
+      await pool.query(
+        `UPDATE actividad_dia SET nuevos_clientes = nuevos_clientes || $2::jsonb WHERE fecha = $1`,
+        [hoy, JSON.stringify(dato)]
+      );
+    } else if (tipo === 'pago') {
+      await pool.query(
+        `UPDATE actividad_dia SET pagos_registrados = pagos_registrados || $2::jsonb WHERE fecha = $1`,
+        [hoy, JSON.stringify(dato)]
+      );
+    } else if (tipo === 'turno') {
+      await pool.query(
+        `UPDATE actividad_dia SET turnos_cambiados = turnos_cambiados || $2::jsonb WHERE fecha = $1`,
+        [hoy, JSON.stringify(dato)]
+      );
+    }
+  } catch (err) {
+    console.error('Error registrando actividad:', err.message);
+  }
 }
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
@@ -57,13 +96,6 @@ const suspencionesPendientes = new Map();
 const becasPendientes = new Map();
 // clave: cliente_from (whatsapp del cliente), valor: { cliente_id, cliente_nombre, cliente_from, costo, plan, tipo_beca?, monto_final? }
 
-const actividadDia = {
-  nuevosClientes: [],
-  pagosRegistrados: [],
-  turnosCambiados: [],
-  mensajesAtendidos: 0,
-  fecha: new Date().toDateString()
-};
 
 function limpiarConversacionesViejas() {
   const ahora = Date.now();
@@ -462,7 +494,7 @@ async function ejecutarTool(nombre, input, remitente) {
 
         const nuevoCliente = await rNuevo.json();
         const { asignados, errores } = await asignarTurnos(nuevoCliente.id, input.turno_ids);
-        actividadDia.nuevosClientes.push(nombreCompleto);
+        registrarActividad('cliente', nombreCompleto);
         return {
           ok: true,
           nuevo: true,
@@ -486,7 +518,7 @@ async function ejecutarTool(nombre, input, remitente) {
       // 4. Existe pero sin turnos → asignar directamente
       if (turnosActuales.length === 0) {
         const { asignados, errores } = await asignarTurnos(cliente_id, input.turno_ids);
-        actividadDia.nuevosClientes.push(nombreExistente);
+        registrarActividad('cliente', nombreExistente);
         return {
           ok: true,
           bienvenida_vuelta: true,
@@ -532,7 +564,7 @@ async function ejecutarTool(nombre, input, remitente) {
       if (asignados.length > 0) {
         const rCli = await fetch(`${GYM_API}/clientes/${input.cliente_id}`, { headers });
         const cli = await rCli.json();
-        actividadDia.turnosCambiados.push(cli.nombre || `ID ${input.cliente_id}`);
+        registrarActividad('turno', cli.nombre || `ID ${input.cliente_id}`);
       }
       return {
         ok: true,
@@ -584,7 +616,7 @@ async function ejecutarTool(nombre, input, remitente) {
       const resultado = await r.json();
       // Limpiar beca pendiente una vez registrado el pago
       if (becaCliente) becasPendientes.delete(remitente);
-      actividadDia.pagosRegistrados.push({ nombre: cliente.nombre, monto });
+      registrarActividad('pago', { nombre: cliente.nombre, monto });
       return resultado;
     }
 
@@ -728,7 +760,7 @@ async function procesarMensaje(mensaje, remitente) {
       body: texto,
     });
     guardarMensaje(remitente, null, texto, 'agente');
-    actividadDia.mensajesAtendidos++;
+    registrarActividad('mensaje');
     console.log(`Mensaje enviado a ${remitente}`);
   } catch (error) {
     console.error(`Error procesando mensaje de ${remitente}:`, error);
@@ -763,7 +795,7 @@ async function manejarConfirmacionPago(confirmado) {
       });
       const resultado = await r.json();
       console.log('Pago registrado:', JSON.stringify(resultado));
-      actividadDia.pagosRegistrados.push({ nombre: pago.cliente_nombre, monto: pago.monto });
+      registrarActividad('pago', { nombre: pago.cliente_nombre, monto: pago.monto });
 
       await twilioClient.messages.create({
         from: TWILIO_FROM,
@@ -845,27 +877,30 @@ app.get('/test-jobs', async (req, res) => {
     } else if (job === 'cumpleanos') {
       templateSid = process.env.TEMPLATE_CUMPLEANOS;
     } else if (job === 'informe') {
+      const fechaHoy = new Date().toISOString().split('T')[0];
+      const result = await pool.query('SELECT * FROM actividad_dia WHERE fecha = $1', [fechaHoy]);
+      const actividad = result.rows[0] || { mensajes_atendidos: 0, nuevos_clientes: [], pagos_registrados: [], turnos_cambiados: [] };
       const hoy = new Date().toLocaleDateString('es-AR');
       let informe = `📊 *Informe del día — ${hoy}*\n\n`;
-      informe += `💬 Mensajes atendidos: ${actividadDia.mensajesAtendidos}\n\n`;
-      if (actividadDia.nuevosClientes.length > 0) {
-        informe += `✅ Nuevos clientes (${actividadDia.nuevosClientes.length}):\n`;
-        actividadDia.nuevosClientes.forEach(n => informe += `• ${n}\n`);
+      informe += `💬 Mensajes atendidos: ${actividad.mensajes_atendidos}\n\n`;
+      if (actividad.nuevos_clientes.length > 0) {
+        informe += `✅ Nuevos clientes (${actividad.nuevos_clientes.length}):\n`;
+        actividad.nuevos_clientes.forEach(n => informe += `• ${n}\n`);
         informe += '\n';
       } else {
         informe += `✅ Nuevos clientes: ninguno\n\n`;
       }
-      if (actividadDia.pagosRegistrados.length > 0) {
-        const total = actividadDia.pagosRegistrados.reduce((sum, p) => sum + p.monto, 0);
-        informe += `💰 Pagos registrados (${actividadDia.pagosRegistrados.length}) — Total: $${total.toLocaleString('es-AR')}:\n`;
-        actividadDia.pagosRegistrados.forEach(p => informe += `• ${p.nombre}: $${p.monto.toLocaleString('es-AR')}\n`);
+      if (actividad.pagos_registrados.length > 0) {
+        const total = actividad.pagos_registrados.reduce((sum, p) => sum + p.monto, 0);
+        informe += `💰 Pagos registrados (${actividad.pagos_registrados.length}) — Total: $${total.toLocaleString('es-AR')}:\n`;
+        actividad.pagos_registrados.forEach(p => informe += `• ${p.nombre}: $${p.monto.toLocaleString('es-AR')}\n`);
         informe += '\n';
       } else {
         informe += `💰 Pagos registrados: ninguno\n\n`;
       }
-      if (actividadDia.turnosCambiados.length > 0) {
-        informe += `🔄 Cambios de turno (${actividadDia.turnosCambiados.length}):\n`;
-        actividadDia.turnosCambiados.forEach(n => informe += `• ${n}\n`);
+      if (actividad.turnos_cambiados.length > 0) {
+        informe += `🔄 Cambios de turno (${actividad.turnos_cambiados.length}):\n`;
+        actividad.turnos_cambiados.forEach(n => informe += `• ${n}\n`);
         informe += '\n';
       } else {
         informe += `🔄 Cambios de turno: ninguno\n\n`;
@@ -1268,48 +1303,48 @@ cron.schedule('0 12 * * *', async () => {
 
 // Informe diario a las 23hs
 cron.schedule('0 2 * * *', async () => {
-  const hoy = new Date().toLocaleDateString('es-AR');
+  try {
+    const fechaHoy = new Date().toISOString().split('T')[0];
+    const result = await pool.query('SELECT * FROM actividad_dia WHERE fecha = $1', [fechaHoy]);
+    const actividad = result.rows[0] || { mensajes_atendidos: 0, nuevos_clientes: [], pagos_registrados: [], turnos_cambiados: [] };
 
-  let informe = `📊 *Informe del día — ${hoy}*\n\n`;
+    const hoy = new Date().toLocaleDateString('es-AR');
+    let informe = `📊 *Informe del día — ${hoy}*\n\n`;
 
-  informe += `💬 Mensajes atendidos: ${actividadDia.mensajesAtendidos}\n\n`;
+    informe += `💬 Mensajes atendidos: ${actividad.mensajes_atendidos}\n\n`;
 
-  if (actividadDia.nuevosClientes.length > 0) {
-    informe += `✅ Nuevos clientes (${actividadDia.nuevosClientes.length}):\n`;
-    actividadDia.nuevosClientes.forEach(n => informe += `• ${n}\n`);
-    informe += '\n';
-  } else {
-    informe += `✅ Nuevos clientes: ninguno\n\n`;
+    if (actividad.nuevos_clientes.length > 0) {
+      informe += `✅ Nuevos clientes (${actividad.nuevos_clientes.length}):\n`;
+      actividad.nuevos_clientes.forEach(n => informe += `• ${n}\n`);
+      informe += '\n';
+    } else {
+      informe += `✅ Nuevos clientes: ninguno\n\n`;
+    }
+
+    if (actividad.pagos_registrados.length > 0) {
+      const total = actividad.pagos_registrados.reduce((sum, p) => sum + p.monto, 0);
+      informe += `💰 Pagos registrados (${actividad.pagos_registrados.length}) — Total: $${total.toLocaleString('es-AR')}:\n`;
+      actividad.pagos_registrados.forEach(p => informe += `• ${p.nombre}: $${p.monto.toLocaleString('es-AR')}\n`);
+      informe += '\n';
+    } else {
+      informe += `💰 Pagos registrados: ninguno\n\n`;
+    }
+
+    if (actividad.turnos_cambiados.length > 0) {
+      informe += `🔄 Cambios de turno (${actividad.turnos_cambiados.length}):\n`;
+      actividad.turnos_cambiados.forEach(n => informe += `• ${n}\n`);
+      informe += '\n';
+    } else {
+      informe += `🔄 Cambios de turno: ninguno\n\n`;
+    }
+
+    informe += `_Hasta mañana Cosaco! 🏑_`;
+
+    await enviarWhatsApp(process.env.COSACO_WHATSAPP.replace('whatsapp:+54', ''), informe);
+    console.log('📊 Informe diario enviado a Cosaco');
+  } catch (err) {
+    console.error('Error en cron informe diario:', err.message);
   }
-
-  if (actividadDia.pagosRegistrados.length > 0) {
-    const total = actividadDia.pagosRegistrados.reduce((sum, p) => sum + p.monto, 0);
-    informe += `💰 Pagos registrados (${actividadDia.pagosRegistrados.length}) — Total: $${total.toLocaleString('es-AR')}:\n`;
-    actividadDia.pagosRegistrados.forEach(p => informe += `• ${p.nombre}: $${p.monto.toLocaleString('es-AR')}\n`);
-    informe += '\n';
-  } else {
-    informe += `💰 Pagos registrados: ninguno\n\n`;
-  }
-
-  if (actividadDia.turnosCambiados.length > 0) {
-    informe += `🔄 Cambios de turno (${actividadDia.turnosCambiados.length}):\n`;
-    actividadDia.turnosCambiados.forEach(n => informe += `• ${n}\n`);
-    informe += '\n';
-  } else {
-    informe += `🔄 Cambios de turno: ninguno\n\n`;
-  }
-
-  informe += `_Hasta mañana Cosaco! 🏑_`;
-
-  await enviarWhatsApp(process.env.COSACO_WHATSAPP.replace('whatsapp:+54', ''), informe);
-
-  actividadDia.nuevosClientes = [];
-  actividadDia.pagosRegistrados = [];
-  actividadDia.turnosCambiados = [];
-  actividadDia.mensajesAtendidos = 0;
-  actividadDia.fecha = new Date().toDateString();
-
-  console.log('📊 Informe diario enviado a Cosaco');
 });
 
 // Panel de conversaciones
