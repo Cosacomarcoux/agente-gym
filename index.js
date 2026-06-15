@@ -866,7 +866,7 @@ app.get('/test-jobs', async (req, res) => {
       }
       for (const c of clientes) {
         const nombre = c.nombre.split(' ')[0];
-        await enviarTemplate(c.telefono, process.env.TEMPLATE_RECORDATORIO, {"1": nombre});
+        await enviarTemplate(c.telefono, process.env.TEMPLATE_RECORDATORIO, {"1": nombre}, '[Recordatorio de vencimiento]');
         console.log(`✅ Enviado a ${c.nombre}`);
       }
       return res.json({ ok: true, enviados: clientes.map(c => c.nombre) });
@@ -880,7 +880,7 @@ app.get('/test-jobs', async (req, res) => {
       }
       for (const c of clientesSusp) {
         const nombre = c.nombre.split(' ')[0];
-        await enviarTemplate(c.telefono, process.env.TEMPLATE_SUSPENSION, {"1": nombre});
+        await enviarTemplate(c.telefono, process.env.TEMPLATE_SUSPENSION, {"1": nombre}, '[Aviso de suspensión]');
         console.log(`✅ Enviado suspensión a ${c.nombre}`);
       }
       return res.json({ ok: true, enviados: clientesSusp.map(c => c.nombre) });
@@ -1084,7 +1084,7 @@ function guardarMensaje(from, nombre, texto, rol) {
   ).catch(err => console.error('Error guardando mensaje en DB:', err.message));
 }
 
-async function enviarTemplate(telefono, templateSid, variables) {
+async function enviarTemplate(telefono, templateSid, variables, textoGuardar = '[Mensaje automático]') {
   try {
     let tel = telefono.toString().replace(/\D/g, '');
     if (tel.startsWith('549')) tel = tel.slice(2);
@@ -1098,6 +1098,9 @@ async function enviarTemplate(telefono, templateSid, variables) {
       contentVariables: JSON.stringify(variables)
     });
     console.log(`✅ Template enviado a ${to}`);
+
+    const nombre = variables['1'] || null;
+    guardarMensaje(to, nombre, textoGuardar, 'agente');
   } catch (err) {
     console.error(`❌ Error enviando template a ${telefono}: ${err.message}`);
   }
@@ -1160,7 +1163,7 @@ cron.schedule('0 13 4 * *', async () => {
   console.log('🔔 Job: recordatorio grupo 5');
   const clientes = await clientesPorGrupo(5, 'recordatorio');
   for (const c of clientes) {
-    await enviarTemplate(c.telefono, process.env.TEMPLATE_RECORDATORIO, { "1": c.nombre.split(' ')[0] });
+    await enviarTemplate(c.telefono, process.env.TEMPLATE_RECORDATORIO, { "1": c.nombre.split(' ')[0] }, '[Recordatorio de vencimiento]');
   }
 });
 
@@ -1170,7 +1173,7 @@ cron.schedule('45 13 14 6 *', async () => {
   const clientes = await clientesPorGrupo(15, 'recordatorio');
   for (const c of clientes) {
     const nombre = c.nombre.split(' ')[0];
-    await enviarTemplate(c.telefono, process.env.TEMPLATE_RECORDATORIO, {"1": nombre});
+    await enviarTemplate(c.telefono, process.env.TEMPLATE_RECORDATORIO, {"1": nombre}, '[Recordatorio de vencimiento]');
   }
 });
 
@@ -1179,7 +1182,7 @@ cron.schedule('0 13 14 * *', async () => {
   console.log('🔔 Job: recordatorio grupo 15');
   const clientes = await clientesPorGrupo(15, 'recordatorio');
   for (const c of clientes) {
-    await enviarTemplate(c.telefono, process.env.TEMPLATE_RECORDATORIO, { "1": c.nombre.split(' ')[0] });
+    await enviarTemplate(c.telefono, process.env.TEMPLATE_RECORDATORIO, { "1": c.nombre.split(' ')[0] }, '[Recordatorio de vencimiento]');
   }
 });
 
@@ -1188,7 +1191,7 @@ cron.schedule('0 13 24 * *', async () => {
   console.log('🔔 Job: recordatorio grupo 25');
   const clientes = await clientesPorGrupo(25, 'recordatorio');
   for (const c of clientes) {
-    await enviarTemplate(c.telefono, process.env.TEMPLATE_RECORDATORIO, { "1": c.nombre.split(' ')[0] });
+    await enviarTemplate(c.telefono, process.env.TEMPLATE_RECORDATORIO, { "1": c.nombre.split(' ')[0] }, '[Recordatorio de vencimiento]');
   }
 });
 
@@ -1197,7 +1200,7 @@ cron.schedule('0 13 9 * *', async () => {
   console.log('🔔 Job: mora grupo 5');
   const clientes = await clientesPorGrupo(5, 'mora');
   for (const c of clientes) {
-    await enviarTemplate(c.telefono, process.env.TEMPLATE_MORA, { "1": c.nombre.split(' ')[0] });
+    await enviarTemplate(c.telefono, process.env.TEMPLATE_MORA, { "1": c.nombre.split(' ')[0] }, '[Aviso de mora]');
   }
 });
 
@@ -1206,7 +1209,7 @@ cron.schedule('0 13 19 * *', async () => {
   console.log('🔔 Job: mora grupo 15');
   const clientes = await clientesPorGrupo(15, 'mora');
   for (const c of clientes) {
-    await enviarTemplate(c.telefono, process.env.TEMPLATE_MORA, { "1": c.nombre.split(' ')[0] });
+    await enviarTemplate(c.telefono, process.env.TEMPLATE_MORA, { "1": c.nombre.split(' ')[0] }, '[Aviso de mora]');
   }
 });
 
@@ -1215,7 +1218,7 @@ cron.schedule('0 13 29 * *', async () => {
   console.log('🔔 Job: mora grupo 25');
   const clientes = await clientesPorGrupo(25, 'mora');
   for (const c of clientes) {
-    await enviarTemplate(c.telefono, process.env.TEMPLATE_MORA, { "1": c.nombre.split(' ')[0] });
+    await enviarTemplate(c.telefono, process.env.TEMPLATE_MORA, { "1": c.nombre.split(' ')[0] }, '[Aviso de mora]');
   }
 });
 
@@ -1244,7 +1247,7 @@ cron.schedule('0 13 15 * *', async () => {
   console.log('🔔 Job: suspensión grupo 5');
   const clientes = await clientesPorGrupo(5, 'suspension');
   for (const c of clientes) {
-    await enviarTemplate(c.telefono, process.env.TEMPLATE_SUSPENSION, { "1": c.nombre.split(' ')[0] });
+    await enviarTemplate(c.telefono, process.env.TEMPLATE_SUSPENSION, { "1": c.nombre.split(' ')[0] }, '[Aviso de suspensión]');
   }
   programarSuspensiones(clientes);
 });
@@ -1254,7 +1257,7 @@ cron.schedule('0 13 25 * *', async () => {
   console.log('🔔 Job: suspensión grupo 15');
   const clientes = await clientesPorGrupo(15, 'suspension');
   for (const c of clientes) {
-    await enviarTemplate(c.telefono, process.env.TEMPLATE_SUSPENSION, { "1": c.nombre.split(' ')[0] });
+    await enviarTemplate(c.telefono, process.env.TEMPLATE_SUSPENSION, { "1": c.nombre.split(' ')[0] }, '[Aviso de suspensión]');
   }
   programarSuspensiones(clientes);
 });
@@ -1264,7 +1267,7 @@ cron.schedule('0 13 5 * *', async () => {
   console.log('🔔 Job: suspensión grupo 25');
   const clientes = await clientesPorGrupo(25, 'suspension');
   for (const c of clientes) {
-    await enviarTemplate(c.telefono, process.env.TEMPLATE_SUSPENSION, { "1": c.nombre.split(' ')[0] });
+    await enviarTemplate(c.telefono, process.env.TEMPLATE_SUSPENSION, { "1": c.nombre.split(' ')[0] }, '[Aviso de suspensión]');
   }
   programarSuspensiones(clientes);
 });
@@ -1289,7 +1292,7 @@ cron.schedule('0 12 * * *', async () => {
     });
 
     for (const c of cumpleanosHoy) {
-      await enviarTemplate(c.telefono, process.env.TEMPLATE_CUMPLEANOS, { "1": c.nombre.split(' ')[0] });
+      await enviarTemplate(c.telefono, process.env.TEMPLATE_CUMPLEANOS, { "1": c.nombre.split(' ')[0] }, '[Feliz cumpleaños]');
       await enviarWhatsApp(process.env.COSACO_WHATSAPP.replace('whatsapp:+54', ''),
         `🎂 Hoy es el cumpleaños de ${c.nombre}! No olvides saludarlo/a desde tu celular personal 🏑`);
     }
