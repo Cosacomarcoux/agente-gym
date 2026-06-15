@@ -1405,46 +1405,87 @@ app.get('/panel', async (req, res) => {
   <title>Panel de Conversaciones</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f0f2f5; }
-    .app { display: flex; height: 100vh; max-width: 900px; margin: 0 auto; background: #fff; }
-    .sidebar { width: 340px; border-right: 1px solid #e0e0e0; display: flex; flex-direction: column; }
-    .sidebar-header { background: #075e54; color: #fff; padding: 16px; font-size: 18px; font-weight: 600; display: flex; justify-content: space-between; align-items: center; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f0f2f5; height: 100dvh; overflow: hidden; }
+
+    /* ── Desktop layout ── */
+    .app { display: flex; height: 100dvh; max-width: 900px; margin: 0 auto; background: #fff; }
+
+    .sidebar { width: 340px; min-width: 340px; border-right: 1px solid #e0e0e0; display: flex; flex-direction: column; }
+    .sidebar-header { background: #075e54; color: #fff; padding: 16px; font-size: 18px; font-weight: 600; display: flex; justify-content: space-between; align-items: center; flex-shrink: 0; }
     .btn-actividad { background: #054d44; color: #fff; text-decoration: none; font-size: 13px; font-weight: 600; padding: 5px 11px; border-radius: 6px; white-space: nowrap; }
-    .hilos { overflow-y: auto; flex: 1; }
+    .hilos { overflow-y: auto; flex: 1; -webkit-overflow-scrolling: touch; }
     .hilo { padding: 14px 16px; border-bottom: 1px solid #f0f0f0; cursor: pointer; }
-    .hilo:hover, .hilo.activo { background: #f5f5f5; }
+    .hilo:active, .hilo.activo { background: #f5f5f5; }
     .hilo-nombre { font-weight: 600; font-size: 15px; color: #111; }
     .hilo-preview { font-size: 13px; color: #667; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .hilo-tiempo { font-size: 11px; color: #999; margin-top: 2px; }
-    .chat { flex: 1; display: flex; flex-direction: column; }
-    .chat-header { background: #075e54; color: #fff; padding: 14px 16px; font-size: 16px; font-weight: 600; }
-    .mensajes { flex: 1; overflow-y: auto; padding: 16px; background: #e5ddd5; }
+
+    .chat { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+    .chat-header { background: #075e54; color: #fff; padding: 14px 16px; font-size: 16px; font-weight: 600; display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+    .btn-volver { display: none; background: none; border: none; color: #fff; font-size: 20px; cursor: pointer; padding: 0 4px; line-height: 1; }
+    .chat-header-nombre { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .mensajes { flex: 1; overflow-y: auto; padding: 16px; background: #e5ddd5; -webkit-overflow-scrolling: touch; }
+    .mensajes-wrap { display: flex; flex-direction: column; }
     .msg { max-width: 75%; margin-bottom: 10px; padding: 8px 12px; border-radius: 8px; font-size: 14px; line-height: 1.4; word-wrap: break-word; }
     .msg.cliente { background: #fff; align-self: flex-start; border-radius: 0 8px 8px 8px; }
     .msg.agente, .msg.agente-cosaco { background: #dcf8c6; align-self: flex-end; margin-left: auto; border-radius: 8px 0 8px 8px; }
     .msg-rol { font-size: 10px; color: #999; margin-bottom: 2px; }
     .msg-time { font-size: 10px; color: #999; margin-top: 4px; text-align: right; }
-    .mensajes-wrap { display: flex; flex-direction: column; }
-    .input-area { padding: 10px 16px; background: #f0f2f5; display: flex; gap: 8px; }
-    .input-area input { flex: 1; padding: 10px 14px; border-radius: 24px; border: none; font-size: 14px; outline: none; }
-    .input-area button { background: #075e54; color: #fff; border: none; border-radius: 50%; width: 42px; height: 42px; font-size: 18px; cursor: pointer; }
+    .input-area { padding: 10px 16px; background: #f0f2f5; display: flex; gap: 8px; align-items: center; flex-shrink: 0; }
+    .input-area input { flex: 1; padding: 10px 14px; border-radius: 24px; border: none; font-size: 16px; outline: none; }
+    .input-area button { background: #075e54; color: #fff; border: none; border-radius: 50%; width: 42px; height: 42px; min-width: 42px; font-size: 18px; cursor: pointer; }
     .placeholder { display: flex; align-items: center; justify-content: center; height: 100%; color: #999; font-size: 15px; }
-    @media (max-width: 600px) {
-      .sidebar { width: 100%; display: none; }
-      .sidebar.visible { display: flex; }
-      .chat { display: none; }
-      .chat.visible { display: flex; }
+
+    /* ── Mobile layout ── */
+    @media (max-width: 768px) {
+      .app { max-width: 100vw; }
+
+      .sidebar {
+        position: fixed; inset: 0;
+        width: 100vw; min-width: 0;
+        z-index: 10;
+        transform: translateX(0);
+        transition: transform 0.25s ease;
+      }
+      .sidebar.oculto {
+        transform: translateX(-100%);
+        pointer-events: none;
+      }
+
+      .chat {
+        position: fixed; inset: 0;
+        width: 100vw;
+        z-index: 10;
+        transform: translateX(100%);
+        transition: transform 0.25s ease;
+      }
+      .chat.visible {
+        transform: translateX(0);
+      }
+
+      .btn-volver { display: block; }
+
+      .input-area {
+        position: sticky; bottom: 0;
+        padding-bottom: max(10px, env(safe-area-inset-bottom));
+      }
     }
   </style>
 </head>
 <body>
 <div class="app">
   <div class="sidebar" id="sidebar">
-    <div class="sidebar-header"><span>Conversaciones</span><a class="btn-actividad" href="/panel/actividad">📊 Actividad</a></div>
+    <div class="sidebar-header">
+      <span>Conversaciones</span>
+      <a class="btn-actividad" href="/panel/actividad">📊 Actividad</a>
+    </div>
     <div class="hilos">${listaHTML}</div>
   </div>
   <div class="chat" id="chat">
-    <div class="chat-header" id="chat-header">Seleccioná una conversación</div>
+    <div class="chat-header">
+      <button class="btn-volver" id="btn-volver" onclick="volverALista()">←</button>
+      <span class="chat-header-nombre" id="chat-header">Seleccioná una conversación</span>
+    </div>
     <div class="mensajes" id="mensajes"><div class="placeholder">← Seleccioná una conversación</div></div>
     <div class="input-area" id="input-area" style="display:none">
       <input type="text" id="msg-input" placeholder="Escribí un mensaje..." onkeydown="if(event.key==='Enter')enviar()">
@@ -1456,6 +1497,7 @@ app.get('/panel', async (req, res) => {
   const hilosMeta = ${hilosMetaJSON};
   let telefonoActual = null;
   let nombreActual = null;
+  const isMobile = () => window.innerWidth <= 768;
 
   async function abrirHilo(telefono) {
     telefonoActual = telefono;
@@ -1465,6 +1507,11 @@ app.get('/panel', async (req, res) => {
     event.currentTarget.classList.add('activo');
     document.getElementById('chat-header').textContent = nombreActual;
     document.getElementById('mensajes').innerHTML = '<div class="placeholder">Cargando...</div>';
+
+    if (isMobile()) {
+      document.getElementById('sidebar').classList.add('oculto');
+      document.getElementById('chat').classList.add('visible');
+    }
 
     const r = await fetch('/panel/hilo?telefono=' + encodeURIComponent(telefono));
     const data = await r.json();
@@ -1485,6 +1532,12 @@ app.get('/panel', async (req, res) => {
     cont.appendChild(wrap);
     cont.scrollTop = cont.scrollHeight;
     document.getElementById('input-area').style.display = 'flex';
+  }
+
+  function volverALista() {
+    document.getElementById('chat').classList.remove('visible');
+    document.getElementById('sidebar').classList.remove('oculto');
+    telefonoActual = null;
   }
 
   async function enviar() {
