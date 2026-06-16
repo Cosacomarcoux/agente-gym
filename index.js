@@ -690,7 +690,15 @@ async function ejecutarTool(nombre, input, remitente) {
     if (nombre === 'enviar_mensaje_cliente') {
       const rCliente = await fetch(`${GYM_API}/clientes/${input.cliente_id}`, { headers });
       const cliente = await rCliente.json();
-      await enviarWhatsApp(cliente.telefono, input.mensaje);
+      if (!cliente.telefono) return { error: 'El cliente no tiene teléfono registrado' };
+
+      const nombreCliente = cliente.nombre.split(' ')[0];
+      await enviarTemplate(
+        cliente.telefono,
+        process.env.TEMPLATE_MENSAJE_HOCKEYVIVO,
+        { "1": nombreCliente, "2": input.mensaje },
+        input.mensaje
+      );
       return { ok: true, enviado_a: cliente.nombre };
     }
 
