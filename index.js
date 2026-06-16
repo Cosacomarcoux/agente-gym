@@ -231,6 +231,10 @@ Para tu primer entrenamiento recordá traer:
 
 Y lo más importante: vení con la mente abierta a aprender cosas nuevas y dispuesto/a a entregarlo todo. ¡Te esperamos! 💪"
 
+6. Si registrar_cliente_y_asignar_turno devuelve ok: false, decile al cliente:
+"Hubo un problema al registrarte. Por favor escribinos y lo resolvemos personalmente 🏑"
+Y luego usá enviar_mensaje_a_cosaco para avisarme: "⚠️ Error al registrar a [nombre]: [error]"
+
 CUANDO PIDAN UBICACIÓN O DIRECCIÓN:
 Dar la dirección y el link: https://maps.google.com/?q=-27.785810,-64.268463
 
@@ -504,10 +508,13 @@ async function ejecutarTool(nombre, input, remitente) {
           headers,
           body: JSON.stringify(bodyCliente),
         });
-        if (!rNuevo.ok) return { error: `Error al crear cliente: ${await rNuevo.text()}` };
+        if (!rNuevo.ok) return { ok: false, error: `No se pudo crear el cliente: ${await rNuevo.text()}` };
 
         const nuevoCliente = await rNuevo.json();
         const { asignados, errores } = await asignarTurnos(nuevoCliente.id, input.turno_ids);
+        if (errores.length > 0) {
+          return { ok: false, error: `Cliente creado pero no se pudo asignar turno ${errores.join(', ')}` };
+        }
         registrarActividad('cliente', nombreCompleto);
         return {
           ok: true,
@@ -515,7 +522,6 @@ async function ejecutarTool(nombre, input, remitente) {
           cliente_id: nuevoCliente.id,
           nombre: nombreCompleto,
           turnos_asignados: asignados,
-          errores: errores.length ? errores : undefined,
         };
       }
 
@@ -532,6 +538,9 @@ async function ejecutarTool(nombre, input, remitente) {
       // 4. Existe pero sin turnos → asignar directamente
       if (turnosActuales.length === 0) {
         const { asignados, errores } = await asignarTurnos(cliente_id, input.turno_ids);
+        if (errores.length > 0) {
+          return { ok: false, error: `Cliente creado pero no se pudo asignar turno ${errores.join(', ')}` };
+        }
         registrarActividad('cliente', nombreExistente);
         return {
           ok: true,
@@ -539,7 +548,6 @@ async function ejecutarTool(nombre, input, remitente) {
           cliente_id,
           nombre: nombreExistente,
           turnos_asignados: asignados,
-          errores: errores.length ? errores : undefined,
         };
       }
 
