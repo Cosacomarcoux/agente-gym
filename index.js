@@ -276,6 +276,9 @@ Si Cosaco dice "mandále un mensaje a [nombre] diciéndole [texto]":
 - Enviá el mensaje con enviar_mensaje_cliente
 - Confirmale a Cosaco: "✅ Mensaje enviado a [nombre]"
 
+CLASE DE PRUEBA:
+Cuando Cosaco pida mandar el mensaje de seguimiento de clase de prueba a un cliente, usá SIEMPRE la tool enviar_clase_prueba, nunca enviar_mensaje_cliente.
+
 2. CONSULTAR INFO:
 Si Cosaco pregunta por un cliente, sus pagos, sus turnos, vencimientos — buscá y respondé con un resumen claro.
 
@@ -425,6 +428,17 @@ const TOOLS = [
         mensaje: { type: 'string', description: 'Texto del mensaje a enviar' },
       },
       required: ['cliente_id', 'mensaje'],
+    },
+  },
+  {
+    name: 'enviar_clase_prueba',
+    description: 'Envía el mensaje de seguimiento de clase de prueba a un cliente. Usá SIEMPRE esta tool cuando Cosaco pida mandar el mensaje de seguimiento de clase de prueba, nunca enviar_mensaje_cliente.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        cliente_id: { type: 'integer', description: 'ID del cliente' },
+      },
+      required: ['cliente_id'],
     },
   },
   {
@@ -698,6 +712,21 @@ async function ejecutarTool(nombre, input, remitente) {
         process.env.TEMPLATE_MENSAJE_HOCKEYVIVO,
         { "1": nombreCliente, "2": input.mensaje },
         input.mensaje
+      );
+      return { ok: true, enviado_a: cliente.nombre };
+    }
+
+    if (nombre === 'enviar_clase_prueba') {
+      const rCliente = await fetch(`${GYM_API}/clientes/${input.cliente_id}`, { headers });
+      const cliente = await rCliente.json();
+      if (!cliente.telefono) return { error: 'El cliente no tiene teléfono registrado' };
+
+      const nombreCliente = cliente.nombre.split(' ')[0];
+      await enviarTemplate(
+        cliente.telefono,
+        process.env.TEMPLATE_CLASE_PRUEBA,
+        { "1": nombreCliente },
+        null
       );
       return { ok: true, enviado_a: cliente.nombre };
     }
