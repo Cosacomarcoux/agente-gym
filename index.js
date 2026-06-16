@@ -170,7 +170,39 @@ function calcularFechaInicio(cliente) {
   return cliente.fecha_vencimiento;
 }
 
+function calcularFechaVencimiento(fecha_pago, fecha_vencimiento_actual) {
+  if (fecha_vencimiento_actual) {
+    // Sumar exactamente 1 mes a la fecha de vencimiento anterior
+    const venc = new Date(fecha_vencimiento_actual + 'T12:00:00');
+    const nuevaFecha = new Date(venc.getFullYear(), venc.getMonth() + 1, venc.getDate());
+    return nuevaFecha.toISOString().split('T')[0];
+  }
+  // Cliente nuevo: calcular grupo desde fecha_pago
+  const fecha = new Date(fecha_pago + 'T12:00:00');
+  const dia = fecha.getDate();
+  let diaVencimiento;
+  let mesesAdelante;
+  if (dia >= 6 && dia <= 15) {
+    diaVencimiento = 15;
+    mesesAdelante = 1;
+  } else if (dia >= 16 && dia <= 25) {
+    diaVencimiento = 25;
+    mesesAdelante = 1;
+  } else {
+    diaVencimiento = 5;
+    mesesAdelante = dia >= 26 ? 2 : 1;
+  }
+  const vencimiento = new Date(fecha.getFullYear(), fecha.getMonth() + mesesAdelante, diaVencimiento);
+  return vencimiento.toISOString().split('T')[0];
+}
+
 const SYSTEM_PROMPT = `Sos el asistente virtual del gimnasio Hockey Vivo en Santiago del Estero, Argentina. Atendés consultas de clientes y potenciales alumnos por WhatsApp. Respondés en español argentino, de forma amable y breve. Usá emojis con moderación.
+
+IDENTIFICACIÓN DEL CLIENTE:
+Al inicio de cada conversación, intentá identificar al cliente buscando su número de teléfono en get_clientes con buscar={numero_sin_prefijo}.
+El número viene en req.body.From como 'whatsapp:+549XXXXXXXXXX' — extraé los últimos 10 dígitos.
+Si encontrás al cliente, usá su nombre directamente sin pedírselo.
+Si no lo encontrás, tratalo como cliente nuevo.
 
 DATOS DEL GIMNASIO (usá solo cuando te pregunten puntualmente por esto):
 - Dirección: Moreno (N) 55 entre Andes y Rivadavia, Santiago del Estero
@@ -260,6 +292,13 @@ Tus turnos asignados:
 Si querés cambiar o agregar algún día, avisame acá mismo. ¡Te esperamos en el entrenamiento! 🏑"
 
 Siempre mostrá día y horario de cada turno, nunca solo el ID.
+
+PALABRA 'SACAR':
+Cuando un cliente use la palabra 'sacar' en relación a turnos, SIEMPRE preguntá antes de actuar:
+'Cuando decís sacar, ¿te referís a:
+1️⃣ Eliminar un turno que ya tenés
+2️⃣ Conseguir (agregar) un turno nuevo
+¿Cuál es tu caso?'
 
 CAMBIO DE TURNOS - FLUJO OBLIGATORIO:
 Cuando un cliente confirme un cambio de turno (responda 'Si', 'Sí', 'Confirmo', 'Dale', etc.):
@@ -684,6 +723,7 @@ async function ejecutarTool(nombre, input, remitente) {
           metodo: input.metodo || 'Transferencia',
           fecha_pago: hoy,
           fecha_inicio: calcularFechaInicio(cliente),
+          fecha_vencimiento: calcularFechaVencimiento(hoy, cliente.fecha_vencimiento),
           plan: cliente.plan,
         }),
       });
@@ -972,6 +1012,7 @@ async function manejarConfirmacionPago(confirmado) {
           metodo: pago.metodo,
           fecha_pago: hoy,
           fecha_inicio: calcularFechaInicio(cliente),
+          fecha_vencimiento: calcularFechaVencimiento(hoy, cliente.fecha_vencimiento),
           plan: cliente.plan,
         }),
       });
