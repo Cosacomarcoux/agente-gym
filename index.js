@@ -270,10 +270,22 @@ No uses registrar_pago hasta que la beca esté confirmada y el cliente avise que
 MODO SECRETARIO — cuando Cosaco escribe directamente:
 Sos su asistente administrativo personal. Podés hacer todo lo que haría un secretario:
 
+REGLAS DE ENVÍO DE MENSAJES - OBLIGATORIO:
+Cuando Cosaco pida enviar cualquier mensaje a un cliente, SIEMPRE usá la tool correspondiente con su template. NUNCA escribas el mensaje vos mismo con texto libre.
+
+- Recordatorio de vencimiento → tool: enviar_mensaje_cliente con template_tipo: 'recordatorio'
+- Aviso de mora → tool: enviar_mensaje_cliente con template_tipo: 'mora'
+- Mensaje de suspensión → tool: enviar_mensaje_cliente con template_tipo: 'suspension'
+- Seguimiento clase de prueba → tool: enviar_clase_prueba con TEMPLATE_CLASE_PRUEBA
+- Mensaje general → tool: enviar_mensaje_cliente con template_tipo: 'general'
+- Mensaje masivo por día → tool: enviar_mensaje_masivo
+
+NUNCA uses enviarWhatsApp directo ni escribas mensajes propios. SIEMPRE tools con templates.
+
 1. ENVIAR MENSAJES A CLIENTES:
 Si Cosaco dice "mandále un mensaje a [nombre] diciéndole [texto]":
 - Buscá al cliente con get_clientes
-- Enviá el mensaje con enviar_mensaje_cliente
+- Enviá el mensaje con enviar_mensaje_cliente usando template_tipo adecuado
 - Confirmale a Cosaco: "✅ Mensaje enviado a [nombre]"
 
 CLASE DE PRUEBA:
@@ -420,12 +432,17 @@ const TOOLS = [
   },
   {
     name: 'enviar_mensaje_cliente',
-    description: 'Envía un mensaje de WhatsApp a un cliente específico. Usar cuando Cosaco pide mandar un mensaje a un cliente.',
+    description: 'Envía un mensaje de WhatsApp a un cliente usando el template correspondiente. Usá template_tipo para seleccionar el template correcto según el tipo de mensaje.',
     input_schema: {
       type: 'object',
       properties: {
         cliente_id: { type: 'integer', description: 'ID del cliente' },
         mensaje: { type: 'string', description: 'Texto del mensaje a enviar' },
+        template_tipo: {
+          type: 'string',
+          enum: ['recordatorio', 'mora', 'suspension', 'general'],
+          description: 'Tipo de template a usar: recordatorio (vencimiento), mora (deuda), suspension (baja), general (mensaje libre)',
+        },
       },
       required: ['cliente_id', 'mensaje'],
     },
@@ -707,9 +724,16 @@ async function ejecutarTool(nombre, input, remitente) {
       if (!cliente.telefono) return { error: 'El cliente no tiene teléfono registrado' };
 
       const nombreCliente = cliente.nombre.split(' ')[0];
+      const templateMap = {
+        recordatorio: process.env.TEMPLATE_RECORDATORIO,
+        mora: process.env.TEMPLATE_MORA,
+        suspension: process.env.TEMPLATE_SUSPENSION,
+        general: process.env.TEMPLATE_MENSAJE_HOCKEYVIVO,
+      };
+      const templateId = templateMap[input.template_tipo] || process.env.TEMPLATE_MENSAJE_HOCKEYVIVO;
       await enviarTemplate(
         cliente.telefono,
-        process.env.TEMPLATE_MENSAJE_HOCKEYVIVO,
+        templateId,
         { "1": nombreCliente, "2": input.mensaje },
         input.mensaje
       );
