@@ -506,6 +506,19 @@ const TOOLS = [
       required: ['dia_semana', 'mensaje'],
     },
   },
+  {
+    name: 'gestionar_turnos_cliente',
+    description: 'Agrega o quita turnos a un cliente existente.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        cliente_id: { type: 'integer', description: 'ID del cliente' },
+        turno_ids_agregar: { type: 'array', items: { type: 'integer' }, description: 'IDs de turnos a agregar' },
+        turno_ids_quitar: { type: 'array', items: { type: 'integer' }, description: 'IDs de turnos a quitar' },
+      },
+      required: ['cliente_id'],
+    },
+  },
 ];
 
 async function ejecutarTool(nombre, input, remitente) {
@@ -835,6 +848,29 @@ async function ejecutarTool(nombre, input, remitente) {
 
       console.log(`📢 Mensaje masivo ${input.dia_semana}: ${enviados.length} enviados, ${sinTelefono.length} sin teléfono`);
       return { ok: true, enviados, sin_telefono: sinTelefono };
+    }
+
+    if (nombre === 'gestionar_turnos_cliente') {
+      const resultados = [];
+
+      for (const turno_id of (input.turno_ids_quitar || [])) {
+        const r = await fetch(`${GYM_API}/turnos/${turno_id}/quitar/${input.cliente_id}`, {
+          method: 'DELETE',
+          headers,
+        });
+        resultados.push({ accion: 'quitar', turno_id, ok: r.ok, status: r.status });
+      }
+
+      for (const turno_id of (input.turno_ids_agregar || [])) {
+        const r = await fetch(`${GYM_API}/turnos/${turno_id}/asignar/${input.cliente_id}`, {
+          method: 'POST',
+          headers,
+        });
+        resultados.push({ accion: 'agregar', turno_id, ok: r.ok, status: r.status });
+      }
+
+      const todoBien = resultados.every(r => r.ok);
+      return { ok: todoBien, resultados };
     }
 
     return { error: `Tool desconocida: ${nombre}` };
