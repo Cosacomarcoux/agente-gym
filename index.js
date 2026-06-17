@@ -961,6 +961,42 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
       const mensajeUpper = mensaje.trim().toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
       const esSiNo = mensajeUpper === 'SI' || mensajeUpper === 'S' || mensajeUpper === 'NO' || mensajeUpper === 'N';
 
+      // Resumen de pendientes
+      if (mensajeUpper === 'PENDIENTES' || mensajeUpper === 'PENDIENTE') {
+        const { rows: pagos } = await pool.query(
+          `SELECT * FROM pagos_pendientes WHERE esperando_confirmacion = true ORDER BY id ASC`
+        );
+        const { rows: suspensiones } = await pool.query(
+          `SELECT * FROM suspensiones_pendientes WHERE esperando_confirmacion = true ORDER BY timestamp ASC`
+        );
+        const becasPend = [...becasPendientes.values()].filter(b => !b.tipo_beca);
+
+        if (pagos.length === 0 && suspensiones.length === 0 && becasPend.length === 0) {
+          await enviarWhatsApp(process.env.COSACO_WHATSAPP.replace('whatsapp:+54', ''),
+            '✅ No hay nada pendiente de confirmación');
+          return;
+        }
+
+        let resumen = '📋 *Pendientes de confirmación:*\n';
+
+        if (pagos.length > 0) {
+          resumen += `\n💰 *Pagos* (${pagos.length}):\n`;
+          for (const p of pagos) resumen += `- ${p.cliente_nombre} - $${p.monto} - ${p.metodo}\n`;
+        }
+        if (suspensiones.length > 0) {
+          resumen += `\n⚠️ *Suspensiones* (${suspensiones.length}):\n`;
+          for (const s of suspensiones) resumen += `- ${s.cliente_nombre}\n`;
+        }
+        if (becasPend.length > 0) {
+          resumen += `\n🎓 *Becas* (${becasPend.length}):\n`;
+          for (const b of becasPend) resumen += `- ${b.cliente_nombre} - esperando tipo de beca\n`;
+        }
+
+        resumen += '\n¿Querés procesar alguno ahora? Respondé el nombre o \'todos\' para ir uno por uno';
+        await enviarWhatsApp(process.env.COSACO_WHATSAPP.replace('whatsapp:+54', ''), resumen);
+        return;
+      }
+
       // 1. Pago pendiente
       const { rows: pagosPendientes } = await pool.query(
         `SELECT * FROM pagos_pendientes WHERE esperando_confirmacion = true ORDER BY id ASC LIMIT 1`
