@@ -945,32 +945,34 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
     const esCosaco = remitente === process.env.COSACO_WHATSAPP;
 
     if (esCosaco) {
-      const mensajeUpper = mensaje.trim().toUpperCase();
+      const mensajeUpper = mensaje.trim().toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+      const esSiNo = mensajeUpper === 'SI' || mensajeUpper === 'S' || mensajeUpper === 'NO' || mensajeUpper === 'N';
 
-      // Verificar confirmación de pago pendiente
-      if (mensajeUpper === 'SI' || mensajeUpper === 'SÍ' || mensajeUpper === 'NO') {
-        // Primero verificar pagos pendientes
-        if (pagoEnEspera) {
-          await manejarConfirmacionPago(mensajeUpper, res);
-          return;
-        }
-        // Luego verificar suspensiones pendientes
-        const suspPendiente = await pool.query(
-          'SELECT * FROM suspensiones_pendientes WHERE esperando_confirmacion = true LIMIT 1'
-        );
-        if (suspPendiente.rows.length > 0) {
-          await manejarConfirmacionSuspension(mensajeUpper, suspPendiente.rows[0], res);
-          return;
-        }
-        // Luego verificar becas pendientes
-        const becaPendiente = [...becasPendientes.values()].find(b => b.esperandoConfirmacion);
-        if (becaPendiente) {
-          await manejarConfirmacionBeca(mensajeUpper, becaPendiente, res);
-          return;
+      // 1. Pago pendiente
+      if (pagoEnEspera && esSiNo) {
+        await manejarConfirmacionPago(mensajeUpper);
+        return;
+      }
+
+      // 2. Suspensión pendiente en DB
+      const suspPendiente = await pool.query(
+        'SELECT * FROM suspensiones_pendientes WHERE esperando_confirmacion = true LIMIT 1'
+      );
+      if (suspPendiente.rows.length > 0 && esSiNo) {
+        await manejarConfirmacionSuspension(mensajeUpper, suspPendiente.rows[0]);
+        return;
+      }
+
+      // 3. Beca pendiente
+      if (becasPendientes.size > 0) {
+        const becaEntry = [...becasPendientes.entries()].find(([, b]) => !b.tipo_beca);
+        if (becaEntry) {
+          const handled = await manejarConfirmacionBeca(mensajeUpper, becaEntry);
+          if (handled) return;
         }
       }
 
-      // Si no hay nada pendiente, procesar como modo secretario con Claude
+      // 4. Modo secretario con Claude (fall through)
     }
 
     if (!GYM_TOKEN) {
@@ -1041,7 +1043,8 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
   }
 }
 
-async function manejarConfirmacionPago(confirmado) {
+async function manejarConfirmacionPago(mensajeUpper) {
+  const confirmado = mensajeUpper === 'SI' || mensajeUpper === 'S';
   const pago = pagoEnEspera;
   pagoEnEspera = null;
 
@@ -1095,6 +1098,71 @@ async function manejarConfirmacionPago(confirmado) {
     await enviarWhatsApp(process.env.COSACO_WHATSAPP, mensajeCosaco);
     console.log(`Siguiente pago en cola enviado a Cosaco: ${pagoEnEspera.cliente_nombre}`);
   }
+}
+
+async function manejarConfirmacionSuspension(mensajeUpper, suspension) {
+  if (mensajeUpper === 'SI' || mensajeUpper === 'S') {
+    await fetch(`${GYM_API}/clientes/${suspension.cliente_id}/suspender`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${GYM_TOKEN}` },
+    });
+    console.log(`✅ Cliente ${suspension.cliente_nombre} suspendido`);
+    await enviarWhatsApp(process.env.COSACO_WHATSAPP.replace('whatsapp:+54', ''),
+      `✅ Servicio de ${suspension.cliente_nombre} suspendido correctamente.`);
+  } else {
+    await enviarWhatsApp(process.env.COSACO_WHATSAPP.replace('whatsapp:+54', ''),
+      `👍 Ok, ${suspension.cliente_nombre} no fue suspendido.`);
+  }
+
+  // Eliminar de la tabla y pasar al siguiente
+  await pool.query(`DELETE FROM suspensiones_pendientes WHERE id = $1`, [suspension.id]);
+  const { rows: pendientes } = await pool.query(
+    `SELECT * FROM suspensiones_pendientes WHERE esperando_confirmacion = false ORDER BY timestamp ASC LIMIT 1`
+  );
+  if (pendientes.length > 0) {
+    const siguiente = pendientes[0];
+    await enviarWhatsApp(process.env.COSACO_WHATSAPP.replace('whatsapp:+54', ''),
+      `⚠️ Siguiente: ${siguiente.cliente_nombre} lleva 10 días sin pagar. ¿Suspendo su servicio?\nRespondé SÍ o NO`,
+      'Cosaco'
+    );
+    await pool.query(
+      `UPDATE suspensiones_pendientes SET esperando_confirmacion = true, notificado_cosaco = true WHERE id = $1`,
+      [siguiente.id]
+    );
+  }
+}
+
+async function manejarConfirmacionBeca(mensajeUpper, becaEntry) {
+  const esBeca = mensajeUpper === 'SIN BECA' || mensajeUpper === '50%' || mensajeUpper === '100%';
+  if (!esBeca) return false;
+
+  const [clienteFrom, beca] = becaEntry;
+  let monto;
+  let tipoBeca;
+
+  if (mensajeUpper === 'SIN BECA') {
+    monto = beca.costo;
+    tipoBeca = 'SIN BECA';
+  } else if (mensajeUpper === '50%') {
+    monto = Math.round(beca.costo / 2);
+    tipoBeca = '50%';
+  } else {
+    monto = 0;
+    tipoBeca = '100%';
+  }
+
+  becasPendientes.set(clienteFrom, { ...beca, tipo_beca: tipoBeca, monto_final: monto });
+
+  const msgCliente = tipoBeca === 'SIN BECA'
+    ? `✅ Confirmado ${beca.cliente_nombre.split(' ')[0]}! No tenés beca asignada.\nTu cuota este mes es $${monto.toLocaleString('es-AR')}.\n¿Ya realizaste el pago? Si es así, avisanos para registrarlo 🏑`
+    : `✅ Confirmado ${beca.cliente_nombre.split(' ')[0]}! Tu beca es del ${tipoBeca}.\nTu cuota este mes es $${monto.toLocaleString('es-AR')}.\n¿Ya realizaste el pago? Si es así, avisanos para registrarlo 🏑`;
+  await enviarWhatsApp(clienteFrom, msgCliente, beca.cliente_nombre.split(' ')[0]);
+
+  await enviarWhatsApp(process.env.COSACO_WHATSAPP.replace('whatsapp:+54', ''),
+    `✅ Beca confirmada. Le avisé a ${beca.cliente_nombre} que su cuota es $${monto.toLocaleString('es-AR')}`);
+
+  console.log(`Beca ${tipoBeca} confirmada para ${beca.cliente_nombre}, monto: $${monto}`);
+  return true;
 }
 
 app.get('/test-jobs', async (req, res) => {
@@ -1256,107 +1324,6 @@ app.post('/webhook', (req, res) => {
       .then(() => guardarMensaje(remitente, null, respuestaImagen, 'agente'))
       .catch(err => console.error('Error respondiendo imagen:', err.message));
     return;
-  }
-
-  // Detectar si es Cosaco respondiendo a una confirmación de pago
-  if (remitente === process.env.COSACO_WHATSAPP && pagoEnEspera) {
-    const respuesta = mensaje.trim().toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-    if (respuesta === 'SI' || respuesta === 'S') {
-      manejarConfirmacionPago(true).catch(err => console.error('Error manejando confirmación SÍ:', err));
-      return;
-    } else if (respuesta === 'NO' || respuesta === 'N') {
-      manejarConfirmacionPago(false).catch(err => console.error('Error manejando confirmación NO:', err));
-      return;
-    }
-    // Si no es SÍ/NO, procesar como mensaje normal de Cosaco
-  }
-
-  // Detectar si es Cosaco respondiendo a una suspensión pendiente
-  if (remitente === process.env.COSACO_WHATSAPP) {
-    (async () => {
-      const { rows } = await pool.query(
-        `SELECT * FROM suspensiones_pendientes WHERE esperando_confirmacion = true ORDER BY timestamp ASC LIMIT 1`
-      );
-      const suspensionEsperando = rows[0];
-      if (suspensionEsperando) {
-        const respuesta = mensaje.trim().toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-        if (respuesta === 'SI' || respuesta === 'S') {
-          await fetch(`${GYM_API}/clientes/${suspensionEsperando.cliente_id}/suspender`, {
-            method: 'DELETE',
-            headers: { Authorization: `Bearer ${GYM_TOKEN}` }
-          });
-          console.log(`✅ Cliente ${suspensionEsperando.cliente_nombre} suspendido`);
-          await enviarWhatsApp(process.env.COSACO_WHATSAPP.replace('whatsapp:+54', ''),
-            `✅ Servicio de ${suspensionEsperando.cliente_nombre} suspendido correctamente.`);
-        } else if (respuesta === 'NO' || respuesta === 'N') {
-          await enviarWhatsApp(process.env.COSACO_WHATSAPP.replace('whatsapp:+54', ''),
-            `👍 Ok, ${suspensionEsperando.cliente_nombre} no fue suspendido.`);
-        } else {
-          return; // No es SÍ/NO, no procesar como suspensión
-        }
-
-        // Eliminar de la tabla y pasar al siguiente
-        await pool.query(`DELETE FROM suspensiones_pendientes WHERE id = $1`, [suspensionEsperando.id]);
-        const { rows: pendientes } = await pool.query(
-          `SELECT * FROM suspensiones_pendientes WHERE esperando_confirmacion = false ORDER BY timestamp ASC LIMIT 1`
-        );
-        if (pendientes.length > 0) {
-          const siguiente = pendientes[0];
-          await enviarWhatsApp(process.env.COSACO_WHATSAPP.replace('whatsapp:+54', ''),
-            `⚠️ Siguiente: ${siguiente.cliente_nombre} lleva 10 días sin pagar. ¿Suspendo su servicio?\nRespondé SÍ o NO`,
-            'Cosaco'
-          );
-          await pool.query(
-            `UPDATE suspensiones_pendientes SET esperando_confirmacion = true, notificado_cosaco = true WHERE id = $1`,
-            [siguiente.id]
-          );
-        }
-        return;
-      }
-    })().catch(err => console.error('Error manejando suspensión:', err));
-  }
-
-  // Detectar si es Cosaco respondiendo a una consulta de beca
-  if (remitente === process.env.COSACO_WHATSAPP && becasPendientes.size > 0) {
-    const respuestaNorm = mensaje.trim().toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-    const esBeca = respuestaNorm === 'SIN BECA' || respuestaNorm === '50%' || respuestaNorm === '100%';
-    if (esBeca) {
-      // Tomar la primera beca pendiente sin tipo confirmado
-      const becaEntry = [...becasPendientes.entries()].find(([, b]) => !b.tipo_beca);
-      if (becaEntry) {
-        const [clienteFrom, beca] = becaEntry;
-        (async () => {
-          let monto;
-          let tipoBeca;
-          if (respuestaNorm === 'SIN BECA') {
-            monto = beca.costo;
-            tipoBeca = 'SIN BECA';
-          } else if (respuestaNorm === '50%') {
-            monto = Math.round(beca.costo / 2);
-            tipoBeca = '50%';
-          } else {
-            monto = 0;
-            tipoBeca = '100%';
-          }
-
-          // Actualizar becasPendientes con tipo y monto confirmado
-          becasPendientes.set(clienteFrom, { ...beca, tipo_beca: tipoBeca, monto_final: monto });
-
-          // Notificar al cliente
-          const msgCliente = tipoBeca === 'SIN BECA'
-            ? `✅ Confirmado ${beca.cliente_nombre.split(' ')[0]}! No tenés beca asignada.\nTu cuota este mes es $${monto.toLocaleString('es-AR')}.\n¿Ya realizaste el pago? Si es así, avisanos para registrarlo 🏑`
-            : `✅ Confirmado ${beca.cliente_nombre.split(' ')[0]}! Tu beca es del ${tipoBeca}.\nTu cuota este mes es $${monto.toLocaleString('es-AR')}.\n¿Ya realizaste el pago? Si es así, avisanos para registrarlo 🏑`;
-          await enviarWhatsApp(clienteFrom, msgCliente, beca.cliente_nombre.split(' ')[0]);
-
-          // Notificar a Cosaco
-          await enviarWhatsApp(process.env.COSACO_WHATSAPP.replace('whatsapp:+54', ''),
-            `✅ Beca confirmada. Le avisé a ${beca.cliente_nombre} que su cuota es $${monto.toLocaleString('es-AR')}`);
-
-          console.log(`Beca ${tipoBeca} confirmada para ${beca.cliente_nombre}, monto: $${monto}`);
-        })().catch(err => console.error('Error manejando beca:', err));
-        return;
-      }
-    }
   }
 
   // Procesar en background
