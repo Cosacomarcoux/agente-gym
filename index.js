@@ -88,7 +88,7 @@ async function registrarActividad(tipo, dato) {
       );
     }
   } catch (err) {
-    console.error('Error registrando actividad:', err.message);
+    console.error('Error registrarActividad:', tipo, dato, err.message);
   }
 }
 
@@ -1947,8 +1947,13 @@ app.get('/panel/actividad', async (req, res) => {
     );
 
     const diasHTML = rows.map(row => {
-      const fecha = new Date(row.fecha + 'T12:00:00').toLocaleDateString('es-AR', {
-        weekday: 'long', year: 'numeric', month: 'long', day: 'numeric'
+      const fecha = new Date(row.fecha);
+      const fechaFormateada = fecha.toLocaleDateString('es-AR', {
+        timeZone: 'UTC',
+        weekday: 'long',
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric',
       });
       const nuevos = row.nuevos_clientes || [];
       const pagos  = row.pagos_registrados || [];
@@ -1973,7 +1978,7 @@ app.get('/panel/actividad', async (req, res) => {
 
       return `<div class="dia-card">
   <div class="dia-header">
-    <span class="dia-fecha">${fecha}</span>
+    <span class="dia-fecha">${fechaFormateada}</span>
     <span class="dia-badge">${row.mensajes_atendidos} mensaje${row.mensajes_atendidos !== 1 ? 's' : ''}</span>
   </div>
   <div class="dia-body">
