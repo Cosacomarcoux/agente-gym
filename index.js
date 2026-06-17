@@ -699,24 +699,24 @@ async function ejecutarTool(nombre, input, remitente) {
       const params = new URLSearchParams();
       if (input.estado) params.append('estado', input.estado);
       if (input.buscar) params.append('buscar', input.buscar);
+
       const r = await fetch(`${GYM_API}/clientes?${params.toString()}`, { headers });
-      const resultados = await r.json();
+      const data = await r.json();
+      const resultados = Array.isArray(data) ? data : [];
 
-      // Si no encontró nada y hay un término de búsqueda, intentar sin acentos
-      if (Array.isArray(resultados) && resultados.length === 0 && input.buscar) {
-        const sinAcentos = input.buscar
+      // Si no encontró nada y había búsqueda, reintentar sin acentos y con cada palabra
+      if (resultados.length === 0 && input.buscar) {
+        const palabras = input.buscar
           .normalize('NFD')
-          .replace(/[\u0300-\u036f]/g, '')
-          .toLowerCase();
+          .replace(/[\u0300-\u036f]/g, '') // quita acentos
+          .split(' ')
+          .filter(p => p.length > 2);
 
-        // Intentar con cada palabra del nombre por separado
-        const palabras = sinAcentos.split(' ').filter(p => p.length > 3);
         for (const palabra of palabras) {
           const r2 = await fetch(`${GYM_API}/clientes?buscar=${encodeURIComponent(palabra)}`, { headers });
           const data2 = await r2.json();
-          if (Array.isArray(data2) && data2.length > 0) {
-            return data2;
-          }
+          const res2 = Array.isArray(data2) ? data2 : [];
+          if (res2.length > 0) return res2;
         }
       }
 
