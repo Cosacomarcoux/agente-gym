@@ -370,9 +370,10 @@ SI NO PODÉS RESOLVER ALGO:
 Decí: "Te paso con el equipo de Hockey Vivo, en breve te contactamos 🏑"
 
 INTENCIÓN DE PAGO vs PAGO REALIZADO:
-Diferenciá claramente entre:
-- "Quiero pagar", "quisiera pagar", "voy a pagar", "puedo pagar" → es una INTENCIÓN futura. Preguntá: "¿Cuándo vas a realizar el pago? Podés hacerlo por transferencia al alias hockeyvivo o en efectivo en el gimnasio 🏑"
-- "Pagué", "ya pagué", "transferí", "hice el pago", manda comprobante → es un PAGO REALIZADO. Iniciá el flujo de confirmación.
+- 'Quiero pagar', 'quisiera abonar', 'me gustaría pagar', 'quiero hacer un pago' → es INTENCIÓN FUTURA.
+  Respondé: '¡Perfecto! Podés hacerlo por transferencia al alias hockeyvivo o en efectivo en el gimnasio. ¿Ya lo realizaste o todavía no?'
+- Solo si el cliente confirma que YA pagó → iniciá el flujo de confirmación de pago
+- 'Pagué', 'ya pagué', 'transferí', 'hice el pago', manda comprobante → PAGO REALIZADO. Iniciá confirmación.
 
 BÚSQUEDA DE CLIENTES POR NOMBRE:
 Cuando alguien mencione un nombre de cliente (completo, parcial, apodo o solo apellido):
@@ -699,7 +700,27 @@ async function ejecutarTool(nombre, input, remitente) {
       if (input.estado) params.append('estado', input.estado);
       if (input.buscar) params.append('buscar', input.buscar);
       const r = await fetch(`${GYM_API}/clientes?${params.toString()}`, { headers });
-      return await r.json();
+      const resultados = await r.json();
+
+      // Si no encontró nada y hay un término de búsqueda, intentar sin acentos
+      if (Array.isArray(resultados) && resultados.length === 0 && input.buscar) {
+        const sinAcentos = input.buscar
+          .normalize('NFD')
+          .replace(/[\u0300-\u036f]/g, '')
+          .toLowerCase();
+
+        // Intentar con cada palabra del nombre por separado
+        const palabras = sinAcentos.split(' ').filter(p => p.length > 3);
+        for (const palabra of palabras) {
+          const r2 = await fetch(`${GYM_API}/clientes?buscar=${encodeURIComponent(palabra)}`, { headers });
+          const data2 = await r2.json();
+          if (Array.isArray(data2) && data2.length > 0) {
+            return data2;
+          }
+        }
+      }
+
+      return resultados;
     }
 
     if (nombre === 'get_vencimientos') {
