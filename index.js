@@ -942,6 +942,37 @@ async function ejecutarTool(nombre, input, remitente) {
 
 async function procesarMensaje(mensaje, remitente, profileName = null) {
   try {
+    const esCosaco = remitente === process.env.COSACO_WHATSAPP;
+
+    if (esCosaco) {
+      const mensajeUpper = mensaje.trim().toUpperCase();
+
+      // Verificar confirmación de pago pendiente
+      if (mensajeUpper === 'SI' || mensajeUpper === 'SÍ' || mensajeUpper === 'NO') {
+        // Primero verificar pagos pendientes
+        if (pagoEnEspera) {
+          await manejarConfirmacionPago(mensajeUpper, res);
+          return;
+        }
+        // Luego verificar suspensiones pendientes
+        const suspPendiente = await pool.query(
+          'SELECT * FROM suspensiones_pendientes WHERE esperando_confirmacion = true LIMIT 1'
+        );
+        if (suspPendiente.rows.length > 0) {
+          await manejarConfirmacionSuspension(mensajeUpper, suspPendiente.rows[0], res);
+          return;
+        }
+        // Luego verificar becas pendientes
+        const becaPendiente = [...becasPendientes.values()].find(b => b.esperandoConfirmacion);
+        if (becaPendiente) {
+          await manejarConfirmacionBeca(mensajeUpper, becaPendiente, res);
+          return;
+        }
+      }
+
+      // Si no hay nada pendiente, procesar como modo secretario con Claude
+    }
+
     if (!GYM_TOKEN) {
       console.log('Sin token, intentando login...');
       await loginConReintentos(3, 3000);
