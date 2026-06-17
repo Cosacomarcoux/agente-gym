@@ -1423,8 +1423,8 @@ async function enviarTemplate(telefono, templateSid, variables, textoGuardar = '
     });
     console.log(`✅ Template enviado a ${to}`);
 
-    const nombre = variables['1'] || null;
-    guardarMensaje(to, nombre, textoGuardar, 'agente');
+    const textoFinal = textoGuardar || '[Mensaje automático]';
+    await guardarMensaje(to, variables['1'] || 'Cliente', textoFinal, 'agente');
   } catch (err) {
     console.error(`❌ Error enviando template a ${telefono}: ${err.message}`);
   }
