@@ -1651,7 +1651,7 @@ cron.schedule('0 2 * * *', async () => {
     console.log('🕐 Hora UTC:', new Date().toISOString());
     console.log('🕐 Hora Argentina:', new Date().toLocaleString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' }));
 
-    const fechaHoy = new Date().toISOString().split('T')[0];
+    const fechaHoy = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Argentina/Buenos_Aires' }); // YYYY-MM-DD en AR
     const result = await pool.query('SELECT * FROM actividad_dia WHERE fecha = $1', [fechaHoy]);
     const actividad = result.rows[0] || { mensajes_atendidos: 0, nuevos_clientes: [], pagos_registrados: [], turnos_cambiados: [] };
 
