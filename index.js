@@ -44,6 +44,17 @@ async function initDB() {
       esperando_confirmacion BOOLEAN DEFAULT FALSE,
       notificado_cosaco BOOLEAN DEFAULT FALSE
     );
+
+    CREATE TABLE IF NOT EXISTS pagos_pendientes (
+      id SERIAL PRIMARY KEY,
+      cliente_id INTEGER NOT NULL,
+      cliente_nombre VARCHAR(200),
+      cliente_from VARCHAR(50),
+      monto NUMERIC,
+      metodo VARCHAR(50),
+      timestamp TIMESTAMPTZ DEFAULT NOW(),
+      esperando_confirmacion BOOLEAN DEFAULT TRUE
+    );
   `);
   console.log('Tablas listas en PostgreSQL');
 }
@@ -94,9 +105,7 @@ const TWILIO_FROM = process.env.TWILIO_WHATSAPP_NUMBER?.startsWith('whatsapp:')
 const conversaciones = new Map(); // { from: { messages: [], lastSeen: Date } }
 const EXPIRACION_MS = 24 * 60 * 60 * 1000; // 24 horas
 
-// Cola de pagos pendientes de confirmación por Cosaco
-let pagoEnEspera = null; // { cliente_id, cliente_nombre, cliente_from, monto, metodo, fecha_pago }
-const colaPagendientes = []; // cola FIFO de pagos
+// Pagos pendientes de confirmación → persisten en tabla pagos_pendientes (PostgreSQL)
 
 // Suspensiones pendientes de confirmación por Cosaco
 // clave: cliente_id como string, valor: { cliente_id, cliente_nombre, telefono, timestamp, esperandoConfirmacion }
@@ -278,6 +287,11 @@ Cuando alguien quiera registrar un pago o vos lo indiques:
 3. Usar la tool consultar_pago_a_cosaco (NO uses registrar_pago directamente)
 4. Responder al cliente: "✅ Pago enviado para confirmación. En breve queda registrado 🏑"
 IMPORTANTE: Nunca uses registrar_pago directamente desde una conversación con un cliente. Siempre pasá por consultar_pago_a_cosaco.
+
+Cuando un CLIENTE (no Cosaco) diga que pagó en efectivo:
+- Respondele: 'Gracias! Vamos a confirmar tu pago con el equipo y te avisamos cuando quede registrado 🏑'
+- Usá consultar_pago_a_cosaco para notificarme
+- NUNCA registres el pago en efectivo sin mi confirmación
 La fecha de pago se calcula automáticamente (no la pidas al cliente): si el cliente está Suspendido o no tiene fecha de vencimiento, se usa la fecha de hoy; si está Vigente, se usa su última fecha de vencimiento.
 
 CUANDO REGISTRES O ASIGNES TURNOS (cliente nuevo o existente):
@@ -756,50 +770,49 @@ async function ejecutarTool(nombre, input, remitente) {
     }
 
     if (nombre === 'consultar_pago_a_cosaco') {
-      const rCliente = await fetch(`${GYM_API}/clientes/${input.cliente_id}`, { headers });
-      const cliente = await rCliente.json();
-      const hoy = new Date().toISOString().split('T')[0];
-      const fecha_pago = cliente.estado === 'Suspendido' || !cliente.fecha_vencimiento
-        ? hoy
-        : cliente.fecha_vencimiento;
-      const nuevoPago = {
-        cliente_id: input.cliente_id,
-        cliente_nombre: input.cliente_nombre,
-        cliente_from: remitente,
-        monto: input.monto,
-        metodo: input.metodo || 'Transferencia',
-        fecha_pago,
-      };
+      const metodo = input.metodo || 'Transferencia';
 
+      // Insertar en DB
+      await pool.query(
+        `INSERT INTO pagos_pendientes (cliente_id, cliente_nombre, cliente_from, monto, metodo)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [input.cliente_id, input.cliente_nombre, remitente, input.monto, metodo]
+      );
+
+      // Si ya hay otro pago esperando, este queda encolado en DB automáticamente
+      const { rows: pendientes } = await pool.query(
+        `SELECT COUNT(*) AS count FROM pagos_pendientes WHERE esperando_confirmacion = true`
+      );
+      const total = parseInt(pendientes[0].count);
+
+      if (total > 1) {
+        console.log(`Pago encolado para ${input.cliente_nombre} (posición ${total - 1})`);
+        return { ok: true, encolado: true, posicion: total - 1 };
+      }
+
+      // Es el único: notificar a Cosaco
       const mensajeCosaco =
         `💰 *Confirmación de pago*\n` +
         `Cliente: ${input.cliente_nombre}\n` +
         `Monto: $${input.monto}\n` +
-        `Método: ${input.metodo || 'Transferencia'}\n` +
+        `Método: ${metodo}\n` +
         `¿Confirmás este pago? Respondé *SÍ* o *NO*`;
 
-      if (pagoEnEspera) {
-        colaPagendientes.push(nuevoPago);
-        console.log(`Pago encolado para ${input.cliente_nombre} (posición ${colaPagendientes.length})`);
-        return { ok: true, encolado: true, posicion: colaPagendientes.length };
-      } else {
-        pagoEnEspera = nuevoPago;
-        console.log(`[Twilio] Enviando a Cosaco — from: ${process.env.TWILIO_WHATSAPP_NUMBER} | to: ${process.env.COSACO_WHATSAPP}`);
-        try {
-          const msgResult = await twilioClient.messages.create({
-            from: TWILIO_FROM,
-            to: process.env.COSACO_WHATSAPP,
-            body: mensajeCosaco,
-          });
-          console.log(`[Twilio] Mensaje enviado OK — SID: ${msgResult.sid} | status: ${msgResult.status} | to: ${msgResult.to} | from: ${msgResult.from}`);
-          guardarMensaje(process.env.COSACO_WHATSAPP, null, mensajeCosaco, 'agente');
-        } catch (twilioErr) {
-          console.error(`[Twilio] ERROR al enviar a Cosaco — code: ${twilioErr.code} | status: ${twilioErr.status} | message: ${twilioErr.message}`);
-          pagoEnEspera = null;
-          return { error: `Error enviando mensaje a Cosaco: ${twilioErr.message}` };
-        }
-        return { ok: true, enviado_a_cosaco: true };
+      console.log(`[Twilio] Enviando a Cosaco — from: ${process.env.TWILIO_WHATSAPP_NUMBER} | to: ${process.env.COSACO_WHATSAPP}`);
+      try {
+        const msgResult = await twilioClient.messages.create({
+          from: TWILIO_FROM,
+          to: process.env.COSACO_WHATSAPP,
+          body: mensajeCosaco,
+        });
+        console.log(`[Twilio] Mensaje enviado OK — SID: ${msgResult.sid} | status: ${msgResult.status} | to: ${msgResult.to} | from: ${msgResult.from}`);
+        guardarMensaje(process.env.COSACO_WHATSAPP, null, mensajeCosaco, 'agente');
+      } catch (twilioErr) {
+        console.error(`[Twilio] ERROR al enviar a Cosaco — code: ${twilioErr.code} | status: ${twilioErr.status} | message: ${twilioErr.message}`);
+        await pool.query(`DELETE FROM pagos_pendientes WHERE cliente_id = $1 AND cliente_from = $2 AND esperando_confirmacion = true ORDER BY id DESC LIMIT 1`, [input.cliente_id, remitente]);
+        return { error: `Error enviando mensaje a Cosaco: ${twilioErr.message}` };
       }
+      return { ok: true, enviado_a_cosaco: true };
     }
 
     if (nombre === 'enviar_mensaje_cliente') {
@@ -949,8 +962,11 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
       const esSiNo = mensajeUpper === 'SI' || mensajeUpper === 'S' || mensajeUpper === 'NO' || mensajeUpper === 'N';
 
       // 1. Pago pendiente
-      if (pagoEnEspera && esSiNo) {
-        await manejarConfirmacionPago(mensajeUpper);
+      const { rows: pagosPendientes } = await pool.query(
+        `SELECT * FROM pagos_pendientes WHERE esperando_confirmacion = true ORDER BY id ASC LIMIT 1`
+      );
+      if (pagosPendientes.length > 0 && esSiNo) {
+        await manejarConfirmacionPago(mensajeUpper, pagosPendientes[0]);
         return;
       }
 
@@ -1043,10 +1059,11 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
   }
 }
 
-async function manejarConfirmacionPago(mensajeUpper) {
+async function manejarConfirmacionPago(mensajeUpper, pago) {
   const confirmado = mensajeUpper === 'SI' || mensajeUpper === 'S';
-  const pago = pagoEnEspera;
-  pagoEnEspera = null;
+
+  // Eliminar de la tabla
+  await pool.query(`DELETE FROM pagos_pendientes WHERE id = $1`, [pago.id]);
 
   if (confirmado) {
     console.log(`Cosaco confirmó pago de ${pago.cliente_nombre} por $${pago.monto}`);
@@ -1058,6 +1075,7 @@ async function manejarConfirmacionPago(mensajeUpper) {
       const rCliente = await fetch(`${GYM_API}/clientes/${pago.cliente_id}`, { headers });
       const cliente = await rCliente.json();
       const hoy = new Date().toISOString().split('T')[0];
+      const fecha_pago = cliente.estado === 'Suspendido' || !cliente.fecha_vencimiento ? hoy : cliente.fecha_vencimiento;
       const r = await fetch(`${GYM_API}/pagos`, {
         method: 'POST',
         headers,
@@ -1076,7 +1094,7 @@ async function manejarConfirmacionPago(mensajeUpper) {
       registrarActividad('pago', { nombre: pago.cliente_nombre, monto: pago.monto });
 
       await enviarWhatsApp(pago.cliente_from,
-        `✅ Pago registrado: ${pago.cliente_nombre} - $${pago.monto} - ${pago.metodo} - ${pago.fecha_pago} 🏑`,
+        `✅ Pago registrado: ${pago.cliente_nombre} - $${pago.monto} - ${pago.metodo} - ${fecha_pago} 🏑`,
         pago.cliente_nombre);
     } catch (err) {
       console.error('Error registrando pago confirmado:', err);
@@ -1088,15 +1106,18 @@ async function manejarConfirmacionPago(mensajeUpper) {
       pago.cliente_nombre);
   }
 
-  // Procesar siguiente en cola
-  if (colaPagendientes.length > 0) {
-    pagoEnEspera = colaPagendientes.shift();
+  // Siguiente en cola (el SELECT ya trae el próximo por id ASC)
+  const { rows: siguientes } = await pool.query(
+    `SELECT * FROM pagos_pendientes WHERE esperando_confirmacion = true ORDER BY id ASC LIMIT 1`
+  );
+  if (siguientes.length > 0) {
+    const siguiente = siguientes[0];
     const mensajeCosaco =
       `💰 Siguiente pago a confirmar:\n` +
-      `Cliente: ${pagoEnEspera.cliente_nombre} - $${pagoEnEspera.monto} - ${pagoEnEspera.metodo}\n` +
+      `Cliente: ${siguiente.cliente_nombre} - $${siguiente.monto} - ${siguiente.metodo}\n` +
       `¿Confirmás? SÍ o NO`;
     await enviarWhatsApp(process.env.COSACO_WHATSAPP, mensajeCosaco);
-    console.log(`Siguiente pago en cola enviado a Cosaco: ${pagoEnEspera.cliente_nombre}`);
+    console.log(`Siguiente pago en cola enviado a Cosaco: ${siguiente.cliente_nombre}`);
   }
 }
 
