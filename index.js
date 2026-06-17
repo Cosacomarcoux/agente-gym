@@ -1647,11 +1647,20 @@ cron.schedule('0 12 * * *', async () => {
 // Informe diario a las 23hs
 cron.schedule('0 2 * * *', async () => {
   try {
+    console.log('🕐 Hora servidor:', new Date().toString());
+    console.log('🕐 Hora UTC:', new Date().toISOString());
+    console.log('🕐 Hora Argentina:', new Date().toLocaleString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' }));
+
     const fechaHoy = new Date().toISOString().split('T')[0];
     const result = await pool.query('SELECT * FROM actividad_dia WHERE fecha = $1', [fechaHoy]);
     const actividad = result.rows[0] || { mensajes_atendidos: 0, nuevos_clientes: [], pagos_registrados: [], turnos_cambiados: [] };
 
-    const hoy = new Date().toLocaleDateString('es-AR');
+    const hoy = new Date().toLocaleDateString('es-AR', {
+      timeZone: 'America/Argentina/Buenos_Aires',
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+    });
     let informe = `📊 *Informe del día — ${hoy}*\n\n`;
 
     informe += `💬 Mensajes atendidos: ${actividad.mensajes_atendidos}\n\n`;
