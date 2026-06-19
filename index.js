@@ -712,25 +712,55 @@ async function ejecutarTool(nombre, input, remitente) {
     if (nombre === 'get_clientes') {
       const params = new URLSearchParams();
       if (input.estado) params.append('estado', input.estado);
-      if (input.buscar) params.append('buscar', input.buscar);
 
+      // Búsqueda por teléfono: limpiar prefijos 549/54 y usar últimos 8 dígitos
+      if (input.buscar && input.buscar.match(/^\d+$/)) {
+        let tel = input.buscar.replace(/^549/, '').replace(/^54/, '');
+        tel = tel.slice(-8);
+        params.set('buscar', tel);
+      } else if (input.buscar) {
+        params.append('buscar', input.buscar);
+      }
+
+      const buscarClientes = async (termino) => {
+        const p = new URLSearchParams();
+        if (input.estado) p.append('estado', input.estado);
+        p.append('buscar', termino);
+        const r = await fetch(`${GYM_API}/clientes?${p.toString()}`, { headers });
+        const d = await r.json();
+        return Array.isArray(d) ? d : [];
+      };
+
+      // 1. Búsqueda con término original (o teléfono limpio)
       const r = await fetch(`${GYM_API}/clientes?${params.toString()}`, { headers });
       const data = await r.json();
-      const resultados = Array.isArray(data) ? data : [];
+      let resultados = Array.isArray(data) ? data : [];
+      if (resultados.length > 0) return resultados;
 
-      // Si no encontró nada y había búsqueda, reintentar sin acentos y con cada palabra
-      if (resultados.length === 0 && input.buscar) {
-        const palabras = input.buscar
+      if (input.buscar && !input.buscar.match(/^\d+$/)) {
+        const sinAcentos = input.buscar
           .normalize('NFD')
-          .replace(/[\u0300-\u036f]/g, '') // quita acentos
-          .split(' ')
-          .filter(p => p.length > 2);
+          .replace(/[\u0300-\u036f]/g, '');
 
+        // 2. Buscar sin acentos (término completo)
+        if (sinAcentos !== input.buscar) {
+          resultados = await buscarClientes(sinAcentos);
+          if (resultados.length > 0) return resultados;
+        }
+
+        // 3. Buscar cada palabra por separado (sin acentos)
+        const palabras = sinAcentos.split(' ').filter(p => p.length > 2);
         for (const palabra of palabras) {
-          const r2 = await fetch(`${GYM_API}/clientes?buscar=${encodeURIComponent(palabra)}`, { headers });
-          const data2 = await r2.json();
-          const res2 = Array.isArray(data2) ? data2 : [];
-          if (res2.length > 0) return res2;
+          resultados = await buscarClientes(palabra);
+          if (resultados.length > 0) return resultados;
+        }
+
+        // 4. Buscar con solo las primeras 4 letras de cada palabra
+        for (const palabra of palabras) {
+          if (palabra.length > 4) {
+            resultados = await buscarClientes(palabra.slice(0, 4));
+            if (resultados.length > 0) return resultados;
+          }
         }
       }
 
