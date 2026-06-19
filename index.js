@@ -983,6 +983,21 @@ async function ejecutarTool(nombre, input, remitente) {
   }
 }
 
+async function buscarClientePorTelefono(telefono) {
+  try {
+    let tel = telefono.replace('whatsapp:+549', '').replace('whatsapp:+54', '');
+    tel = tel.replace(/\D/g, '').slice(-10);
+    const r = await fetch(`${GYM_API}/clientes?buscar=${tel}`, {
+      headers: { Authorization: `Bearer ${GYM_TOKEN}` }
+    });
+    const data = await r.json();
+    const clientes = Array.isArray(data) ? data : [];
+    return clientes.length > 0 ? clientes[0] : null;
+  } catch (err) {
+    return null;
+  }
+}
+
 async function procesarMensaje(mensaje, remitente, profileName = null) {
   try {
     const esCosaco = remitente === process.env.COSACO_WHATSAPP;
@@ -1066,13 +1081,18 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
     conv.messages.push({ role: 'user', content: mensaje });
     conv.lastSeen = Date.now();
 
+    const clienteIdentificado = await buscarClientePorTelefono(remitente);
+    const systemPromptFinal = clienteIdentificado
+      ? `${SYSTEM_PROMPT}\n\nCLIENTE IDENTIFICADO: Estás hablando con ${clienteIdentificado.nombre}, cliente registrado/a con plan ${clienteIdentificado.plan}, estado ${clienteIdentificado.estado}, vencimiento ${clienteIdentificado.fecha_vencimiento}. Usá su nombre directamente sin pedírselo.`
+      : SYSTEM_PROMPT;
+
     // Agentic loop
     let respuesta;
     while (true) {
       respuesta = await anthropic.messages.create({
         model: 'claude-haiku-4-5-20251001',
         max_tokens: 1024,
-        system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
+        system: [{ type: 'text', text: systemPromptFinal, cache_control: { type: 'ephemeral' } }],
         tools: TOOLS,
         messages: conv.messages,
       });
