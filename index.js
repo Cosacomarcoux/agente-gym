@@ -55,6 +55,13 @@ async function initDB() {
       timestamp TIMESTAMPTZ DEFAULT NOW(),
       esperando_confirmacion BOOLEAN DEFAULT TRUE
     );
+
+    CREATE TABLE IF NOT EXISTS estados_conversacion (
+      telefono VARCHAR(50) PRIMARY KEY,
+      estado VARCHAR(50) DEFAULT 'inicio',
+      datos JSONB DEFAULT '{}',
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    );
   `);
   console.log('Tablas listas en PostgreSQL');
 }
@@ -998,6 +1005,237 @@ async function buscarClientePorTelefono(telefono) {
   }
 }
 
+// ── Estado de conversación (PostgreSQL) ──────────────────────────────────────
+
+async function getEstado(telefono) {
+  const { rows } = await pool.query(
+    `SELECT estado, datos FROM estados_conversacion WHERE telefono = $1`,
+    [telefono]
+  );
+  return rows.length > 0 ? rows[0] : { estado: 'inicio', datos: {} };
+}
+
+async function setEstado(telefono, estado, datos = {}) {
+  await pool.query(
+    `INSERT INTO estados_conversacion (telefono, estado, datos, updated_at)
+     VALUES ($1, $2, $3, NOW())
+     ON CONFLICT (telefono) DO UPDATE SET estado = $2, datos = $3, updated_at = NOW()`,
+    [telefono, estado, JSON.stringify(datos)]
+  );
+}
+
+async function resetEstado(telefono) {
+  await setEstado(telefono, 'inicio', {});
+}
+
+// ── Textos de menú ────────────────────────────────────────────────────────────
+
+function menuPrincipal(nombre) {
+  const saludo = nombre ? `¡Hola ${nombre}! 👋` : '¡Hola! 👋';
+  return `${saludo} ¿En qué te puedo ayudar?\n\n1️⃣ Registrar un pago\n2️⃣ Consultar mis turnos\n3️⃣ Cambiar o agregar un turno\n4️⃣ Información del gimnasio\n5️⃣ Hablar con el equipo\n\nRespondé con el número de tu opción 🏑`;
+}
+
+const INFO_GIMNASIO =
+  `🏑 *Hockey Vivo* — Santiago del Estero\n\n` +
+  `📍 Moreno (N) 55 entre Andes y Rivadavia\n` +
+  `🕐 Lunes, miércoles y viernes 18:30–21hs\n` +
+  `🕐 Martes y jueves 16–21hs\n\n` +
+  `💰 *Planes:*\n• 1 vez/semana — $29.000\n• 2 veces/semana — $35.000\n• 3 veces/semana — $39.000\n\n` +
+  `📲 Instagram: @hockeyvivo.cm2\n` +
+  `📍 Ubicación: https://maps.google.com/?q=-27.785810,-64.268463\n\n` +
+  `La primera clase es *GRATIS* 🎉 Traé palo, botines y agua 🏑`;
+
+const LINK_CUPOS = `¡Podés ver todos los turnos y cupos disponibles acá! 👇\n🔗 https://hockeyvivo.up.railway.app/cupos\n\nPara anotarte escribinos acá. Si el turno está lleno, podés anotarte en la lista de espera desde esa misma página 🏑`;
+
+// ── Palabras que reinician al menú ────────────────────────────────────────────
+
+function esTriggerMenu(msg) {
+  const m = msg.trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  return ['hola', 'menu', 'inicio', 'hi', 'buenas', 'buen dia', 'buenos dias',
+    'buenas tardes', 'buenas noches', '0', 'cancelar', 'volver'].includes(m);
+}
+
+// ── Lógica de flujo de menú ──────────────────────────────────────────────────
+
+async function procesarFlujoMenu(mensaje, remitente, cliente, profileName) {
+  const { estado, datos } = await getEstado(remitente);
+  const msg = mensaje.trim();
+  const msgNorm = msg.toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  const nombre = cliente?.nombre?.split(' ')[0] || profileName?.split(' ')[0] || null;
+
+  // Triggers de menú → mostrar menú y resetear
+  if (esTriggerMenu(msg)) {
+    await resetEstado(remitente);
+    return menuPrincipal(nombre);
+  }
+
+  // ── ESTADO: inicio ──────────────────────────────────────────────────────────
+  if (estado === 'inicio') {
+    const opcion = msg.trim();
+
+    if (opcion === '1') {
+      if (!cliente) {
+        await resetEstado(remitente);
+        return `No encontramos tu cuenta registrada. Escribinos a Cosaco para más info 🏑`;
+      }
+      await setEstado(remitente, 'pago_monto', {
+        cliente_id: cliente.id,
+        cliente_nombre: cliente.nombre,
+      });
+      return `¿Cuál es el monto que vas a abonar? 💰`;
+    }
+
+    if (opcion === '2') {
+      await resetEstado(remitente);
+      if (cliente) {
+        const turnosTexto = Array.isArray(cliente.turnos) && cliente.turnos.length > 0
+          ? cliente.turnos.map(t => `📅 ${t.dia_semana || t.nombre || t} ${t.hora_inicio || ''}`).join('\n')
+          : null;
+        if (turnosTexto) {
+          return `Tus turnos actuales:\n\n${turnosTexto}\n\nSi querés cambiar o agregar, elegí la opción 3 🏑`;
+        }
+      }
+      return LINK_CUPOS;
+    }
+
+    if (opcion === '3') {
+      await setEstado(remitente, 'turno_accion', {
+        cliente_id: cliente?.id || null,
+        cliente_nombre: cliente?.nombre || null,
+      });
+      return `¿Querés:\n\n1️⃣ Agregar un turno nuevo\n2️⃣ Cambiar un turno que ya tenés`;
+    }
+
+    if (opcion === '4') {
+      await resetEstado(remitente);
+      return INFO_GIMNASIO;
+    }
+
+    if (opcion === '5') {
+      await resetEstado(remitente);
+      const contacto = `⚠️ ${nombre || profileName || remitente} quiere hablar con el equipo.\nContactalo a la brevedad 🏑`;
+      try {
+        await twilioClient.messages.create({
+          from: TWILIO_FROM,
+          to: process.env.COSACO_WHATSAPP,
+          body: contacto,
+        });
+        guardarMensaje(process.env.COSACO_WHATSAPP, null, contacto, 'agente');
+      } catch (e) {
+        console.error('Error notificando a Cosaco (opción 5):', e.message);
+      }
+      return `Perfecto! En breve te contactamos 🏑`;
+    }
+
+    // Opción no reconocida → mostrar menú
+    return menuPrincipal(nombre);
+  }
+
+  // ── ESTADO: pago_monto ──────────────────────────────────────────────────────
+  if (estado === 'pago_monto') {
+    const monto = parseFloat(msg.replace(/[.$,]/g, '').replace(',', '.'));
+    if (isNaN(monto) || monto <= 0) {
+      return `No entendí el monto. ¿Cuánto abonaste? Escribí solo el número, por ejemplo: 35000`;
+    }
+    await setEstado(remitente, 'pago_metodo', { ...datos, monto });
+    return `¿Cómo pagaste?\n\n💳 Transferencia\n💵 Efectivo`;
+  }
+
+  // ── ESTADO: pago_metodo ─────────────────────────────────────────────────────
+  if (estado === 'pago_metodo') {
+    let metodo = null;
+    if (msgNorm.includes('TRANSF')) metodo = 'Transferencia';
+    else if (msgNorm.includes('EFECT')) metodo = 'Efectivo';
+
+    if (!metodo) {
+      return `Respondé *Transferencia* o *Efectivo* 💳`;
+    }
+
+    const nuevosDatos = { ...datos, metodo };
+    await setEstado(remitente, 'pago_confirmar', nuevosDatos);
+    return (
+      `Confirmá el pago:\n\n` +
+      `👤 ${datos.cliente_nombre}\n` +
+      `💰 $${datos.monto.toLocaleString('es-AR')}\n` +
+      `💳 ${metodo}\n\n` +
+      `¿Es correcto? Respondé *SÍ* o *NO*`
+    );
+  }
+
+  // ── ESTADO: pago_confirmar ──────────────────────────────────────────────────
+  if (estado === 'pago_confirmar') {
+    const esSi = msgNorm === 'SI' || msgNorm === 'S' || msgNorm === 'SÍ';
+    const esNo = msgNorm === 'NO' || msgNorm === 'N';
+
+    if (!esSi && !esNo) {
+      return `Respondé *SÍ* para confirmar o *NO* para cancelar`;
+    }
+
+    await resetEstado(remitente);
+
+    if (esNo) {
+      return menuPrincipal(nombre);
+    }
+
+    // Confirmar → encolar pago para Cosaco
+    try {
+      await pool.query(
+        `INSERT INTO pagos_pendientes (cliente_id, cliente_nombre, cliente_from, monto, metodo)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [datos.cliente_id, datos.cliente_nombre, remitente, datos.monto, datos.metodo]
+      );
+
+      const { rows: pendientes } = await pool.query(
+        `SELECT COUNT(*) AS count FROM pagos_pendientes WHERE esperando_confirmacion = true`
+      );
+      const total = parseInt(pendientes[0].count);
+
+      if (total === 1) {
+        const mensajeCosaco =
+          `💰 *Confirmación de pago*\n` +
+          `Cliente: ${datos.cliente_nombre}\n` +
+          `Monto: $${datos.monto}\n` +
+          `Método: ${datos.metodo}\n` +
+          `¿Confirmás este pago? Respondé *SÍ* o *NO*`;
+
+        await twilioClient.messages.create({
+          from: TWILIO_FROM,
+          to: process.env.COSACO_WHATSAPP,
+          body: mensajeCosaco,
+        });
+        guardarMensaje(process.env.COSACO_WHATSAPP, null, mensajeCosaco, 'agente');
+      }
+    } catch (err) {
+      console.error('Error encolando pago desde menú:', err.message);
+    }
+
+    return `✅ Pago enviado para confirmación. En breve queda registrado 🏑`;
+  }
+
+  // ── ESTADO: turno_accion ────────────────────────────────────────────────────
+  if (estado === 'turno_accion') {
+    if (msg === '1') {
+      await resetEstado(remitente);
+      return LINK_CUPOS;
+    }
+    if (msg === '2') {
+      await setEstado(remitente, 'turno_cual', datos);
+      return `¿Qué turno querés cambiar? Decime el día y horario actual y el que querés en su lugar 🏑`;
+    }
+    return `Respondé *1* para agregar un turno nuevo o *2* para cambiar uno que ya tenés`;
+  }
+
+  // ── ESTADO: turno_cual → derivar a Claude ──────────────────────────────────
+  if (estado === 'turno_cual') {
+    await resetEstado(remitente);
+    return null; // señal de que Claude debe continuar
+  }
+
+  // Estado desconocido → menú
+  await resetEstado(remitente);
+  return menuPrincipal(nombre);
+}
+
 async function procesarMensaje(mensaje, remitente, profileName = null) {
   try {
     const esCosaco = remitente === process.env.COSACO_WHATSAPP;
@@ -1077,11 +1315,36 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
       await loginConReintentos(3, 3000);
     }
 
+    const clienteIdentificado = await buscarClientePorTelefono(remitente);
+
+    // ── Flujo de menú con estados ──────────────────────────────────────────────
+    const { estado: estadoActual } = await getEstado(remitente);
+    const esMenuTrigger = esTriggerMenu(mensaje);
+    const esOpcionMenu = /^[1-5]$/.test(mensaje.trim());
+
+    // Flujos activos siempre se procesan sin Claude
+    const estadosActivos = ['pago_monto', 'pago_metodo', 'pago_confirmar', 'turno_accion', 'turno_cual'];
+    const enFlujoActivo = estadosActivos.includes(estadoActual);
+
+    // En estado inicio: interceptar solo triggers de menú o números 1-5
+    const interceptarInicio = estadoActual === 'inicio' && (esMenuTrigger || esOpcionMenu);
+
+    if (enFlujoActivo || interceptarInicio) {
+      const respuestaMenu = await procesarFlujoMenu(mensaje, remitente, clienteIdentificado, profileName);
+      if (respuestaMenu !== null) {
+        await twilioClient.messages.create({ from: TWILIO_FROM, to: remitente, body: respuestaMenu });
+        guardarMensaje(remitente, null, respuestaMenu, 'agente');
+        registrarActividad('mensaje');
+        return;
+      }
+      // null → turno_cual: derivar a Claude para gestionar el cambio de turno
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
     const conv = getHistorial(remitente);
     conv.messages.push({ role: 'user', content: mensaje });
     conv.lastSeen = Date.now();
 
-    const clienteIdentificado = await buscarClientePorTelefono(remitente);
     const systemPromptFinal = clienteIdentificado
       ? `${SYSTEM_PROMPT}\n\nCLIENTE IDENTIFICADO: Estás hablando con ${clienteIdentificado.nombre}, cliente registrado/a con plan ${clienteIdentificado.plan}, estado ${clienteIdentificado.estado}, vencimiento ${clienteIdentificado.fecha_vencimiento}. Usá su nombre directamente sin pedírselo.`
       : SYSTEM_PROMPT;
