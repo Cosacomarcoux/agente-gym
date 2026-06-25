@@ -1296,19 +1296,39 @@ async function manejarConfirmacionSuspension(mensajeUpper, suspension) {
 
   // Eliminar de la tabla y pasar al siguiente
   await pool.query(`DELETE FROM suspensiones_pendientes WHERE id = $1`, [suspension.id]);
-  const { rows: pendientes } = await pool.query(
-    `SELECT * FROM suspensiones_pendientes WHERE esperando_confirmacion = false ORDER BY timestamp ASC LIMIT 1`
+
+  const siguiente = await pool.query(
+    'SELECT * FROM suspensiones_pendientes WHERE esperando_confirmacion = false AND notificado_cosaco = false ORDER BY id ASC LIMIT 1'
   );
-  if (pendientes.length > 0) {
-    const siguiente = pendientes[0];
-    await enviarWhatsApp(process.env.COSACO_WHATSAPP.replace('whatsapp:+54', ''),
-      `⚠️ Siguiente: ${siguiente.cliente_nombre} lleva 10 días sin pagar. ¿Suspendo su servicio?\nRespondé SÍ o NO`,
+  if (siguiente.rows.length > 0) {
+    const sig = siguiente.rows[0];
+    await pool.query(
+      'UPDATE suspensiones_pendientes SET esperando_confirmacion = true, notificado_cosaco = true WHERE id = $1',
+      [sig.id]
+    );
+    await enviarWhatsApp(
+      process.env.COSACO_WHATSAPP,
+      `⚠️ Siguiente: ${sig.cliente_nombre} lleva 10 días sin pagar. ¿Suspendo su servicio?\nRespondé SÍ o NO`,
       'Cosaco'
     );
-    await pool.query(
-      `UPDATE suspensiones_pendientes SET esperando_confirmacion = true, notificado_cosaco = true WHERE id = $1`,
-      [siguiente.id]
+  } else {
+    const pagoSig = await pool.query(
+      'SELECT * FROM pagos_pendientes WHERE esperando_confirmacion = true ORDER BY id ASC LIMIT 1'
     );
+    if (pagoSig.rows.length > 0) {
+      const p = pagoSig.rows[0];
+      await enviarWhatsApp(
+        process.env.COSACO_WHATSAPP,
+        `💰 Siguiente pendiente:\nCliente: ${p.cliente_nombre}\nMonto: $${p.monto}\nMétodo: ${p.metodo}\n¿Confirmás? SÍ o NO`,
+        'Cosaco'
+      );
+    } else {
+      await enviarWhatsApp(
+        process.env.COSACO_WHATSAPP,
+        '✅ No hay más pendientes. ¡Todo procesado! 🏑',
+        'Cosaco'
+      );
+    }
   }
 }
 
