@@ -1294,16 +1294,18 @@ async function manejarConfirmacionSuspension(mensajeUpper, suspension) {
       `👍 Ok, ${suspension.cliente_nombre} no fue suspendido.`);
   }
 
-  // Eliminar de la tabla y pasar al siguiente
+  // Eliminar la suspensión procesada (usamos su id, no hacemos otro SELECT)
   await pool.query(`DELETE FROM suspensiones_pendientes WHERE id = $1`, [suspension.id]);
 
+  // Limpiar cualquier flag sucio y tomar la siguiente por id
+  await pool.query(`UPDATE suspensiones_pendientes SET esperando_confirmacion = false`);
   const siguiente = await pool.query(
     'SELECT * FROM suspensiones_pendientes ORDER BY id ASC LIMIT 1'
   );
   if (siguiente.rows.length > 0) {
     const sig = siguiente.rows[0];
     await pool.query(
-      'UPDATE suspensiones_pendientes SET esperando_confirmacion = true, notificado_cosaco = true WHERE id = $1',
+      'UPDATE suspensiones_pendientes SET esperando_confirmacion = true WHERE id = $1',
       [sig.id]
     );
     await enviarWhatsApp(
