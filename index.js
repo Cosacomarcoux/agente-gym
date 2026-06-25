@@ -1298,7 +1298,7 @@ async function manejarConfirmacionSuspension(mensajeUpper, suspension) {
   await pool.query(`DELETE FROM suspensiones_pendientes WHERE id = $1`, [suspension.id]);
 
   const siguiente = await pool.query(
-    'SELECT * FROM suspensiones_pendientes WHERE esperando_confirmacion = false AND notificado_cosaco = false ORDER BY id ASC LIMIT 1'
+    'SELECT * FROM suspensiones_pendientes ORDER BY id ASC LIMIT 1'
   );
   if (siguiente.rows.length > 0) {
     const sig = siguiente.rows[0];
