@@ -1059,30 +1059,47 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
         return;
       }
 
-      // 1. Pago pendiente
-      const { rows: pagosPendientes } = await pool.query(
-        `SELECT * FROM pagos_pendientes WHERE esperando_confirmacion = true ORDER BY id ASC LIMIT 1`
-      );
-      if (pagosPendientes.length > 0 && esSiNo) {
-        await manejarConfirmacionPago(mensajeUpper, pagosPendientes[0]);
-        return;
-      }
+      // Detectar si Cosaco estaba esperando confirmación de turno
+      const historialCosaco = conversaciones.get(process.env.COSACO_WHATSAPP);
+      const ultimoMensajeAgente = historialCosaco?.messages
+        ?.filter(m => m.role === 'assistant')
+        ?.slice(-1)[0];
+      const textoUltimoAgente = typeof ultimoMensajeAgente?.content === 'string'
+        ? ultimoMensajeAgente.content
+        : '';
+      const esperandoConfirmacionTurno =
+        textoUltimoAgente.includes('¿Confirmo que le agrego') ||
+        textoUltimoAgente.includes('¿Confirmás que querés cambiar');
 
-      // 2. Suspensión pendiente en DB
-      const suspPendiente = await pool.query(
-        'SELECT * FROM suspensiones_pendientes WHERE esperando_confirmacion = true LIMIT 1'
-      );
-      if (suspPendiente.rows.length > 0 && esSiNo) {
-        await manejarConfirmacionSuspension(mensajeUpper, suspPendiente.rows[0]);
-        return;
-      }
+      // Si esperaba confirmación de turno y Cosaco dijo SI → derivar a Claude
+      if (esperandoConfirmacionTurno && esSiNo) {
+        // fall through al bloque de Claude
+      } else {
+        // 1. Pago pendiente
+        const { rows: pagosPendientes } = await pool.query(
+          `SELECT * FROM pagos_pendientes WHERE esperando_confirmacion = true ORDER BY id ASC LIMIT 1`
+        );
+        if (pagosPendientes.length > 0 && esSiNo) {
+          await manejarConfirmacionPago(mensajeUpper, pagosPendientes[0]);
+          return;
+        }
 
-      // 3. Beca pendiente
-      if (becasPendientes.size > 0) {
-        const becaEntry = [...becasPendientes.entries()].find(([, b]) => !b.tipo_beca);
-        if (becaEntry) {
-          const handled = await manejarConfirmacionBeca(mensajeUpper, becaEntry);
-          if (handled) return;
+        // 2. Suspensión pendiente en DB
+        const suspPendiente = await pool.query(
+          'SELECT * FROM suspensiones_pendientes WHERE esperando_confirmacion = true LIMIT 1'
+        );
+        if (suspPendiente.rows.length > 0 && esSiNo) {
+          await manejarConfirmacionSuspension(mensajeUpper, suspPendiente.rows[0]);
+          return;
+        }
+
+        // 3. Beca pendiente
+        if (becasPendientes.size > 0) {
+          const becaEntry = [...becasPendientes.entries()].find(([, b]) => !b.tipo_beca);
+          if (becaEntry) {
+            const handled = await manejarConfirmacionBeca(mensajeUpper, becaEntry);
+            if (handled) return;
+          }
         }
       }
 
