@@ -1065,22 +1065,29 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
       // Modo "todos" → presentar primer pendiente para confirmación uno por uno
       const mensajeNorm = mensaje.trim().toLowerCase();
       if (mensajeNorm === 'todos' || mensajeNorm === 'todo') {
+        // 1. Primero suspensiones (sin filtro de flag)
+        const { rows: suspensiones } = await pool.query(
+          'SELECT * FROM suspensiones_pendientes ORDER BY id ASC LIMIT 1'
+        );
+        if (suspensiones.length > 0) {
+          const sig = suspensiones[0];
+          await pool.query(
+            'UPDATE suspensiones_pendientes SET esperando_confirmacion = true WHERE id = $1',
+            [sig.id]
+          );
+          await enviarWhatsApp(
+            process.env.COSACO_WHATSAPP,
+            `⚠️ ${sig.cliente_nombre} lleva 10 días sin pagar. ¿Suspendo su servicio?\nRespondé SÍ o NO`,
+            'Cosaco'
+          );
+          return;
+        }
+        // 2. Luego pagos
         const { rows: pagos } = await pool.query(
           'SELECT * FROM pagos_pendientes WHERE esperando_confirmacion = true ORDER BY id ASC LIMIT 1'
         );
         if (pagos.length > 0) {
           await manejarConfirmacionPago('SIGUIENTE', pagos[0]);
-          return;
-        }
-        const { rows: suspensiones } = await pool.query(
-          'SELECT * FROM suspensiones_pendientes WHERE esperando_confirmacion = true ORDER BY timestamp ASC LIMIT 1'
-        );
-        if (suspensiones.length > 0) {
-          await enviarWhatsApp(
-            process.env.COSACO_WHATSAPP,
-            `⚠️ ${suspensiones[0].cliente_nombre} lleva 10 días sin pagar. ¿Suspendo su servicio?\nRespondé SÍ o NO`,
-            'Cosaco'
-          );
           return;
         }
         await enviarWhatsApp(process.env.COSACO_WHATSAPP, '✅ No hay pendientes para procesar.', 'Cosaco');
