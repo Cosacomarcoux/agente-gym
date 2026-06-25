@@ -1058,7 +1058,32 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
         }
 
         resumen += '\n¿Querés procesar alguno ahora? Respondé el nombre o \'todos\' para ir uno por uno';
-        await enviarWhatsApp(process.env.COSACO_WHATSAPP.replace('whatsapp:+54', ''), resumen);
+        await enviarWhatsApp(process.env.COSACO_WHATSAPP, resumen, 'Cosaco');
+        return;
+      }
+
+      // Modo "todos" → presentar primer pendiente para confirmación uno por uno
+      const mensajeNorm = mensaje.trim().toLowerCase();
+      if (mensajeNorm === 'todos' || mensajeNorm === 'todo') {
+        const { rows: pagos } = await pool.query(
+          'SELECT * FROM pagos_pendientes WHERE esperando_confirmacion = true ORDER BY id ASC LIMIT 1'
+        );
+        if (pagos.length > 0) {
+          await manejarConfirmacionPago('SIGUIENTE', pagos[0]);
+          return;
+        }
+        const { rows: suspensiones } = await pool.query(
+          'SELECT * FROM suspensiones_pendientes WHERE esperando_confirmacion = true ORDER BY timestamp ASC LIMIT 1'
+        );
+        if (suspensiones.length > 0) {
+          await enviarWhatsApp(
+            process.env.COSACO_WHATSAPP,
+            `⚠️ ${suspensiones[0].cliente_nombre} lleva 10 días sin pagar. ¿Suspendo su servicio?\nRespondé SÍ o NO`,
+            'Cosaco'
+          );
+          return;
+        }
+        await enviarWhatsApp(process.env.COSACO_WHATSAPP, '✅ No hay pendientes para procesar.', 'Cosaco');
         return;
       }
 
@@ -1184,6 +1209,16 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
 }
 
 async function manejarConfirmacionPago(mensajeUpper, pago) {
+  // Modo presentación: mostrar el pago a Cosaco sin procesarlo todavía
+  if (mensajeUpper === 'SIGUIENTE') {
+    await enviarWhatsApp(
+      process.env.COSACO_WHATSAPP,
+      `💰 *Confirmación de pago*\nCliente: ${pago.cliente_nombre}\nMonto: $${pago.monto}\nMétodo: ${pago.metodo}\n¿Confirmás? Respondé SÍ o NO`,
+      'Cosaco'
+    );
+    return;
+  }
+
   const confirmado = mensajeUpper === 'SI' || mensajeUpper === 'S';
 
   // Eliminar de la tabla
