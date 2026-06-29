@@ -1848,7 +1848,12 @@ cron.schedule('0 2 * * *', async () => {
 
     informe += `_Hasta mañana Cosaco! 🏑_`;
 
-    await enviarWhatsApp(process.env.COSACO_WHATSAPP.replace('whatsapp:+54', ''), informe);
+    await enviarTemplate(
+      process.env.COSACO_WHATSAPP.replace('whatsapp:+54', ''),
+      process.env.TEMPLATE_MENSAJE_HOCKEYVIVO,
+      {"1": "Cosaco", "2": informe},
+      informe
+    );
     console.log('📊 Informe diario enviado a Cosaco');
   } catch (err) {
     console.error('Error en cron informe diario:', err.message);
