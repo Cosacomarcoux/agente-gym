@@ -1786,8 +1786,12 @@ cron.schedule('0 12 * * *', async () => {
 
     for (const c of cumpleanosHoy) {
       await enviarTemplate(c.telefono, process.env.TEMPLATE_CUMPLEANOS, { "1": c.nombre.split(' ')[0] }, '[Feliz cumpleaños]');
-      await enviarWhatsApp(process.env.COSACO_WHATSAPP.replace('whatsapp:+54', ''),
-        `🎂 Hoy es el cumpleaños de ${c.nombre}! No olvides saludarlo/a desde tu celular personal 🏑`);
+      await enviarTemplate(
+        process.env.COSACO_WHATSAPP.replace('whatsapp:+54', ''),
+        process.env.TEMPLATE_MENSAJE_HOCKEYVIVO,
+        {"1": "Cosaco", "2": `🎂 Hoy es el cumpleaños de ${c.nombre}! No olvides saludarlo/a desde tu celular personal 🏑`},
+        `Cumpleaños de ${c.nombre}`
+      );
     }
 
     console.log(`🎂 Cumpleaños enviados: ${cumpleanosHoy.length}`);
