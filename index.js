@@ -1454,31 +1454,35 @@ app.get('/test-jobs', async (req, res) => {
       const result = await pool.query('SELECT * FROM actividad_dia WHERE fecha = $1', [fechaHoy]);
       const actividad = result.rows[0] || { mensajes_atendidos: 0, nuevos_clientes: [], pagos_registrados: [], turnos_cambiados: [] };
       const hoy = new Date().toLocaleDateString('es-AR');
-      let informe = `📊 *Informe del día — ${hoy}*\n\n`;
-      informe += `💬 Mensajes atendidos: ${actividad.mensajes_atendidos}\n\n`;
-      if (actividad.nuevos_clientes.length > 0) {
-        informe += `✅ Nuevos clientes (${actividad.nuevos_clientes.length}):\n`;
-        actividad.nuevos_clientes.forEach(n => informe += `• ${n}\n`);
-        informe += '\n';
+      let informe = `📊 *Informe del día — ${hoy}*\n`;
+      informe += `💬 Mensajes: ${actividad.mensajes_atendidos}\n`;
+      if (actividad.nuevos_clientes.length === 0) {
+        informe += `✅ Nuevos clientes: ninguno\n`;
+      } else if (actividad.nuevos_clientes.length > 5) {
+        informe += `✅ Nuevos clientes: ${actividad.nuevos_clientes.length}\n`;
       } else {
-        informe += `✅ Nuevos clientes: ninguno\n\n`;
+        informe += `✅ Nuevos clientes (${actividad.nuevos_clientes.length}): ${actividad.nuevos_clientes.join(', ')}\n`;
       }
-      if (actividad.pagos_registrados.length > 0) {
+      if (actividad.pagos_registrados.length === 0) {
+        informe += `💰 Pagos: ninguno\n`;
+      } else {
         const total = actividad.pagos_registrados.reduce((sum, p) => sum + p.monto, 0);
-        informe += `💰 Pagos registrados (${actividad.pagos_registrados.length}) — Total: $${total.toLocaleString('es-AR')}:\n`;
-        actividad.pagos_registrados.forEach(p => informe += `• ${p.nombre}: $${p.monto.toLocaleString('es-AR')}\n`);
-        informe += '\n';
-      } else {
-        informe += `💰 Pagos registrados: ninguno\n\n`;
+        if (actividad.pagos_registrados.length > 5) {
+          informe += `💰 Pagos: ${actividad.pagos_registrados.length} — Total: $${total.toLocaleString('es-AR')}\n`;
+        } else {
+          informe += `💰 Pagos (${actividad.pagos_registrados.length}) — Total: $${total.toLocaleString('es-AR')}:\n`;
+          actividad.pagos_registrados.forEach(p => informe += `• ${p.nombre}: $${p.monto.toLocaleString('es-AR')}\n`);
+        }
       }
-      if (actividad.turnos_cambiados.length > 0) {
-        informe += `🔄 Cambios de turno (${actividad.turnos_cambiados.length}):\n`;
-        actividad.turnos_cambiados.forEach(n => informe += `• ${n}\n`);
-        informe += '\n';
+      if (actividad.turnos_cambiados.length === 0) {
+        informe += `🔄 Turnos cambiados: ninguno\n`;
+      } else if (actividad.turnos_cambiados.length > 5) {
+        informe += `🔄 Turnos cambiados: ${actividad.turnos_cambiados.length}\n`;
       } else {
-        informe += `🔄 Cambios de turno: ninguno\n\n`;
+        informe += `🔄 Turnos cambiados (${actividad.turnos_cambiados.length}): ${actividad.turnos_cambiados.join(', ')}\n`;
       }
       informe += `_Hasta mañana Cosaco! 🏑_`;
+      console.log('Longitud del informe:', informe.length);
       await enviarWhatsApp(process.env.COSACO_WHATSAPP.replace('whatsapp:+54', ''), informe);
       console.log('[test-jobs] Informe enviado a Cosaco');
       return res.json({ ok: true, job: 'informe', informe });
@@ -1817,36 +1821,40 @@ cron.schedule('0 2 * * *', async () => {
       month: '2-digit',
       year: 'numeric',
     });
-    let informe = `📊 *Informe del día — ${hoy}*\n\n`;
+    let informe = `📊 *Informe del día — ${hoy}*\n`;
+    informe += `💬 Mensajes: ${actividad.mensajes_atendidos}\n`;
 
-    informe += `💬 Mensajes atendidos: ${actividad.mensajes_atendidos}\n\n`;
-
-    if (actividad.nuevos_clientes.length > 0) {
-      informe += `✅ Nuevos clientes (${actividad.nuevos_clientes.length}):\n`;
-      actividad.nuevos_clientes.forEach(n => informe += `• ${n}\n`);
-      informe += '\n';
+    if (actividad.nuevos_clientes.length === 0) {
+      informe += `✅ Nuevos clientes: ninguno\n`;
+    } else if (actividad.nuevos_clientes.length > 5) {
+      informe += `✅ Nuevos clientes: ${actividad.nuevos_clientes.length}\n`;
     } else {
-      informe += `✅ Nuevos clientes: ninguno\n\n`;
+      informe += `✅ Nuevos clientes (${actividad.nuevos_clientes.length}): ${actividad.nuevos_clientes.join(', ')}\n`;
     }
 
-    if (actividad.pagos_registrados.length > 0) {
+    if (actividad.pagos_registrados.length === 0) {
+      informe += `💰 Pagos: ninguno\n`;
+    } else {
       const total = actividad.pagos_registrados.reduce((sum, p) => sum + p.monto, 0);
-      informe += `💰 Pagos registrados (${actividad.pagos_registrados.length}) — Total: $${total.toLocaleString('es-AR')}:\n`;
-      actividad.pagos_registrados.forEach(p => informe += `• ${p.nombre}: $${p.monto.toLocaleString('es-AR')}\n`);
-      informe += '\n';
-    } else {
-      informe += `💰 Pagos registrados: ninguno\n\n`;
+      if (actividad.pagos_registrados.length > 5) {
+        informe += `💰 Pagos: ${actividad.pagos_registrados.length} — Total: $${total.toLocaleString('es-AR')}\n`;
+      } else {
+        informe += `💰 Pagos (${actividad.pagos_registrados.length}) — Total: $${total.toLocaleString('es-AR')}:\n`;
+        actividad.pagos_registrados.forEach(p => informe += `• ${p.nombre}: $${p.monto.toLocaleString('es-AR')}\n`);
+      }
     }
 
-    if (actividad.turnos_cambiados.length > 0) {
-      informe += `🔄 Cambios de turno (${actividad.turnos_cambiados.length}):\n`;
-      actividad.turnos_cambiados.forEach(n => informe += `• ${n}\n`);
-      informe += '\n';
+    if (actividad.turnos_cambiados.length === 0) {
+      informe += `🔄 Turnos cambiados: ninguno\n`;
+    } else if (actividad.turnos_cambiados.length > 5) {
+      informe += `🔄 Turnos cambiados: ${actividad.turnos_cambiados.length}\n`;
     } else {
-      informe += `🔄 Cambios de turno: ninguno\n\n`;
+      informe += `🔄 Turnos cambiados (${actividad.turnos_cambiados.length}): ${actividad.turnos_cambiados.join(', ')}\n`;
     }
 
     informe += `_Hasta mañana Cosaco! 🏑_`;
+
+    console.log('Longitud del informe:', informe.length);
 
     await enviarTemplate(
       process.env.COSACO_WHATSAPP.replace('whatsapp:+54', ''),
