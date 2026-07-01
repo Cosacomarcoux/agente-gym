@@ -56,6 +56,13 @@ async function initDB() {
       esperando_confirmacion BOOLEAN DEFAULT TRUE
     );
 
+    CREATE TABLE IF NOT EXISTS telefono_cliente (
+      telefono VARCHAR(50) PRIMARY KEY,
+      cliente_id INTEGER NOT NULL,
+      cliente_nombre VARCHAR(200),
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    );
+
   `);
   console.log('Tablas listas en PostgreSQL');
 }
@@ -209,9 +216,9 @@ function calcularFechaVencimiento(fecha_pago, fecha_vencimiento_actual) {
 const SYSTEM_PROMPT = `Sos el asistente virtual del gimnasio Hockey Vivo en Santiago del Estero, Argentina. Atendés consultas de clientes y potenciales alumnos por WhatsApp. Respondés en español argentino, de forma amable y breve. Usá emojis con moderación.
 
 IDENTIFICACIÓN DEL CLIENTE:
-Al inicio de cada conversación, intentá identificar al cliente buscando su número de teléfono en get_clientes con buscar={numero_sin_prefijo}.
-El número viene en req.body.From como 'whatsapp:+549XXXXXXXXXX' — extraé los últimos 10 dígitos.
-Si encontrás al cliente, usá su nombre directamente sin pedírselo.
+Al inicio de cada conversación el sistema intenta identificar automáticamente al cliente por su número de teléfono.
+Si el cliente ya está identificado (se te indica en el contexto), usá su nombre directamente sin pedírselo.
+Si no está identificado pero durante la conversación el cliente menciona su nombre y lo encontrás con get_clientes, llamá inmediatamente guardar_telefono_cliente con su número de teléfono (el remitente del mensaje), cliente_id y cliente_nombre para recordarlo en el futuro.
 Si no lo encontrás, tratalo como cliente nuevo.
 
 DATOS DEL GIMNASIO (usá solo cuando te pregunten puntualmente por esto):
@@ -591,6 +598,19 @@ const TOOLS = [
         turno_ids_quitar: { type: 'array', items: { type: 'integer' }, description: 'IDs de turnos a quitar' },
       },
       required: ['cliente_id'],
+    },
+  },
+  {
+    name: 'guardar_telefono_cliente',
+    description: 'Guarda el mapeo entre el número de teléfono del remitente actual y un cliente identificado durante la conversación. Llamar siempre que se identifique a un cliente por nombre.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        telefono: { type: 'string', description: 'Número de teléfono del remitente (formato whatsapp:+549XXXXXXXXXX)' },
+        cliente_id: { type: 'integer', description: 'ID del cliente en el sistema' },
+        cliente_nombre: { type: 'string', description: 'Nombre completo del cliente' },
+      },
+      required: ['telefono', 'cliente_id', 'cliente_nombre'],
     },
   },
 ];
@@ -997,6 +1017,17 @@ async function ejecutarTool(nombre, input, remitente) {
       return { ok: todoBien, resultados };
     }
 
+    if (nombre === 'guardar_telefono_cliente') {
+      await pool.query(
+        `INSERT INTO telefono_cliente (telefono, cliente_id, cliente_nombre)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (telefono) DO UPDATE SET cliente_id = $2, cliente_nombre = $3, updated_at = NOW()`,
+        [input.telefono, input.cliente_id, input.cliente_nombre]
+      );
+      console.log('Mapeo guardado:', input.telefono, '→', input.cliente_nombre);
+      return { ok: true };
+    }
+
     return { error: `Tool desconocida: ${nombre}` };
   } catch (err) {
     return { error: err.message };
@@ -1005,6 +1036,13 @@ async function ejecutarTool(nombre, input, remitente) {
 
 async function buscarClientePorTelefono(telefono) {
   try {
+    // Primero buscar en caché local (telefono_cliente)
+    const cached = await pool.query('SELECT * FROM telefono_cliente WHERE telefono = $1', [telefono]);
+    if (cached.rows.length > 0) {
+      console.log('Cliente encontrado en caché:', cached.rows[0].cliente_nombre);
+      return { id: cached.rows[0].cliente_id, nombre: cached.rows[0].cliente_nombre };
+    }
+
     // Limpiar el número
     let tel = telefono.replace(/\D/g, '');
 
