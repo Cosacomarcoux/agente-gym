@@ -1007,11 +1007,13 @@ async function buscarClientePorTelefono(telefono) {
   try {
     let tel = telefono.replace('whatsapp:+549', '').replace('whatsapp:+54', '');
     tel = tel.replace(/\D/g, '').slice(-10);
+    console.log('Buscando cliente por tel:', telefono, '→ limpio:', tel);
     const r = await fetch(`${GYM_API}/clientes?buscar=${tel}`, {
       headers: { Authorization: `Bearer ${GYM_TOKEN}` }
     });
     const data = await r.json();
     const clientes = Array.isArray(data) ? data : [];
+    console.log('Resultado búsqueda:', clientes.length > 0 ? clientes[0].nombre : 'no encontrado');
     return clientes.length > 0 ? clientes[0] : null;
   } catch (err) {
     return null;
@@ -1147,6 +1149,7 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
     }
 
     const clienteIdentificado = await buscarClientePorTelefono(remitente);
+    console.log('Cliente identificado:', clienteIdentificado ? clienteIdentificado.nombre : 'ninguno');
 
     const conv = getHistorial(remitente);
     conv.messages.push({ role: 'user', content: mensaje });
