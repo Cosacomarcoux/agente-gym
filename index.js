@@ -1005,17 +1005,58 @@ async function ejecutarTool(nombre, input, remitente) {
 
 async function buscarClientePorTelefono(telefono) {
   try {
-    let tel = telefono.replace('whatsapp:+549', '').replace('whatsapp:+54', '');
-    tel = tel.replace(/\D/g, '').slice(-10);
-    console.log('Buscando cliente por tel:', telefono, '→ limpio:', tel);
-    const r = await fetch(`${GYM_API}/clientes?buscar=${tel}`, {
+    // Limpiar el número
+    let tel = telefono.replace(/\D/g, '');
+
+    // Quitar prefijos internacionales
+    if (tel.startsWith('549')) tel = tel.slice(3);
+    else if (tel.startsWith('54')) tel = tel.slice(2);
+
+    // Intentar con los últimos 10 dígitos
+    const tel10 = tel.slice(-10);
+    // Intentar con los últimos 8 dígitos (más flexible)
+    const tel8 = tel.slice(-8);
+
+    // Búsqueda 1: últimos 10 dígitos
+    let r = await fetch(`${GYM_API}/clientes?buscar=${tel10}`, {
       headers: { Authorization: `Bearer ${GYM_TOKEN}` }
     });
-    const data = await r.json();
-    const clientes = Array.isArray(data) ? data : [];
-    console.log('Resultado búsqueda:', clientes.length > 0 ? clientes[0].nombre : 'no encontrado');
-    return clientes.length > 0 ? clientes[0] : null;
+    let data = await r.json();
+    let clientes = Array.isArray(data) ? data : [];
+
+    if (clientes.length > 0) {
+      console.log('Cliente encontrado con tel10:', clientes[0].nombre);
+      return clientes[0];
+    }
+
+    // Búsqueda 2: últimos 8 dígitos
+    r = await fetch(`${GYM_API}/clientes?buscar=${tel8}`, {
+      headers: { Authorization: `Bearer ${GYM_TOKEN}` }
+    });
+    data = await r.json();
+    clientes = Array.isArray(data) ? data : [];
+
+    if (clientes.length > 0) {
+      console.log('Cliente encontrado con tel8:', clientes[0].nombre);
+      return clientes[0];
+    }
+
+    // Búsqueda 3: con 549 adelante
+    r = await fetch(`${GYM_API}/clientes?buscar=549${tel10}`, {
+      headers: { Authorization: `Bearer ${GYM_TOKEN}` }
+    });
+    data = await r.json();
+    clientes = Array.isArray(data) ? data : [];
+
+    if (clientes.length > 0) {
+      console.log('Cliente encontrado con 549:', clientes[0].nombre);
+      return clientes[0];
+    }
+
+    console.log('Cliente no encontrado para:', telefono);
+    return null;
   } catch (err) {
+    console.error('Error buscarClientePorTelefono:', err.message);
     return null;
   }
 }
