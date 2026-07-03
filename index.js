@@ -1567,7 +1567,12 @@ app.get('/test-jobs', async (req, res) => {
       }
       informe += `_Hasta mañana Cosaco! 🏑_`;
       console.log('Longitud del informe:', informe.length);
-      await enviarWhatsApp(process.env.COSACO_WHATSAPP.replace('whatsapp:+54', ''), informe);
+      await enviarTemplate(
+        process.env.COSACO_WHATSAPP.replace('whatsapp:+54', ''),
+        process.env.TEMPLATE_MENSAJE_HOCKEYVIVO,
+        {"1": informe},
+        informe
+      );
       console.log('[test-jobs] Informe enviado a Cosaco');
       return res.json({ ok: true, job: 'informe', informe });
     } else if (job === 'todos') {
@@ -1874,11 +1879,10 @@ cron.schedule('0 12 * * *', async () => {
 
     for (const c of cumpleanosHoy) {
       await enviarTemplate(c.telefono, process.env.TEMPLATE_CUMPLEANOS, { "1": c.nombre.split(' ')[0] }, '[Feliz cumpleaños]');
-      await enviarTemplate(
+      await enviarWhatsApp(
         process.env.COSACO_WHATSAPP.replace('whatsapp:+54', ''),
-        process.env.TEMPLATE_MENSAJE_HOCKEYVIVO,
-        {"1": "Cosaco", "2": `🎂 Hoy es el cumpleaños de ${c.nombre}! No olvides saludarlo/a desde tu celular personal 🏑`},
-        `Cumpleaños de ${c.nombre}`
+        `🎂 Hoy es el cumpleaños de ${c.nombre}! No olvides saludarlo/a desde tu celular personal 🏑`,
+        'Cosaco'
       );
     }
 
@@ -1888,8 +1892,8 @@ cron.schedule('0 12 * * *', async () => {
   }
 });
 
-// Informe diario a las 23hs
-cron.schedule('0 2 * * *', async () => {
+// Informe diario a las 9am Argentina (12:00 UTC)
+cron.schedule('0 12 * * *', async () => {
   try {
     console.log('🕐 Hora servidor:', new Date().toString());
     console.log('🕐 Hora UTC:', new Date().toISOString());
@@ -1943,7 +1947,7 @@ cron.schedule('0 2 * * *', async () => {
     await enviarTemplate(
       process.env.COSACO_WHATSAPP.replace('whatsapp:+54', ''),
       process.env.TEMPLATE_MENSAJE_HOCKEYVIVO,
-      {"1": "Cosaco", "2": informe},
+      {"1": informe},
       informe
     );
     console.log('📊 Informe diario enviado a Cosaco');
