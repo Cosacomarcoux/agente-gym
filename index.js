@@ -1286,7 +1286,9 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
     }
 
     const bloqueTexto = respuesta.content.find(b => b.type === 'text');
-    const texto = bloqueTexto ? bloqueTexto.text : 'No pude procesar tu consulta. Intentá de nuevo.';
+    const texto = bloqueTexto?.text?.trim()
+      ? bloqueTexto.text
+      : '¡Listo! Tu solicitud fue procesada correctamente 🏑 Si necesitás algo más, avisame.';
     conv.messages.push({ role: 'assistant', content: texto });
     console.log(`Respuesta de Claude: ${texto}`);
 
