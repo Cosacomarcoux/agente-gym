@@ -748,7 +748,19 @@ async function ejecutarTool(nombre, input, remitente) {
 
     if (nombre === 'get_turnos') {
       const r = await fetch(`${GYM_API}/turnos`, { headers });
-      return await r.json();
+      const data = await r.json();
+      const turnos = Array.isArray(data) ? data : [];
+
+      // Devolver solo los campos necesarios, sin la lista de alumnos
+      return turnos.map(t => ({
+        id: t.id,
+        dia_semana: t.dia_semana,
+        hora_inicio: t.hora_inicio,
+        nivel: t.nivel,
+        cupo_maximo: t.cupo_maximo,
+        cupo_usado: t.cupo_usado,
+        disponible: t.cupo_usado < t.cupo_maximo
+      }));
     }
 
     if (nombre === 'get_clientes') {
