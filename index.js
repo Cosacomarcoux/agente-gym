@@ -4,6 +4,8 @@ const twilio = require('twilio');
 const Anthropic = require('@anthropic-ai/sdk');
 const cron = require('node-cron');
 const { Pool } = require('pg');
+const { google } = require('googleapis');
+const { OAuth2Client } = require('google-auth-library');
 
 const app = express();
 app.use(express.urlencoded({ extended: true }));
@@ -13,6 +15,25 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false,
 });
+
+const oauth2Client = new OAuth2Client(
+  process.env.GOOGLE_CLIENT_ID,
+  process.env.GOOGLE_CLIENT_SECRET,
+  'https://agente-gym.up.railway.app/auth/google/callback'
+);
+
+async function cargarTokensGoogle() {
+  try {
+    const r = await pool.query("SELECT valor FROM config WHERE clave = 'google_tokens'");
+    if (r.rows.length > 0) {
+      const tokens = JSON.parse(r.rows[0].valor);
+      oauth2Client.setCredentials(tokens);
+      console.log('✅ Tokens de Google Calendar cargados');
+    }
+  } catch (err) {
+    console.log('ℹ️ No hay tokens de Google Calendar guardados');
+  }
+}
 
 async function initDB() {
   await pool.query(`
@@ -60,6 +81,12 @@ async function initDB() {
       telefono VARCHAR(50) PRIMARY KEY,
       cliente_id INTEGER NOT NULL,
       cliente_nombre VARCHAR(200),
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS config (
+      clave VARCHAR(100) PRIMARY KEY,
+      valor TEXT,
       updated_at TIMESTAMPTZ DEFAULT NOW()
     );
 
@@ -343,6 +370,10 @@ No uses registrar_pago hasta que la beca esté confirmada y el cliente avise que
 MODO SECRETARIO — cuando Cosaco escribe directamente:
 Sos su asistente administrativo personal. Podés hacer todo lo que haría un secretario:
 
+GOOGLE CALENDAR:
+Cuando Cosaco pida agendar algo o crear un evento, usá gestionar_calendario con accion: 'crear_evento'
+Cuando Cosaco pida ver sus eventos o agenda del día, usá gestionar_calendario con accion: 'listar_eventos'
+
 REGLAS DE ENVÍO DE MENSAJES - OBLIGATORIO:
 Cuando Cosaco pida enviar cualquier mensaje a un cliente, SIEMPRE usá la tool correspondiente con su template. NUNCA escribas el mensaje vos mismo con texto libre.
 
@@ -621,6 +652,23 @@ const TOOLS = [
         cliente_nombre: { type: 'string', description: 'Nombre completo del cliente' },
       },
       required: ['telefono', 'cliente_id', 'cliente_nombre'],
+    },
+  },
+  {
+    name: 'gestionar_calendario',
+    description: 'Crea o lista eventos en Google Calendar de Cosaco.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        accion: { type: 'string', enum: ['crear_evento', 'listar_eventos'], description: 'Acción a realizar' },
+        titulo: { type: 'string', description: 'Título del evento (para crear_evento)' },
+        fecha: { type: 'string', description: 'Fecha en formato YYYY-MM-DD (para crear_evento)' },
+        hora_inicio: { type: 'string', description: 'Hora de inicio en formato HH:MM (para crear_evento)' },
+        hora_fin: { type: 'string', description: 'Hora de fin en formato HH:MM (opcional, por defecto 1 hora después)' },
+        descripcion: { type: 'string', description: 'Descripción del evento (opcional)' },
+        dias_adelante: { type: 'integer', description: 'Cuántos días hacia adelante listar eventos (para listar_eventos, default 1)' },
+      },
+      required: ['accion'],
     },
   },
 ];
@@ -1059,6 +1107,53 @@ async function ejecutarTool(nombre, input, remitente) {
       );
       console.log('Mapeo guardado:', input.telefono, '→', input.cliente_nombre);
       return { ok: true };
+    }
+
+    if (nombre === 'gestionar_calendario') {
+      const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
+
+      if (input.accion === 'crear_evento') {
+        const fechaBase = input.fecha;
+        const horaInicio = input.hora_inicio || '09:00';
+        const [hI, mI] = horaInicio.split(':').map(Number);
+        let horaFin = input.hora_fin;
+        if (!horaFin) {
+          const hF = hI + 1;
+          horaFin = `${String(hF).padStart(2, '0')}:${String(mI).padStart(2, '0')}`;
+        }
+        const evento = {
+          summary: input.titulo,
+          description: input.descripcion || '',
+          start: { dateTime: `${fechaBase}T${horaInicio}:00`, timeZone: 'America/Argentina/Buenos_Aires' },
+          end:   { dateTime: `${fechaBase}T${horaFin}:00`,   timeZone: 'America/Argentina/Buenos_Aires' },
+        };
+        const r = await calendar.events.insert({ calendarId: 'primary', requestBody: evento });
+        console.log('Evento creado en Google Calendar:', r.data.summary);
+        return { ok: true, evento_id: r.data.id, link: r.data.htmlLink };
+      }
+
+      if (input.accion === 'listar_eventos') {
+        const diasAdelante = input.dias_adelante ?? 1;
+        const ahora = new Date();
+        const hasta = new Date();
+        hasta.setDate(hasta.getDate() + diasAdelante);
+        const r = await calendar.events.list({
+          calendarId: 'primary',
+          timeMin: ahora.toISOString(),
+          timeMax: hasta.toISOString(),
+          singleEvents: true,
+          orderBy: 'startTime',
+        });
+        const eventos = (r.data.items || []).map(e => ({
+          titulo: e.summary,
+          inicio: e.start.dateTime || e.start.date,
+          fin: e.end.dateTime || e.end.date,
+          descripcion: e.description || '',
+        }));
+        return { ok: true, eventos };
+      }
+
+      return { error: `Acción desconocida: ${input.accion}` };
     }
 
     return { error: `Tool desconocida: ${nombre}` };
@@ -1636,6 +1731,37 @@ app.get('/test-jobs', async (req, res) => {
     console.error('[test-jobs] Error:', err.message);
     res.status(500).json({ error: err.message });
   }
+});
+
+app.get('/auth/google', (req, res) => {
+  const url = oauth2Client.generateAuthUrl({
+    access_type: 'offline',
+    scope: ['https://www.googleapis.com/auth/calendar'],
+    prompt: 'consent',
+  });
+  res.redirect(url);
+});
+
+app.get('/auth/google/callback', async (req, res) => {
+  try {
+    const { code } = req.query;
+    const { tokens } = await oauth2Client.getToken(code);
+    oauth2Client.setCredentials(tokens);
+    await pool.query(
+      `INSERT INTO config (clave, valor, updated_at) VALUES ('google_tokens', $1, NOW())
+       ON CONFLICT (clave) DO UPDATE SET valor = $1, updated_at = NOW()`,
+      [JSON.stringify(tokens)]
+    );
+    console.log('✅ Tokens de Google Calendar guardados en DB');
+    res.redirect('/auth/success');
+  } catch (err) {
+    console.error('Error en callback de Google:', err.message);
+    res.status(500).send('Error autenticando con Google: ' + err.message);
+  }
+});
+
+app.get('/auth/success', (req, res) => {
+  res.send('¡Google Calendar conectado exitosamente! Ya podés cerrar esta página.');
 });
 
 app.post('/webhook', (req, res) => {
@@ -2370,6 +2496,8 @@ app.post('/panel/enviar', async (req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Servidor escuchando en puerto ${PORT}`);
-  initDB().catch(err => console.error('Error inicializando DB:', err.message));
+  initDB()
+    .then(() => cargarTokensGoogle())
+    .catch(err => console.error('Error inicializando DB:', err.message));
   loginConReintentos().catch(() => {});
 });
