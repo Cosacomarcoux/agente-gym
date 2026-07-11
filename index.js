@@ -349,6 +349,7 @@ Cuando Cosaco pida enviar cualquier mensaje a un cliente, SIEMPRE usá la tool c
 - Recordatorio de vencimiento → tool: enviar_mensaje_cliente con template_tipo: 'recordatorio'
 - Aviso de mora → tool: enviar_mensaje_cliente con template_tipo: 'mora'
 - Mensaje de suspensión → tool: enviar_mensaje_cliente con template_tipo: 'suspension'
+- Confirmar pago registrado → tool: enviar_mensaje_cliente con template_tipo: 'pago_confirmado'
 - Seguimiento clase de prueba → tool: enviar_clase_prueba con TEMPLATE_CLASE_PRUEBA
 - Mensaje general → tool: enviar_mensaje_cliente con template_tipo: 'general'
 - Mensaje masivo por día → tool: enviar_mensaje_masivo
@@ -360,6 +361,15 @@ Si Cosaco dice "mandále un mensaje a [nombre] diciéndole [texto]":
 - Buscá al cliente con get_clientes
 - Enviá el mensaje con enviar_mensaje_cliente usando template_tipo adecuado
 - Confirmale a Cosaco: "✅ Mensaje enviado a [nombre]"
+
+Cuando Cosaco pida avisarle a un cliente que su pago fue registrado o confirmado:
+Usá enviar_mensaje_cliente con template_tipo: 'pago_confirmado' y el monto del pago.
+
+Cuando Cosaco pida mandar el mensaje de mora a un cliente específico:
+Usá enviar_mensaje_cliente con template_tipo: 'mora'
+
+Cuando Cosaco pida mandar el mensaje de suspensión a un cliente específico:
+Usá enviar_mensaje_cliente con template_tipo: 'suspension'
 
 CLASE DE PRUEBA:
 Cuando Cosaco pida mandar el mensaje de seguimiento de clase de prueba a un cliente, usá SIEMPRE la tool enviar_clase_prueba, nunca enviar_mensaje_cliente.
@@ -527,14 +537,15 @@ const TOOLS = [
       type: 'object',
       properties: {
         cliente_id: { type: 'integer', description: 'ID del cliente' },
-        mensaje: { type: 'string', description: 'Texto del mensaje a enviar' },
+        mensaje: { type: 'string', description: 'Texto del mensaje a enviar (requerido para template_tipo general)' },
+        monto: { type: 'number', description: 'Monto del pago (requerido para template_tipo pago_confirmado)' },
         template_tipo: {
           type: 'string',
-          enum: ['recordatorio', 'mora', 'suspension', 'general'],
-          description: 'Tipo de template a usar: recordatorio (vencimiento), mora (deuda), suspension (baja), general (mensaje libre)',
+          enum: ['recordatorio', 'mora', 'suspension', 'pago_confirmado', 'general'],
+          description: 'Tipo de template a usar: recordatorio (vencimiento), mora (deuda), suspension (baja), pago_confirmado (confirmar pago registrado), general (mensaje libre)',
         },
       },
-      required: ['cliente_id', 'mensaje'],
+      required: ['cliente_id', 'template_tipo'],
     },
   },
   {
@@ -906,14 +917,25 @@ async function ejecutarTool(nombre, input, remitente) {
         recordatorio: process.env.TEMPLATE_RECORDATORIO,
         mora: process.env.TEMPLATE_MORA,
         suspension: process.env.TEMPLATE_SUSPENSION,
+        pago_confirmado: process.env.TEMPLATE_PAGO_REGISTRADO,
         general: process.env.TEMPLATE_MENSAJE_HOCKEYVIVO,
       };
       const templateId = templateMap[input.template_tipo] || process.env.TEMPLATE_MENSAJE_HOCKEYVIVO;
+
+      let variables;
+      if (input.template_tipo === 'pago_confirmado') {
+        variables = { "1": nombreCliente, "2": String(input.monto) };
+      } else if (input.template_tipo === 'mora' || input.template_tipo === 'suspension') {
+        variables = { "1": nombreCliente };
+      } else {
+        variables = { "1": nombreCliente, "2": input.mensaje };
+      }
+
       await enviarTemplate(
         cliente.telefono,
         templateId,
-        { "1": nombreCliente, "2": input.mensaje },
-        input.mensaje
+        variables,
+        input.mensaje || null
       );
       return { ok: true, enviado_a: cliente.nombre };
     }
