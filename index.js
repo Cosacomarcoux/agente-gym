@@ -1134,7 +1134,20 @@ async function ejecutarTool(nombre, input, remitente) {
 
       if (input.accion === 'crear_evento') {
         console.log('Fecha evento:', input.fecha, '| Hoy:', new Date().toISOString());
-        const fechaBase = input.fecha;
+
+        if (input.fecha) {
+          const fechaEvento = new Date(input.fecha + 'T12:00:00');
+          const hoy = new Date();
+          if (fechaEvento < hoy) {
+            console.log('Fecha en el pasado detectada, ignorando fecha del input');
+            input.fecha = null;
+          }
+        }
+
+        const fechaDefault = new Date();
+        fechaDefault.setDate(fechaDefault.getDate() + 1);
+        const fechaFinal = input.fecha || fechaDefault.toISOString().split('T')[0];
+
         const horaInicio = input.hora_inicio || '09:00';
         const [hI, mI] = horaInicio.split(':').map(Number);
         let horaFin = input.hora_fin;
@@ -1145,8 +1158,8 @@ async function ejecutarTool(nombre, input, remitente) {
         const evento = {
           summary: input.titulo,
           description: input.descripcion || '',
-          start: { dateTime: `${fechaBase}T${horaInicio}:00`, timeZone: 'America/Argentina/Buenos_Aires' },
-          end:   { dateTime: `${fechaBase}T${horaFin}:00`,   timeZone: 'America/Argentina/Buenos_Aires' },
+          start: { dateTime: `${fechaFinal}T${horaInicio}:00`, timeZone: 'America/Argentina/Buenos_Aires' },
+          end:   { dateTime: `${fechaFinal}T${horaFin}:00`,   timeZone: 'America/Argentina/Buenos_Aires' },
         };
         const r = await calendar.events.insert({ calendarId: 'primary', requestBody: evento });
         console.log('Evento creado en Google Calendar:', r.data.summary);
