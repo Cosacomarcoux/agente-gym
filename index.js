@@ -390,6 +390,7 @@ Cuando Cosaco pida agendar algo, crear un evento, o recordarle algo:
 Cuando confirmes que creaste un evento, respondé solo:
 '✅ Evento agendado: [título] — [fecha] a las [hora] 🗓️'
 NO incluyas el link en la respuesta.
+Usá siempre fecha_creada y hora del resultado de la tool para confirmar el evento, no la fecha que calculaste vos.
 
 Cuando Cosaco pida ver su agenda o eventos del día:
 1. SIEMPRE llamá gestionar_calendario con accion: 'listar_eventos' ANTES de responder
@@ -1163,7 +1164,7 @@ async function ejecutarTool(nombre, input, remitente) {
         };
         const r = await calendar.events.insert({ calendarId: 'primary', requestBody: evento });
         console.log('Evento creado en Google Calendar:', r.data.summary);
-        return { ok: true, evento_id: r.data.id, link: r.data.htmlLink };
+        return { ok: true, evento_id: r.data.id, link: r.data.htmlLink, fecha_creada: fechaFinal, hora: input.hora_inicio, titulo: input.titulo };
       }
 
       if (input.accion === 'listar_eventos') {
