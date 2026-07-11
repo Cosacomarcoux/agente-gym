@@ -1187,13 +1187,11 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
       }
 
       // Detectar si Cosaco estaba esperando confirmación de turno
-      const historialCosaco = conversaciones.get(process.env.COSACO_WHATSAPP);
-      const ultimoMensajeAgente = historialCosaco?.messages
-        ?.filter(m => m.role === 'assistant')
-        ?.slice(-1)[0];
-      const textoUltimoAgente = typeof ultimoMensajeAgente?.content === 'string'
-        ? ultimoMensajeAgente.content
-        : '';
+      const { rows: ultimoAgente } = await pool.query(
+        `SELECT texto FROM conversaciones WHERE telefono = $1 AND rol = 'agente' ORDER BY timestamp DESC LIMIT 1`,
+        [process.env.COSACO_WHATSAPP]
+      );
+      const textoUltimoAgente = ultimoAgente[0]?.texto ?? '';
       const esperandoConfirmacionTurno =
         textoUltimoAgente.includes('¿Confirmo que le agrego') ||
         textoUltimoAgente.includes('¿Confirmás que querés cambiar');
