@@ -1631,7 +1631,7 @@ app.post('/webhook', (req, res) => {
 
   // Detectar imagen sin texto
   if (parseInt(req.body.NumMedia) > 0 && (!mensaje || mensaje.trim() === '')) {
-    const respuestaImagen = 'Hola! 👋 Recibí tu imagen pero no puedo leerla directamente. ¿Me podés escribir de qué se trata? Por ejemplo: "Pagué el mes de junio por $35.000" y con eso te ayudo enseguida 🏑';
+    const respuestaImagen = 'Hola! 👋 Recibí tu imagen pero no puedo leerla directamente. ¿Me podés escribir de qué se trata? Por ejemplo: "Maria Perez, 35000 Transferencia" y con esto te ayudo enseguida 🏑';
     twilioClient.messages.create({ from: TWILIO_FROM, to: remitente, body: respuestaImagen })
       .then(() => guardarMensaje(remitente, null, respuestaImagen, 'agente'))
       .catch(err => console.error('Error respondiendo imagen:', err.message));
