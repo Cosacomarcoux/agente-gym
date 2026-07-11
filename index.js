@@ -1364,9 +1364,22 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
     const messages = await getHistorial(remitente);
     messages.push({ role: 'user', content: mensaje });
 
-    const systemPromptFinal = clienteIdentificado
+    let systemPromptFinal = clienteIdentificado
       ? `${SYSTEM_PROMPT}\n\nCLIENTE IDENTIFICADO: Estás hablando con ${clienteIdentificado.nombre}, cliente registrado/a con plan ${clienteIdentificado.plan}, estado ${clienteIdentificado.estado}, vencimiento ${clienteIdentificado.fecha_vencimiento}. Usá su nombre directamente sin pedírselo.`
       : SYSTEM_PROMPT;
+
+    const fechaHoy = new Date().toLocaleDateString('es-AR', {
+      timeZone: 'America/Argentina/Buenos_Aires',
+      weekday: 'long',
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric'
+    });
+    const fechaISO = new Date().toLocaleDateString('es-AR', {
+      timeZone: 'America/Argentina/Buenos_Aires'
+    }).split('/').reverse().join('-'); // formato YYYY-MM-DD
+
+    systemPromptFinal += `\n\nFECHA ACTUAL: Hoy es ${fechaHoy} (${fechaISO}). Usá esta fecha como referencia para calcular "mañana", "la semana que viene", etc.`;
 
     // Agentic loop
     let respuesta;
