@@ -38,10 +38,22 @@ async function cargarTokensGoogle() {
     if (r.rows.length > 0) {
       const tokens = JSON.parse(r.rows[0].valor);
       oauth2Client.setCredentials(tokens);
+
+      // Si el token expira en menos de 5 minutos, refrescarlo ahora
+      if (tokens.expiry_date && tokens.expiry_date < Date.now() + 5 * 60 * 1000) {
+        console.log('🔄 Token próximo a vencer, refrescando...');
+        const { credentials } = await oauth2Client.refreshAccessToken();
+        oauth2Client.setCredentials(credentials);
+        await pool.query(
+          'INSERT INTO config (clave, valor) VALUES ($1, $2) ON CONFLICT (clave) DO UPDATE SET valor = $2',
+          ['google_tokens', JSON.stringify(credentials)]
+        );
+      }
+
       console.log('✅ Tokens de Google Calendar cargados');
     }
   } catch (err) {
-    console.log('ℹ️ No hay tokens de Google Calendar guardados');
+    console.log('ℹ️ No hay tokens de Google Calendar guardados:', err.message);
   }
 }
 
