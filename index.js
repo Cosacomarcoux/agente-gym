@@ -22,6 +22,16 @@ const oauth2Client = new OAuth2Client(
   'https://agente-gym.up.railway.app/auth/google/callback'
 );
 
+oauth2Client.on('tokens', async (tokens) => {
+  console.log('🔄 Tokens de Google renovados');
+  const tokensActuales = oauth2Client.credentials;
+  const nuevosTokens = { ...tokensActuales, ...tokens };
+  await pool.query(
+    'INSERT INTO config (clave, valor) VALUES ($1, $2) ON CONFLICT (clave) DO UPDATE SET valor = $2',
+    ['google_tokens', JSON.stringify(nuevosTokens)]
+  );
+});
+
 async function cargarTokensGoogle() {
   try {
     const r = await pool.query("SELECT valor FROM config WHERE clave = 'google_tokens'");
