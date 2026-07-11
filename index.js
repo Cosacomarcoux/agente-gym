@@ -64,6 +64,9 @@ async function initDB() {
     );
 
   `);
+  await pool.query(`
+    ALTER TABLE conversaciones ADD COLUMN IF NOT EXISTS content_json JSONB;
+  `);
   console.log('Tablas listas en PostgreSQL');
 }
 
@@ -109,9 +112,7 @@ const TWILIO_FROM = process.env.TWILIO_WHATSAPP_NUMBER?.startsWith('whatsapp:')
   ? process.env.TWILIO_WHATSAPP_NUMBER
   : `whatsapp:${process.env.TWILIO_WHATSAPP_NUMBER}`;
 
-// Memoria conversacional por número de WhatsApp
-const conversaciones = new Map(); // { from: { messages: [], lastSeen: Date } }
-const EXPIRACION_MS = 24 * 60 * 60 * 1000; // 24 horas
+// Historial conversacional persistido en PostgreSQL
 
 // Pagos pendientes de confirmación → persisten en tabla pagos_pendientes (PostgreSQL)
 
@@ -123,21 +124,17 @@ const becasPendientes = new Map();
 // clave: cliente_from (whatsapp del cliente), valor: { cliente_id, cliente_nombre, cliente_from, costo, plan, tipo_beca?, monto_final? }
 
 
-function limpiarConversacionesViejas() {
-  const ahora = Date.now();
-  for (const [key, val] of conversaciones) {
-    if (ahora - val.lastSeen > EXPIRACION_MS) {
-      conversaciones.delete(key);
-    }
-  }
-}
-
-function getHistorial(from) {
-  limpiarConversacionesViejas();
-  if (!conversaciones.has(from)) {
-    conversaciones.set(from, { messages: [], lastSeen: Date.now() });
-  }
-  return conversaciones.get(from);
+async function getHistorial(from) {
+  const result = await pool.query(
+    `SELECT rol, texto, content_json FROM conversaciones
+     WHERE telefono = $1 AND rol IN ('cliente', 'agente', 'tool_use', 'tool_result')
+     ORDER BY timestamp DESC LIMIT 20`,
+    [from]
+  );
+  return result.rows.reverse().map(row => ({
+    role: (row.rol === 'cliente' || row.rol === 'tool_result') ? 'user' : 'assistant',
+    content: row.content_json ?? row.texto,
+  }));
 }
 
 async function loginGimnasio() {
@@ -1244,9 +1241,9 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
     const clienteIdentificado = await buscarClientePorTelefono(remitente);
     console.log('Cliente identificado:', clienteIdentificado ? clienteIdentificado.nombre : 'ninguno');
 
-    const conv = getHistorial(remitente);
-    conv.messages.push({ role: 'user', content: mensaje });
-    conv.lastSeen = Date.now();
+    // Leer historial previo desde PostgreSQL y agregar mensaje actual en memoria
+    const messages = await getHistorial(remitente);
+    messages.push({ role: 'user', content: mensaje });
 
     const systemPromptFinal = clienteIdentificado
       ? `${SYSTEM_PROMPT}\n\nCLIENTE IDENTIFICADO: Estás hablando con ${clienteIdentificado.nombre}, cliente registrado/a con plan ${clienteIdentificado.plan}, estado ${clienteIdentificado.estado}, vencimiento ${clienteIdentificado.fecha_vencimiento}. Usá su nombre directamente sin pedírselo.`
@@ -1260,14 +1257,15 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
         max_tokens: 1024,
         system: [{ type: 'text', text: systemPromptFinal, cache_control: { type: 'ephemeral' } }],
         tools: TOOLS,
-        messages: conv.messages,
+        messages,
       });
 
       console.log(`Stop reason: ${respuesta.stop_reason}`);
 
       if (respuesta.stop_reason !== 'tool_use') break;
 
-      conv.messages.push({ role: 'assistant', content: respuesta.content });
+      messages.push({ role: 'assistant', content: respuesta.content });
+      guardarMensaje(remitente, null, '[tool_use]', 'tool_use', respuesta.content);
 
       const toolResults = [];
       for (const bloque of respuesta.content) {
@@ -1282,14 +1280,14 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
         });
       }
 
-      conv.messages.push({ role: 'user', content: toolResults });
+      messages.push({ role: 'user', content: toolResults });
+      guardarMensaje(remitente, null, '[tool_result]', 'tool_result', toolResults);
     }
 
     const bloqueTexto = respuesta.content.find(b => b.type === 'text');
     const texto = bloqueTexto?.text?.trim()
       ? bloqueTexto.text
       : '¡Listo! Tu solicitud fue procesada correctamente 🏑 Si necesitás algo más, avisame.';
-    conv.messages.push({ role: 'assistant', content: texto });
     console.log(`Respuesta de Claude: ${texto}`);
 
     await twilioClient.messages.create({
@@ -1660,10 +1658,10 @@ async function enviarWhatsApp(telefono, mensaje, nombre = null) {
   }
 }
 
-function guardarMensaje(from, nombre, texto, rol) {
+function guardarMensaje(from, nombre, texto, rol, contentJson = null) {
   pool.query(
-    'INSERT INTO conversaciones (telefono, nombre, rol, texto) VALUES ($1, $2, $3, $4)',
-    [from, nombre && nombre !== from ? nombre : null, rol, texto]
+    'INSERT INTO conversaciones (telefono, nombre, rol, texto, content_json) VALUES ($1, $2, $3, $4, $5)',
+    [from, nombre && nombre !== from ? nombre : null, rol, texto, contentJson !== null ? JSON.stringify(contentJson) : null]
   ).catch(err => console.error('Error guardando mensaje en DB:', err.message));
 }
 
