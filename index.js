@@ -395,6 +395,10 @@ Usá siempre fecha_creada y hora del resultado de la tool para confirmar el even
 Cuando Cosaco pida ver su agenda o eventos del día:
 1. SIEMPRE llamá gestionar_calendario con accion: 'listar_eventos' ANTES de responder
 
+TAREAS:
+Cuando Cosaco pida agregar una tarea o recordatorio, usá gestionar_calendario con accion: 'crear_tarea'
+Cuando Cosaco pida ver sus tareas pendientes, usá gestionar_calendario con accion: 'listar_tareas'
+
 REGLAS DE ENVÍO DE MENSAJES - OBLIGATORIO:
 Cuando Cosaco pida enviar cualquier mensaje a un cliente, SIEMPRE usá la tool correspondiente con su template. NUNCA escribas el mensaje vos mismo con texto libre.
 
@@ -681,12 +685,13 @@ const TOOLS = [
     input_schema: {
       type: 'object',
       properties: {
-        accion: { type: 'string', enum: ['crear_evento', 'listar_eventos'], description: 'Acción a realizar' },
-        titulo: { type: 'string', description: 'Título del evento (para crear_evento)' },
-        fecha: { type: 'string', description: 'Fecha en formato YYYY-MM-DD (para crear_evento)' },
+        accion: { type: 'string', enum: ['crear_evento', 'listar_eventos', 'crear_tarea', 'listar_tareas'], description: 'Acción a realizar' },
+        titulo: { type: 'string', description: 'Título del evento o tarea (para crear_evento y crear_tarea)' },
+        fecha: { type: 'string', description: 'Fecha en formato YYYY-MM-DD (para crear_evento y crear_tarea, opcional en tarea)' },
         hora_inicio: { type: 'string', description: 'Hora de inicio en formato HH:MM (para crear_evento)' },
         hora_fin: { type: 'string', description: 'Hora de fin en formato HH:MM (opcional, por defecto 1 hora después)' },
         descripcion: { type: 'string', description: 'Descripción del evento (opcional)' },
+        notas: { type: 'string', description: 'Notas de la tarea (opcional, para crear_tarea)' },
         dias_adelante: { type: 'integer', description: 'Cuántos días hacia adelante listar eventos (para listar_eventos, default 1)' },
       },
       required: ['accion'],
@@ -1186,6 +1191,33 @@ async function ejecutarTool(nombre, input, remitente) {
           descripcion: e.description || '',
         }));
         return { ok: true, eventos };
+      }
+
+      if (input.accion === 'crear_tarea') {
+        const tasks = google.tasks({ version: 'v1', auth: oauth2Client });
+        const tarea = {
+          title: input.titulo,
+          notes: input.notas || '',
+          due: input.fecha ? new Date(input.fecha + 'T12:00:00').toISOString() : undefined,
+        };
+        const r = await tasks.tasks.insert({ tasklist: '@default', requestBody: tarea });
+        console.log('Tarea creada en Google Tasks:', r.data.title);
+        return { ok: true, tarea_id: r.data.id, titulo: r.data.title, fecha: input.fecha || null };
+      }
+
+      if (input.accion === 'listar_tareas') {
+        const tasks = google.tasks({ version: 'v1', auth: oauth2Client });
+        const r = await tasks.tasks.list({
+          tasklist: '@default',
+          showCompleted: false,
+          maxResults: 10,
+        });
+        const tareas = (r.data.items || []).map(t => ({
+          titulo: t.title,
+          notas: t.notes || '',
+          vencimiento: t.due ? t.due.split('T')[0] : null,
+        }));
+        return { ok: true, tareas };
       }
 
       return { error: `Acción desconocida: ${input.accion}` };
@@ -1781,10 +1813,15 @@ app.get('/test-jobs', async (req, res) => {
   }
 });
 
+const GOOGLE_SCOPES = [
+  'https://www.googleapis.com/auth/calendar',
+  'https://www.googleapis.com/auth/tasks',
+];
+
 app.get('/auth/google', (req, res) => {
   const url = oauth2Client.generateAuthUrl({
     access_type: 'offline',
-    scope: ['https://www.googleapis.com/auth/calendar'],
+    scope: GOOGLE_SCOPES,
     prompt: 'consent',
   });
   res.redirect(url);
@@ -2109,14 +2146,79 @@ cron.schedule('0 12 * * *', async () => {
     const result = await pool.query('SELECT * FROM actividad_dia WHERE fecha = $1', [fechaHoy]);
     const actividad = result.rows[0] || { mensajes_atendidos: 0, nuevos_clientes: [], pagos_registrados: [], turnos_cambiados: [] };
 
+    // Cumpleaños del día
+    let cumpleanosHoy = [];
+    try {
+      const rCump = await fetch(`${GYM_API}/cumpleanos`, { headers: { Authorization: `Bearer ${GYM_TOKEN}` } });
+      const dataCump = await rCump.json();
+      const diaHoy = new Date().getDate();
+      const mesHoy = new Date().getMonth() + 1;
+      cumpleanosHoy = dataCump.filter(c => {
+        if (!c.fecha_nacimiento) return false;
+        const f = new Date(c.fecha_nacimiento + 'T12:00:00');
+        return f.getDate() === diaHoy && (f.getMonth() + 1) === mesHoy;
+      });
+    } catch (err) {
+      console.error('Error obteniendo cumpleaños para informe:', err.message);
+    }
+
+    // Eventos del día desde Google Calendar
+    let eventosHoy = [];
+    try {
+      const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
+      const ahora = new Date();
+      const hasta = new Date();
+      hasta.setDate(hasta.getDate() + 1);
+      const rCal = await calendar.events.list({
+        calendarId: 'primary',
+        timeMin: ahora.toISOString(),
+        timeMax: hasta.toISOString(),
+        singleEvents: true,
+        orderBy: 'startTime',
+      });
+      eventosHoy = (rCal.data.items || []).map(e => ({
+        titulo: e.summary,
+        hora: (e.start.dateTime || e.start.date || '').slice(11, 16),
+      }));
+    } catch (err) {
+      console.error('Error obteniendo eventos para informe:', err.message);
+    }
+
+    // Tareas pendientes desde Google Tasks
+    let tareasPendientes = [];
+    try {
+      const tasks = google.tasks({ version: 'v1', auth: oauth2Client });
+      const rTasks = await tasks.tasks.list({ tasklist: '@default', showCompleted: false, maxResults: 10 });
+      tareasPendientes = (rTasks.data.items || []).map(t => t.title);
+    } catch (err) {
+      console.error('Error obteniendo tareas para informe:', err.message);
+    }
+
     const hoy = new Date().toLocaleDateString('es-AR', {
       timeZone: 'America/Argentina/Buenos_Aires',
       day: '2-digit',
       month: '2-digit',
       year: 'numeric',
     });
-    let informe = `📊 *Informe del día — ${hoy}*\n`;
-    informe += `💬 Mensajes: ${actividad.mensajes_atendidos}\n`;
+    let informe = `📊 *Informe del día — ${hoy}*\n\n`;
+
+    informe += `🎂 *Cumpleaños hoy:* ${cumpleanosHoy.length > 0 ? cumpleanosHoy.map(c => c.nombre).join(', ') : 'ninguno'}\n`;
+
+    if (eventosHoy.length === 0) {
+      informe += `📅 *Eventos de hoy:* ninguno\n`;
+    } else {
+      informe += `📅 *Eventos de hoy:*\n`;
+      eventosHoy.forEach(e => informe += `• ${e.hora ? e.hora + 'hs — ' : ''}${e.titulo}\n`);
+    }
+
+    if (tareasPendientes.length === 0) {
+      informe += `✅ *Tareas pendientes:* ninguna\n`;
+    } else {
+      informe += `✅ *Tareas pendientes:*\n`;
+      tareasPendientes.forEach(t => informe += `• ${t}\n`);
+    }
+
+    informe += `\n💬 Mensajes: ${actividad.mensajes_atendidos}\n`;
 
     if (actividad.nuevos_clientes.length === 0) {
       informe += `✅ Nuevos clientes: ninguno\n`;
