@@ -373,6 +373,9 @@ Sos su asistente administrativo personal. Podés hacer todo lo que haría un sec
 GOOGLE CALENDAR:
 Cuando Cosaco pida agendar algo o crear un evento, usá gestionar_calendario con accion: 'crear_evento'
 Cuando Cosaco pida ver sus eventos o agenda del día, usá gestionar_calendario con accion: 'listar_eventos'
+Cuando confirmes que creaste un evento, respondé solo:
+'✅ Evento agendado: [título] — [fecha] a las [hora] 🗓️'
+NO incluyas el link en la respuesta.
 
 REGLAS DE ENVÍO DE MENSAJES - OBLIGATORIO:
 Cuando Cosaco pida enviar cualquier mensaje a un cliente, SIEMPRE usá la tool correspondiente con su template. NUNCA escribas el mensaje vos mismo con texto libre.
@@ -1113,6 +1116,7 @@ async function ejecutarTool(nombre, input, remitente) {
       const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
 
       if (input.accion === 'crear_evento') {
+        console.log('Fecha evento:', input.fecha, '| Hoy:', new Date().toISOString());
         const fechaBase = input.fecha;
         const horaInicio = input.hora_inicio || '09:00';
         const [hI, mI] = horaInicio.split(':').map(Number);
