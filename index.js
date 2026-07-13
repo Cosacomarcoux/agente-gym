@@ -1480,7 +1480,12 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
           await pool.query('DELETE FROM registros_pendientes WHERE telefono = $1', [remitente]);
 
           if (resultado.ok) {
-            const texto = `¡Todo listo ${datos.nombre}! Ya quedaste registrado/a en Hockey Vivo 🎉\n\nPara tu primer entrenamiento recordá traer:\n🏑 Palo\n👟 Botines\n💧 Agua\n\nY lo más importante: vení con la mente abierta a aprender cosas nuevas y dispuesto/a a entregarlo todo. ¡Te esperamos! 💪`;
+            const turnosData = await ejecutarTool('get_turnos', {}, remitente);
+            const turnosAsignados = datos.turno_ids.map(id => {
+              const turno = Array.isArray(turnosData) ? turnosData.find(t => t.id === id) : null;
+              return turno ? `📅 ${turno.dia_semana} ${turno.hora_inicio}` : `📅 Turno ${id}`;
+            });
+            const texto = `¡Todo listo ${datos.nombre}! Ya quedaste registrado/a en Hockey Vivo 🎉\n\nTus turnos asignados:\n${turnosAsignados.join('\n')}\n\nPara tu primer entrenamiento recordá traer:\n🏑 Palo\n👟 Botines\n💧 Agua\n\nY lo más importante: vení con la mente abierta a aprender cosas nuevas y dispuesto/a a entregarlo todo. ¡Te esperamos! 💪`;
             await enviarWhatsApp(remitente, texto, datos.nombre);
             guardarMensaje(remitente, datos.nombre, texto, 'agente');
           } else {
