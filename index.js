@@ -112,6 +112,12 @@ async function initDB() {
       updated_at TIMESTAMPTZ DEFAULT NOW()
     );
 
+    CREATE TABLE IF NOT EXISTS registros_pendientes (
+      telefono VARCHAR(50) PRIMARY KEY,
+      datos JSONB NOT NULL,
+      timestamp TIMESTAMPTZ DEFAULT NOW()
+    );
+
   `);
   await pool.query(`
     ALTER TABLE conversaciones ADD COLUMN IF NOT EXISTS content_json JSONB;
@@ -300,39 +306,20 @@ Si el turno que querés está lleno, podés anotarte en lista de espera desde es
 
 NO uses get_turnos para mostrar disponibilidad al cliente. Solo usá get_turnos internamente cuando necesites el ID de un turno para asignarlo.
 
-CUANDO LLEGUE UN MENSAJE CON ESTE FORMATO (solicitud de reserva desde la web):
-"Hola! Me interesa reservar lugar en Hockey Vivo..."
-Con turnos elegidos y datos personales — seguir este flujo:
+FLUJO DE RESERVA - OBLIGATORIO:
+Cuando llegue un mensaje con formato de solicitud de reserva desde la web ("Hola! Me interesa reservar lugar en Hockey Vivo..."):
 
 1. Extraer los datos del mensaje: nombre, fecha de nacimiento, whatsapp, equipo, nivel y turnos solicitados
-2. Usar get_turnos para verificar si los turnos solicitados tienen cupo disponible (cupo_actual < cupo_maximo)
-3. Si hay lugar → responder:
+2. Verificar que sean MÁXIMO 3 turnos. Si piden 4 o más: 'Nuestros planes son de hasta 3 veces por semana 🏑 ¿Cuáles 3 preferís?'
+3. Usar get_turnos para verificar si los turnos solicitados tienen cupo disponible (cupo_actual < cupo_maximo)
+4. Si hay lugar → llamar PRIMERO guardar_registro_pendiente con el teléfono del remitente y todos los datos
+5. DESPUÉS de que guardar_registro_pendiente devuelva ok → responder:
 "¡Hola [nombre]! 🏑 Verificamos y [turno/s con día y hora] tiene lugar disponible.
 ¿Confirmás tu inscripción en Hockey Vivo?"
-   Y guardar los datos del cliente en la conversación con pendiente_confirmacion: true (NO registrar todavía)
+6. NO registrar al cliente todavía — el sistema intercepta el SÍ automáticamente
 
-4. Si NO hay lugar → responder:
+Si NO hay lugar → responder:
 "Hola [nombre], lamentablemente el turno de [día y hora] está completo por el momento 😔 Podés anotarte en la lista de espera desde acá: https://hockeyvivo.up.railway.app/cupos y te avisamos cuando se libere un lugar 🏑"
-
-5. Cuando el cliente responde SÍ, CONFIRMO o SI (y tiene pendiente_confirmacion activo):
-   - Registrar al cliente con registrar_cliente_y_asignar_turno usando los datos guardados
-   - Responder:
-"¡Todo listo [nombre], ya quedaste registrado/a en Hockey Vivo! 🎉
-
-Tus turnos asignados:
-📅 [día y hora de cada turno]
-
-Para tu primer entrenamiento recordá traer:
-🏑 Palo
-👟 Botines
-💧 Agua
-
-Y lo más importante: vení con la mente abierta a aprender cosas nuevas y dispuesto/a a entregarlo todo. ¡Te esperamos! 💪"
-
-6. Si registrar_cliente_y_asignar_turno devuelve ok: false:
-   - Decile al cliente: "Ya tomamos nota de tu solicitud, en breve te confirmamos tu lugar 🏑"
-   - Usá enviar_mensaje_a_cosaco para avisarme: "⚠️ Error al registrar a [nombre]: [error]. Revisalo y avisame para confirmarle al cliente."
-   - NO mencionar ningún error al cliente.
 
 CUANDO PIDAN UBICACIÓN O DIRECCIÓN:
 Dar la dirección y el link: https://maps.google.com/?q=-27.785810,-64.268463
@@ -697,6 +684,23 @@ const TOOLS = [
         cliente_nombre: { type: 'string', description: 'Nombre completo del cliente' },
       },
       required: ['telefono', 'cliente_id', 'cliente_nombre'],
+    },
+  },
+  {
+    name: 'guardar_registro_pendiente',
+    description: 'Guarda los datos de un cliente que está esperando confirmar su inscripción. Llamar SIEMPRE antes de preguntar ¿Confirmás tu inscripción?',
+    input_schema: {
+      type: 'object',
+      properties: {
+        telefono: { type: 'string', description: 'Número de teléfono del remitente (From del mensaje)' },
+        nombre: { type: 'string', description: 'Nombre del cliente' },
+        apellido: { type: 'string', description: 'Apellido del cliente' },
+        fecha_nacimiento: { type: 'string', description: 'Fecha de nacimiento YYYY-MM-DD' },
+        whatsapp: { type: 'string', description: 'WhatsApp del cliente' },
+        club: { type: 'string', description: 'Club del cliente' },
+        turno_ids: { type: 'array', items: { type: 'integer' }, description: 'IDs de los turnos a asignar' },
+      },
+      required: ['telefono', 'nombre', 'turno_ids'],
     },
   },
   {
@@ -1156,6 +1160,15 @@ async function ejecutarTool(nombre, input, remitente) {
       return { ok: true };
     }
 
+    if (nombre === 'guardar_registro_pendiente') {
+      await pool.query(
+        'INSERT INTO registros_pendientes (telefono, datos) VALUES ($1, $2) ON CONFLICT (telefono) DO UPDATE SET datos = $2, timestamp = NOW()',
+        [input.telefono, JSON.stringify(input)]
+      );
+      console.log('Registro pendiente guardado para:', input.telefono, input.nombre);
+      return { ok: true };
+    }
+
     if (nombre === 'gestionar_calendario') {
       const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
 
@@ -1444,6 +1457,39 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
       }
 
       // 4. Modo secretario con Claude (fall through)
+    }
+
+    // Interceptar confirmación de inscripción pendiente (solo clientes, no Cosaco)
+    if (!esCosaco) {
+      const mensajeNorm = mensaje.trim().toLowerCase();
+      const esSi = ['si', 'sí', 'confirmo', 'dale', 'ok', 'yes'].includes(mensajeNorm);
+
+      if (esSi) {
+        const pendiente = await pool.query(
+          'SELECT datos FROM registros_pendientes WHERE telefono = $1',
+          [remitente]
+        );
+
+        if (pendiente.rows.length > 0) {
+          const datos = pendiente.rows[0].datos;
+          console.log('✅ Registro pendiente encontrado para:', remitente, datos.nombre);
+
+          if (!GYM_TOKEN) await loginConReintentos(3, 3000);
+          const resultado = await ejecutarTool('registrar_cliente_y_asignar_turno', datos, remitente);
+
+          await pool.query('DELETE FROM registros_pendientes WHERE telefono = $1', [remitente]);
+
+          if (resultado.ok) {
+            const texto = `¡Todo listo ${datos.nombre}! Ya quedaste registrado/a en Hockey Vivo 🎉\n\nPara tu primer entrenamiento recordá traer:\n🏑 Palo\n👟 Botines\n💧 Agua\n\nY lo más importante: vení con la mente abierta a aprender cosas nuevas y dispuesto/a a entregarlo todo. ¡Te esperamos! 💪`;
+            await enviarWhatsApp(remitente, texto, datos.nombre);
+            guardarMensaje(remitente, datos.nombre, texto, 'agente');
+          } else {
+            await enviarWhatsApp(remitente, 'Ya tomamos nota de tu solicitud, en breve te confirmamos tu lugar 🏑', datos.nombre);
+            await enviarWhatsApp(process.env.COSACO_WHATSAPP, `⚠️ Error al registrar a ${datos.nombre}: ${resultado.error}`, 'Cosaco');
+          }
+          return;
+        }
+      }
     }
 
     if (!GYM_TOKEN) {
