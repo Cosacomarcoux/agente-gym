@@ -404,6 +404,8 @@ Cuando confirmes que creaste un evento, respondé solo:
 NO incluyas el link en la respuesta.
 Usá siempre fecha_creada y hora del resultado de la tool para confirmar el evento, no la fecha que calculaste vos.
 
+Al crear eventos de Calendar, siempre incluí recordatorio de 30 minutos antes por defecto, a menos que Cosaco especifique otro tiempo.
+
 Cuando Cosaco pida ver su agenda o eventos del día:
 1. SIEMPRE llamá gestionar_calendario con accion: 'listar_eventos' ANTES de responder
 
@@ -700,10 +702,11 @@ const TOOLS = [
         accion: { type: 'string', enum: ['crear_evento', 'listar_eventos', 'crear_tarea', 'listar_tareas'], description: 'Acción a realizar' },
         titulo: { type: 'string', description: 'Título del evento o tarea (para crear_evento y crear_tarea)' },
         fecha: { type: 'string', description: 'Fecha en formato YYYY-MM-DD (para crear_evento y crear_tarea, opcional en tarea)' },
-        hora_inicio: { type: 'string', description: 'Hora de inicio en formato HH:MM (para crear_evento)' },
+        hora_inicio: { type: 'string', description: 'Hora de inicio en formato HH:MM (para crear_evento y crear_tarea)' },
         hora_fin: { type: 'string', description: 'Hora de fin en formato HH:MM (opcional, por defecto 1 hora después)' },
         descripcion: { type: 'string', description: 'Descripción del evento (opcional)' },
         notas: { type: 'string', description: 'Notas de la tarea (opcional, para crear_tarea)' },
+        recordatorio_minutos: { type: 'integer', description: 'Minutos de anticipación para el recordatorio del evento (opcional, default 30)' },
         dias_adelante: { type: 'integer', description: 'Cuántos días hacia adelante listar eventos (para listar_eventos, default 1)' },
       },
       required: ['accion'],
@@ -1173,11 +1176,19 @@ async function ejecutarTool(nombre, input, remitente) {
           const hF = hI + 1;
           horaFin = `${String(hF).padStart(2, '0')}:${String(mI).padStart(2, '0')}`;
         }
+        const minutos = input.recordatorio_minutos ?? 30;
         const evento = {
           summary: input.titulo,
           description: input.descripcion || '',
           start: { dateTime: `${fechaFinal}T${horaInicio}:00`, timeZone: 'America/Argentina/Buenos_Aires' },
           end:   { dateTime: `${fechaFinal}T${horaFin}:00`,   timeZone: 'America/Argentina/Buenos_Aires' },
+          reminders: {
+            useDefault: false,
+            overrides: [
+              { method: 'popup', minutes: minutos },
+              { method: 'email', minutes: minutos },
+            ],
+          },
         };
         const r = await calendar.events.insert({ calendarId: 'primary', requestBody: evento });
         console.log('Evento creado en Google Calendar:', r.data.summary);
@@ -1210,7 +1221,9 @@ async function ejecutarTool(nombre, input, remitente) {
         const tarea = {
           title: input.titulo,
           notes: input.notas || '',
-          due: input.fecha ? new Date(input.fecha + 'T12:00:00').toISOString() : undefined,
+          due: input.fecha
+            ? new Date(input.fecha + 'T' + (input.hora_inicio || '12:00') + ':00').toISOString()
+            : undefined,
         };
         const r = await tasks.tasks.insert({ tasklist: '@default', requestBody: tarea });
         console.log('Tarea creada en Google Tasks:', r.data.title);
