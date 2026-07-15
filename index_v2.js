@@ -21,7 +21,6 @@ const TWILIO_FROM = process.env.TWILIO_WHATSAPP_NUMBER?.startsWith('whatsapp:')
   ? process.env.TWILIO_WHATSAPP_NUMBER
   : `whatsapp:${process.env.TWILIO_WHATSAPP_NUMBER}`;
 let GYM_TOKEN = null;
-const suspencionesPendientes = new Map();
 
 async function initDB() {
   await pool.query(`
@@ -56,6 +55,15 @@ async function initDB() {
       datos JSONB NOT NULL,
       timestamp TIMESTAMPTZ DEFAULT NOW()
     );
+    CREATE TABLE IF NOT EXISTS suspensiones_pendientes (
+      id SERIAL PRIMARY KEY,
+      cliente_id INTEGER,
+      cliente_nombre VARCHAR(200),
+      telefono VARCHAR(50),
+      timestamp TIMESTAMPTZ DEFAULT NOW(),
+      notificado_cosaco BOOLEAN DEFAULT FALSE,
+      esperando_confirmacion BOOLEAN DEFAULT FALSE
+    );
   `);
   console.log('Tablas listas');
 }
@@ -86,9 +94,10 @@ async function loginConReintentos(intentos = 10, esperaInicial = 10000) {
 }
 
 function guardarMensaje(from, nombre, texto, rol, contentJson = null) {
+  const textoFinal = (!texto || !texto.trim() || texto.trim().startsWith('[')) ? '[sin texto]' : texto;
   pool.query(
     'INSERT INTO conversaciones (telefono, nombre, rol, texto, content_json) VALUES ($1, $2, $3, $4, $5)',
-    [from, nombre && nombre !== from ? nombre : null, rol, texto, contentJson ? JSON.stringify(contentJson) : null]
+    [from, nombre && nombre !== from ? nombre : null, rol, textoFinal, contentJson ? JSON.stringify(contentJson) : null]
   ).catch(err => console.error('Error guardando mensaje:', err.message));
 }
 
@@ -238,7 +247,14 @@ Sos su asistente administrativo. Podés:
 3. Registrar pagos en efectivo → flujo normal de pago
 4. Gestión: registrar clientes, cambiar turnos, suspender
 5. Suspender cliente: buscar → confirmar → solo si confirma → suspender_cliente
-Respondé a Cosaco de forma concisa confirmando lo que hiciste.`;
+Respondé a Cosaco de forma concisa confirmando lo que hiciste.
+
+COMANDOS RÁPIDOS (solo número de Cosaco +5493855857000):
+- 'Mandále un recordatorio/mora/suspensión/pago confirmado a [Nombre]' → enviar_mensaje_cliente con el template_tipo correcto
+- '[Nombre Apellido] pagó $[monto] en efectivo' → flujo normal de pago (get_clientes → consultar_pago_a_cosaco)
+- 'Suspendé a [Nombre Apellido]' → get_clientes → confirmar → suspender_cliente
+- 'Pendientes' → mostrar pagos y suspensiones esperando confirmación
+- 'Mandales a todos los del [día] que [mensaje]' → enviar_mensaje_masivo`;
 
 const TOOLS = [
   {
@@ -610,12 +626,20 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
     if (esCosaco) {
       if (mensajeUpper === 'PENDIENTES' || mensajeUpper === 'PENDIENTE') {
         const { rows: pagos } = await pool.query(`SELECT * FROM pagos_pendientes WHERE esperando_confirmacion = true ORDER BY id ASC`);
-        if (pagos.length === 0) {
-          await enviarWhatsApp(process.env.COSACO_WHATSAPP, '✅ No hay pagos pendientes');
+        const { rows: susps } = await pool.query(`SELECT * FROM suspensiones_pendientes WHERE esperando_confirmacion = true ORDER BY timestamp ASC`);
+        if (pagos.length === 0 && susps.length === 0) {
+          await enviarWhatsApp(process.env.COSACO_WHATSAPP, '✅ No hay pendientes de confirmación');
           return;
         }
-        let res = `📋 *Pagos pendientes* (${pagos.length}):\n`;
-        for (const p of pagos) res += `- ${p.cliente_nombre} - $${p.monto} - ${p.metodo}\n`;
+        let res = `📋 *Pendientes de confirmación:*\n`;
+        if (pagos.length > 0) {
+          res += `\n💰 *Pagos* (${pagos.length}):\n`;
+          for (const p of pagos) res += `- ${p.cliente_nombre} - $${p.monto} - ${p.metodo}\n`;
+        }
+        if (susps.length > 0) {
+          res += `\n⚠️ *Suspensiones* (${susps.length}):\n`;
+          for (const s of susps) res += `- ${s.cliente_nombre}\n`;
+        }
         await enviarWhatsApp(process.env.COSACO_WHATSAPP, res);
         return;
       }
@@ -628,9 +652,12 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
         return;
       }
 
-      if (suspencionesPendientes.size > 0 && esSiNo) {
-        const [key, susp] = [...suspencionesPendientes.entries()][0];
-        suspencionesPendientes.delete(key);
+      const { rows: suspsPend } = await pool.query(
+        `SELECT * FROM suspensiones_pendientes WHERE esperando_confirmacion = true ORDER BY timestamp ASC LIMIT 1`
+      );
+      if (suspsPend.length > 0 && esSiNo) {
+        const susp = suspsPend[0];
+        await pool.query(`DELETE FROM suspensiones_pendientes WHERE id = $1`, [susp.id]);
         if (mensajeUpper === 'SI' || mensajeUpper === 'S') {
           await fetch(`${GYM_API}/clientes/${susp.cliente_id}/suspender`, {
             method: 'DELETE', headers: { Authorization: `Bearer ${GYM_TOKEN}` }
@@ -638,6 +665,13 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
           await enviarWhatsApp(process.env.COSACO_WHATSAPP, `✅ ${susp.cliente_nombre} suspendido correctamente`);
         } else {
           await enviarWhatsApp(process.env.COSACO_WHATSAPP, `👍 ${susp.cliente_nombre} no fue suspendido`);
+        }
+        const { rows: sig } = await pool.query(
+          `SELECT * FROM suspensiones_pendientes WHERE esperando_confirmacion = true ORDER BY timestamp ASC LIMIT 1`
+        );
+        if (sig.length > 0) {
+          await enviarWhatsApp(process.env.COSACO_WHATSAPP,
+            `⚠️ Siguiente: ${sig[0].cliente_nombre} lleva 10 días sin pagar. ¿Suspendo?\nRespondé SÍ o NO`);
         }
         return;
       }
@@ -751,11 +785,12 @@ async function runJob(diaGrupo, tipoJob) {
   for (const c of clientes) {
     await enviarTemplate(c.telefono, templateMap[tipoJob], { "1": c.nombre.split(' ')[0] }, `[${tipoJob}]`);
     if (tipoJob === 'suspension') {
-      setTimeout(async () => {
-        suspencionesPendientes.set(c.id.toString(), { cliente_id: c.id, cliente_nombre: c.nombre, telefono: c.telefono });
-        await enviarWhatsApp(process.env.COSACO_WHATSAPP,
-          `⚠️ ${c.nombre} lleva 10 días sin pagar. ¿Suspendo su servicio?\nRespondé SÍ o NO`);
-      }, 60 * 60 * 1000);
+      await pool.query(
+        `INSERT INTO suspensiones_pendientes (cliente_id, cliente_nombre, telefono)
+         VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
+        [c.id, c.nombre, c.telefono]
+      );
+      console.log(`Suspensión pendiente guardada en DB: ${c.nombre}`);
     }
   }
   console.log(`Job ${tipoJob} grupo ${diaGrupo}: ${clientes.length} clientes`);
@@ -770,6 +805,24 @@ cron.schedule('0 13 29 * *', () => runJob(25, 'mora'));
 cron.schedule('0 13 15 * *', () => runJob(5, 'suspension'));
 cron.schedule('0 13 25 * *', () => runJob(15, 'suspension'));
 cron.schedule('0 13 5 * *',  () => runJob(25, 'suspension'));
+
+cron.schedule('*/15 * * * *', async () => {
+  try {
+    const { rows } = await pool.query(`
+      SELECT * FROM suspensiones_pendientes
+      WHERE notificado_cosaco = false AND timestamp < NOW() - INTERVAL '1 hour'
+      ORDER BY timestamp ASC
+    `);
+    for (const s of rows) {
+      await enviarWhatsApp(process.env.COSACO_WHATSAPP,
+        `⚠️ ${s.cliente_nombre} lleva 10 días sin pagar. ¿Suspendo su servicio?\nRespondé SÍ o NO`);
+      await pool.query(
+        `UPDATE suspensiones_pendientes SET notificado_cosaco = true, esperando_confirmacion = true WHERE id = $1`,
+        [s.id]
+      );
+    }
+  } catch (err) { console.error('Error cron suspensiones:', err.message); }
+});
 
 cron.schedule('0 12 * * *', async () => {
   try {
@@ -845,7 +898,7 @@ app.get('/panel', async (req, res) => {
     }).join('');
     const meta = JSON.stringify(hilos.map(h => ({ telefono: h.telefono, nombre: h.nombre }))).replace(/</g, '\\u003c');
     res.send(`<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Panel Hockey Vivo</title>
-<style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:-apple-system,sans-serif;background:#f0f2f5;height:100dvh;overflow:hidden}.app{display:flex;height:100dvh;max-width:900px;margin:0 auto;background:#fff}.sb{width:340px;min-width:340px;border-right:1px solid #e0e0e0;display:flex;flex-direction:column}.sbh{background:#075e54;color:#fff;padding:16px;font-size:18px;font-weight:600;flex-shrink:0}.hilos{overflow-y:auto;flex:1}.hilo{padding:14px 16px;border-bottom:1px solid #f0f0f0;cursor:pointer}.hilo:active,.hilo.activo{background:#f5f5f5}.hn{font-weight:600;font-size:15px}.hp{font-size:13px;color:#667;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.ht{font-size:11px;color:#999;margin-top:2px}.chat{flex:1;display:flex;flex-direction:column;min-width:0}.ch{background:#075e54;color:#fff;padding:14px 16px;font-size:16px;font-weight:600;display:flex;align-items:center;gap:12px;flex-shrink:0}.bv{display:none;background:none;border:none;color:#fff;font-size:20px;cursor:pointer}.chn{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.msgs{flex:1;overflow-y:auto;padding:16px;background:#e5ddd5}.mw{display:flex;flex-direction:column}.msg{max-width:75%;margin-bottom:10px;padding:8px 12px;border-radius:8px;font-size:14px;line-height:1.4;word-wrap:break-word}.msg.cliente{background:#fff;align-self:flex-start;border-radius:0 8px 8px 8px}.msg.agente,.msg.agente-cosaco{background:#dcf8c6;align-self:flex-end;margin-left:auto;border-radius:8px 0 8px 8px}.mt{font-size:10px;color:#999;margin-top:4px;text-align:right}.ia{padding:10px 16px;background:#f0f2f5;display:flex;gap:8px;align-items:center;flex-shrink:0}.ia input{flex:1;padding:10px 14px;border-radius:24px;border:none;font-size:16px;outline:none}.ia button{background:#075e54;color:#fff;border:none;border-radius:50%;width:42px;height:42px;font-size:18px;cursor:pointer}.ph{display:flex;align-items:center;justify-content:center;height:100%;color:#999}@media(max-width:768px){.app{max-width:100vw}.sb{position:fixed;inset:0;width:100vw;min-width:0;z-index:10;transform:translateX(0);transition:transform .25s}.sb.oculto{transform:translateX(-100%);pointer-events:none}.chat{position:fixed;inset:0;width:100vw;z-index:10;transform:translateX(100%);transition:transform .25s}.chat.visible{transform:translateX(0)}.bv{display:block}.ia{position:sticky;bottom:0;padding-bottom:max(10px,env(safe-area-inset-bottom))}}</style>
+<style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:-apple-system,sans-serif;background:#f0f2f5;height:100dvh;overflow:hidden}.app{display:flex;height:100dvh;max-width:900px;margin:0 auto;background:#fff}.sb{width:340px;min-width:340px;border-right:1px solid #e0e0e0;display:flex;flex-direction:column}.sbh{background:#075e54;color:#fff;padding:16px;font-size:18px;font-weight:600;flex-shrink:0}.hilos{overflow-y:auto;flex:1}.hilo{padding:14px 16px;border-bottom:1px solid #f0f0f0;cursor:pointer}.hilo:active,.hilo.activo{background:#f5f5f5}.hn{font-weight:600;font-size:15px}.hp{font-size:13px;color:#667;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.ht{font-size:11px;color:#999;margin-top:2px}.chat{flex:1;display:flex;flex-direction:column;min-width:0}.ch{background:#075e54;color:#fff;padding:14px 16px;font-size:16px;font-weight:600;display:flex;align-items:center;gap:12px;flex-shrink:0}.bv{display:none;background:none;border:none;color:#fff;font-size:20px;cursor:pointer}.chn{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.msgs{flex:1;overflow-y:auto;padding:16px;background:#e5ddd5}.mw{display:flex;flex-direction:column}.msg{max-width:75%;margin-bottom:10px;padding:8px 12px;border-radius:8px;font-size:14px;line-height:1.4;word-wrap:break-word}.msg.cliente{background:#fff;align-self:flex-start;border-radius:0 8px 8px 8px}.msg.agente,.msg.agente-cosaco{background:#dcf8c6;align-self:flex-end;margin-left:auto;border-radius:8px 0 8px 8px}.mt{font-size:10px;color:#999;margin-top:4px;text-align:right}.ia{padding:10px 16px;background:#f0f2f5;display:flex;gap:8px;align-items:center;flex-shrink:0}.ia input{flex:1;padding:10px 14px;border-radius:24px;border:none;font-size:16px;outline:none}.ia button{background:#075e54;color:#fff;border:none;border-radius:50%;width:42px;height:42px;font-size:18px;cursor:pointer}.ph{display:flex;align-items:center;justify-content:center;height:100%;color:#999}.ph-msg{opacity:.45;padding:3px 8px!important;margin-bottom:4px!important}.ph-txt{font-size:11px;color:#888;font-style:italic}@media(max-width:768px){.app{max-width:100vw}.sb{position:fixed;inset:0;width:100vw;min-width:0;z-index:10;transform:translateX(0);transition:transform .25s}.sb.oculto{transform:translateX(-100%);pointer-events:none}.chat{position:fixed;inset:0;width:100vw;z-index:10;transform:translateX(100%);transition:transform .25s}.chat.visible{transform:translateX(0)}.bv{display:block}.ia{position:sticky;bottom:0;padding-bottom:max(10px,env(safe-area-inset-bottom))}}</style>
 </head><body><div class="app">
 <div class="sb" id="sb"><div class="sbh">Conversaciones</div><div class="hilos">${lista}</div></div>
 <div class="chat" id="chat">
@@ -856,7 +909,7 @@ app.get('/panel', async (req, res) => {
 <script>
 const meta=${meta};let tel=null;const mob=()=>window.innerWidth<=768;
 async function abrirHilo(t){tel=t;const m=meta.find(x=>x.telefono===t);document.getElementById('chn').textContent=m?m.nombre:t;document.getElementById('msgs').innerHTML='<div class="ph">Cargando...</div>';if(mob()){document.getElementById('sb').classList.add('oculto');document.getElementById('chat').classList.add('visible');}
-const r=await fetch('/panel/hilo?telefono='+encodeURIComponent(t));const d=await r.json();const w=document.createElement('div');w.className='mw';(d.mensajes||[]).forEach(m=>{const div=document.createElement('div');div.className='msg '+m.rol;const h=new Date(m.timestamp).toLocaleTimeString('es-AR',{hour:'2-digit',minute:'2-digit'});div.innerHTML='<div>'+m.texto.replace(/\n/g,'<br>')+'</div><div class="mt">'+h+'</div>';w.appendChild(div);});const c=document.getElementById('msgs');c.innerHTML='';c.appendChild(w);c.scrollTop=c.scrollHeight;document.getElementById('ia').style.display='flex';}
+const r=await fetch('/panel/hilo?telefono='+encodeURIComponent(t));const d=await r.json();const w=document.createElement('div');w.className='mw';(d.mensajes||[]).forEach(m=>{const esPlaceholder=!m.texto||m.texto==='[sin texto]'||/^\[.+\]$/.test(m.texto.trim());const div=document.createElement('div');div.className='msg '+m.rol+(esPlaceholder?' ph-msg':'');const h=new Date(m.timestamp).toLocaleTimeString('es-AR',{hour:'2-digit',minute:'2-digit'});div.innerHTML='<div>'+(esPlaceholder?'<span class="ph-txt">'+m.texto+'</span>':m.texto.replace(/\n/g,'<br>'))+'</div><div class="mt">'+h+'</div>';w.appendChild(div);});const c=document.getElementById('msgs');c.innerHTML='';c.appendChild(w);c.scrollTop=c.scrollHeight;document.getElementById('ia').style.display='flex';}
 function volver(){document.getElementById('chat').classList.remove('visible');document.getElementById('sb').classList.remove('oculto');tel=null;}
 async function enviar(){const i=document.getElementById('mi');const t=i.value.trim();if(!t||!tel)return;i.value='';const r=await fetch('/panel/enviar',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({telefono:tel,mensaje:t})});if((await r.json()).ok)location.reload();}
 </script></body></html>`);
