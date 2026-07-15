@@ -873,47 +873,213 @@ app.post('/webhook', (req, res) => {
   procesarMensaje(mensaje, remitente, profileName);
 });
 
-app.get('/panel', async (req, res) => {
+app.get('/panel', (req, res) => {
+  res.type('text/html').send(`<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Panel Hockey Vivo</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f0f2f5;height:100dvh;overflow:hidden}
+.app{display:flex;height:100dvh;max-width:900px;margin:0 auto;background:#fff}
+.sb{width:340px;min-width:340px;border-right:1px solid #e0e0e0;display:flex;flex-direction:column}
+.sbh{background:#075e54;color:#fff;padding:16px;font-size:18px;font-weight:600;flex-shrink:0}
+.hilos{overflow-y:auto;flex:1}
+.hilo{padding:14px 16px;border-bottom:1px solid #f0f0f0;cursor:pointer}
+.hilo:hover,.hilo.activo{background:#f5f5f5}
+.hn{font-weight:600;font-size:15px;color:#111}
+.hp{font-size:13px;color:#667;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ht{font-size:11px;color:#999;margin-top:2px}
+.chat{flex:1;display:flex;flex-direction:column;min-width:0}
+.ch{background:#075e54;color:#fff;padding:14px 16px;font-size:16px;font-weight:600;display:flex;align-items:center;gap:12px;flex-shrink:0}
+.bv{display:none;background:none;border:none;color:#fff;font-size:20px;cursor:pointer;padding:0 4px}
+.chn{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.msgs{flex:1;overflow-y:auto;padding:16px;background:#e5ddd5}
+.mw{display:flex;flex-direction:column}
+.msg{max-width:75%;margin-bottom:10px;padding:8px 12px;border-radius:8px;font-size:14px;line-height:1.4;white-space:pre-wrap;word-wrap:break-word}
+.msg.cliente{background:#fff;align-self:flex-start;border-radius:0 8px 8px 8px}
+.msg.agente,.msg.agente-cosaco{background:#dcf8c6;align-self:flex-end;margin-left:auto;border-radius:8px 0 8px 8px}
+.msg-time{font-size:10px;color:#999;margin-top:4px;text-align:right}
+.ph-msg{opacity:.45}
+.ph-txt{font-size:11px;color:#888;font-style:italic}
+.ph{display:flex;align-items:center;justify-content:center;height:100%;color:#999;font-size:15px}
+.ia{padding:10px 16px;background:#f0f2f5;display:flex;gap:8px;align-items:center;flex-shrink:0}
+.ia input{flex:1;padding:10px 14px;border-radius:24px;border:none;font-size:16px;outline:none}
+.ia button{background:#075e54;color:#fff;border:none;border-radius:50%;width:42px;height:42px;font-size:18px;cursor:pointer}
+@media(max-width:768px){
+  .app{max-width:100vw}
+  .sb{position:fixed;inset:0;width:100vw;min-width:0;z-index:10;transition:transform .25s}
+  .sb.oculto{transform:translateX(-100%);pointer-events:none}
+  .chat{position:fixed;inset:0;width:100vw;z-index:10;transform:translateX(100%);transition:transform .25s}
+  .chat.visible{transform:translateX(0)}
+  .bv{display:block}
+  .ia{position:sticky;bottom:0;padding-bottom:max(10px,env(safe-area-inset-bottom))}
+}
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="sb" id="sb">
+    <div class="sbh">Conversaciones</div>
+    <div class="hilos" id="hilos"><div class="ph">Cargando...</div></div>
+  </div>
+  <div class="chat" id="chat">
+    <div class="ch">
+      <button class="bv" id="btn-volver">←</button>
+      <span class="chn" id="chn">Seleccioná una conversación</span>
+    </div>
+    <div class="msgs" id="msgs"><div class="ph">← Seleccioná una conversación</div></div>
+    <div class="ia" id="ia" style="display:none">
+      <input type="text" id="mi" placeholder="Escribí un mensaje...">
+      <button id="btn-enviar">➤</button>
+    </div>
+  </div>
+</div>
+<script>
+let telefonoActual = null;
+const mob = () => window.innerWidth <= 768;
+
+function tiempoRel(ts) {
+  const min = Math.floor((Date.now() - new Date(ts).getTime()) / 60000);
+  if (min < 1) return 'ahora';
+  if (min < 60) return 'hace ' + min + 'm';
+  const hs = Math.floor(min / 60);
+  return hs < 24 ? 'hace ' + hs + 'h' : 'hace ' + Math.floor(hs / 24) + 'd';
+}
+
+async function cargarHilos() {
+  const cont = document.getElementById('hilos');
   try {
-    const { rows: hilos } = await pool.query(`
+    const r = await fetch('/panel/data');
+    const d = await r.json();
+    cont.innerHTML = '';
+    if (!d.hilos || d.hilos.length === 0) {
+      cont.innerHTML = '<div class="ph">Sin conversaciones</div>';
+      return;
+    }
+    for (const h of d.hilos) {
+      const div = document.createElement('div');
+      div.className = 'hilo';
+
+      const hn = document.createElement('div');
+      hn.className = 'hn';
+      hn.textContent = h.nombre;
+
+      const hp = document.createElement('div');
+      hp.className = 'hp';
+      hp.textContent = (h.ultimo_texto || '').slice(0, 60);
+
+      const ht = document.createElement('div');
+      ht.className = 'ht';
+      ht.textContent = tiempoRel(h.ultimo_timestamp);
+
+      div.appendChild(hn);
+      div.appendChild(hp);
+      div.appendChild(ht);
+      div.addEventListener('click', () => abrirHilo(h.telefono, h.nombre, div));
+      cont.appendChild(div);
+    }
+  } catch (err) {
+    cont.innerHTML = '<div class="ph">Error cargando conversaciones</div>';
+  }
+}
+
+async function abrirHilo(telefono, nombre, divEl) {
+  telefonoActual = telefono;
+  document.querySelectorAll('.hilo.activo').forEach(el => el.classList.remove('activo'));
+  if (divEl) divEl.classList.add('activo');
+  document.getElementById('chn').textContent = nombre;
+  const msgs = document.getElementById('msgs');
+  msgs.innerHTML = '<div class="ph">Cargando...</div>';
+  if (mob()) {
+    document.getElementById('sb').classList.add('oculto');
+    document.getElementById('chat').classList.add('visible');
+  }
+
+  const r = await fetch('/panel/hilo?telefono=' + encodeURIComponent(telefono));
+  const d = await r.json();
+  const wrap = document.createElement('div');
+  wrap.className = 'mw';
+
+  for (const m of (d.mensajes || [])) {
+    const tx = m.texto || '';
+    const esPlaceholder = !tx || tx === '[sin texto]' || (tx.startsWith('[') && tx.endsWith(']'));
+
+    const div = document.createElement('div');
+    div.className = 'msg ' + m.rol + (esPlaceholder ? ' ph-msg' : '');
+
+    const content = document.createElement('div');
+    if (esPlaceholder) {
+      const span = document.createElement('span');
+      span.className = 'ph-txt';
+      span.textContent = tx;
+      content.appendChild(span);
+    } else {
+      content.textContent = tx;
+    }
+
+    const time = document.createElement('div');
+    time.className = 'msg-time';
+    time.textContent = new Date(m.timestamp).toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' });
+
+    div.appendChild(content);
+    div.appendChild(time);
+    wrap.appendChild(div);
+  }
+
+  msgs.innerHTML = '';
+  msgs.appendChild(wrap);
+  msgs.scrollTop = msgs.scrollHeight;
+  document.getElementById('ia').style.display = 'flex';
+}
+
+function volver() {
+  document.getElementById('chat').classList.remove('visible');
+  document.getElementById('sb').classList.remove('oculto');
+  telefonoActual = null;
+}
+
+async function enviar() {
+  const input = document.getElementById('mi');
+  const texto = input.value.trim();
+  if (!texto || !telefonoActual) return;
+  input.value = '';
+  const r = await fetch('/panel/enviar', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ telefono: telefonoActual, mensaje: texto }),
+  });
+  if ((await r.json()).ok) cargarHilos();
+}
+
+document.getElementById('btn-volver').addEventListener('click', volver);
+document.getElementById('btn-enviar').addEventListener('click', enviar);
+document.getElementById('mi').addEventListener('keydown', e => { if (e.key === 'Enter') enviar(); });
+
+cargarHilos();
+</script>
+</body>
+</html>`);
+});
+
+app.get('/panel/data', async (req, res) => {
+  try {
+    const { rows } = await pool.query(`
       SELECT c.telefono,
-        COALESCE((SELECT nombre FROM conversaciones n WHERE n.telefono = c.telefono AND n.nombre IS NOT NULL ORDER BY n.timestamp DESC LIMIT 1), c.telefono) AS nombre,
-        c.texto AS ultimo_texto, c.timestamp AS ultimo_timestamp
+        COALESCE(
+          (SELECT nombre FROM conversaciones n WHERE n.telefono = c.telefono AND n.nombre IS NOT NULL ORDER BY n.timestamp DESC LIMIT 1),
+          c.telefono
+        ) AS nombre,
+        c.texto AS ultimo_texto,
+        c.timestamp AS ultimo_timestamp
       FROM conversaciones c
       WHERE c.id = (SELECT id FROM conversaciones sub WHERE sub.telefono = c.telefono ORDER BY sub.timestamp DESC LIMIT 1)
       ORDER BY c.timestamp DESC
     `);
-    const tiempoRel = (ts) => {
-      const min = Math.floor((Date.now() - new Date(ts).getTime()) / 60000);
-      if (min < 1) return 'ahora';
-      if (min < 60) return `hace ${min}m`;
-      const hs = Math.floor(min / 60);
-      return hs < 24 ? `hace ${hs}h` : `hace ${Math.floor(hs / 24)}d`;
-    };
-    const lista = hilos.map(h => {
-      const preview = (h.ultimo_texto || '').slice(0, 60) + ((h.ultimo_texto || '').length > 60 ? '…' : '');
-      const nombre = h.nombre.replace(/</g, '&lt;').replace(/>/g, '&gt;');
-      const tel = h.telefono.replace(/'/g, "\\'");
-      return `<div class="hilo" onclick="abrirHilo('${tel}')"><div class="hn">${nombre}</div><div class="hp">${preview.replace(/</g, '&lt;')}</div><div class="ht">${tiempoRel(h.ultimo_timestamp)}</div></div>`;
-    }).join('');
-    const meta = JSON.stringify(hilos.map(h => ({ telefono: h.telefono, nombre: h.nombre }))).replace(/</g, '\\u003c');
-    res.send(`<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Panel Hockey Vivo</title>
-<style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:-apple-system,sans-serif;background:#f0f2f5;height:100dvh;overflow:hidden}.app{display:flex;height:100dvh;max-width:900px;margin:0 auto;background:#fff}.sb{width:340px;min-width:340px;border-right:1px solid #e0e0e0;display:flex;flex-direction:column}.sbh{background:#075e54;color:#fff;padding:16px;font-size:18px;font-weight:600;flex-shrink:0}.hilos{overflow-y:auto;flex:1}.hilo{padding:14px 16px;border-bottom:1px solid #f0f0f0;cursor:pointer}.hilo:active,.hilo.activo{background:#f5f5f5}.hn{font-weight:600;font-size:15px}.hp{font-size:13px;color:#667;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.ht{font-size:11px;color:#999;margin-top:2px}.chat{flex:1;display:flex;flex-direction:column;min-width:0}.ch{background:#075e54;color:#fff;padding:14px 16px;font-size:16px;font-weight:600;display:flex;align-items:center;gap:12px;flex-shrink:0}.bv{display:none;background:none;border:none;color:#fff;font-size:20px;cursor:pointer}.chn{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.msgs{flex:1;overflow-y:auto;padding:16px;background:#e5ddd5}.mw{display:flex;flex-direction:column}.msg{max-width:75%;margin-bottom:10px;padding:8px 12px;border-radius:8px;font-size:14px;line-height:1.4;word-wrap:break-word}.msg.cliente{background:#fff;align-self:flex-start;border-radius:0 8px 8px 8px}.msg.agente,.msg.agente-cosaco{background:#dcf8c6;align-self:flex-end;margin-left:auto;border-radius:8px 0 8px 8px}.mt{font-size:10px;color:#999;margin-top:4px;text-align:right}.ia{padding:10px 16px;background:#f0f2f5;display:flex;gap:8px;align-items:center;flex-shrink:0}.ia input{flex:1;padding:10px 14px;border-radius:24px;border:none;font-size:16px;outline:none}.ia button{background:#075e54;color:#fff;border:none;border-radius:50%;width:42px;height:42px;font-size:18px;cursor:pointer}.ph{display:flex;align-items:center;justify-content:center;height:100%;color:#999}.ph-msg{opacity:.45;padding:3px 8px!important;margin-bottom:4px!important}.ph-txt{font-size:11px;color:#888;font-style:italic}@media(max-width:768px){.app{max-width:100vw}.sb{position:fixed;inset:0;width:100vw;min-width:0;z-index:10;transform:translateX(0);transition:transform .25s}.sb.oculto{transform:translateX(-100%);pointer-events:none}.chat{position:fixed;inset:0;width:100vw;z-index:10;transform:translateX(100%);transition:transform .25s}.chat.visible{transform:translateX(0)}.bv{display:block}.ia{position:sticky;bottom:0;padding-bottom:max(10px,env(safe-area-inset-bottom))}}</style>
-</head><body><div class="app">
-<div class="sb" id="sb"><div class="sbh">Conversaciones</div><div class="hilos">${lista}</div></div>
-<div class="chat" id="chat">
-<div class="ch"><button class="bv" onclick="volver()">←</button><span class="chn" id="chn">Seleccioná una conversación</span></div>
-<div class="msgs" id="msgs"><div class="ph">← Seleccioná una conversación</div></div>
-<div class="ia" id="ia" style="display:none"><input type="text" id="mi" placeholder="Escribí un mensaje..." onkeydown="if(event.key==='Enter')enviar()"><button onclick="enviar()">➤</button></div>
-</div></div>
-<script>
-const meta=${meta};let tel=null;const mob=()=>window.innerWidth<=768;
-async function abrirHilo(t){tel=t;const m=meta.find(x=>x.telefono===t);document.getElementById('chn').textContent=m?m.nombre:t;document.getElementById('msgs').innerHTML='<div class="ph">Cargando...</div>';if(mob()){document.getElementById('sb').classList.add('oculto');document.getElementById('chat').classList.add('visible');}
-const r=await fetch('/panel/hilo?telefono='+encodeURIComponent(t));const d=await r.json();const w=document.createElement('div');w.className='mw';(d.mensajes||[]).forEach(m=>{const tx=m.texto||'';const esPlaceholder=!tx||tx==='[sin texto]'||(tx.startsWith('[')&&tx.endsWith(']'));const div=document.createElement('div');div.className='msg '+m.rol+(esPlaceholder?' ph-msg':'');const h=new Date(m.timestamp).toLocaleTimeString('es-AR',{hour:'2-digit',minute:'2-digit'});div.innerHTML='<div>'+(esPlaceholder?'<span class="ph-txt">'+tx+'</span>':tx.split('\n').join('<br>'))+'</div><div class="mt">'+h+'</div>';w.appendChild(div);});const c=document.getElementById('msgs');c.innerHTML='';c.appendChild(w);c.scrollTop=c.scrollHeight;document.getElementById('ia').style.display='flex';}
-function volver(){document.getElementById('chat').classList.remove('visible');document.getElementById('sb').classList.remove('oculto');tel=null;}
-async function enviar(){const i=document.getElementById('mi');const t=i.value.trim();if(!t||!tel)return;i.value='';const r=await fetch('/panel/enviar',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({telefono:tel,mensaje:t})});if((await r.json()).ok)location.reload();}
-</script></body></html>`);
-  } catch (err) { res.status(500).send('Error: ' + err.message); }
+    res.json({ hilos: rows });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.get('/panel/hilo', async (req, res) => {
