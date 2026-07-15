@@ -1,0 +1,957 @@
+require('dotenv').config();
+const express = require('express');
+const twilio = require('twilio');
+const Anthropic = require('@anthropic-ai/sdk');
+const { Pool } = require('pg');
+const cron = require('node-cron');
+
+const app = express();
+app.use(express.urlencoded({ extended: true }));
+app.use(express.json());
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false,
+});
+
+const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+const GYM_API = 'https://hockeyvivo.up.railway.app';
+const TWILIO_FROM = process.env.TWILIO_WHATSAPP_NUMBER?.startsWith('whatsapp:')
+  ? process.env.TWILIO_WHATSAPP_NUMBER
+  : `whatsapp:${process.env.TWILIO_WHATSAPP_NUMBER}`;
+let GYM_TOKEN = null;
+const suspencionesPendientes = new Map();
+
+async function initDB() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS conversaciones (
+      id SERIAL PRIMARY KEY,
+      telefono VARCHAR(50) NOT NULL,
+      nombre VARCHAR(200),
+      rol VARCHAR(20) NOT NULL,
+      texto TEXT NOT NULL,
+      content_json JSONB,
+      timestamp TIMESTAMPTZ DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_conv_telefono ON conversaciones(telefono);
+    CREATE TABLE IF NOT EXISTS telefono_cliente (
+      telefono VARCHAR(50) PRIMARY KEY,
+      cliente_id INTEGER NOT NULL,
+      cliente_nombre VARCHAR(200),
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    );
+    CREATE TABLE IF NOT EXISTS pagos_pendientes (
+      id SERIAL PRIMARY KEY,
+      cliente_id INTEGER NOT NULL,
+      cliente_nombre VARCHAR(200),
+      cliente_from VARCHAR(50),
+      monto NUMERIC,
+      metodo VARCHAR(50),
+      timestamp TIMESTAMPTZ DEFAULT NOW(),
+      esperando_confirmacion BOOLEAN DEFAULT TRUE
+    );
+    CREATE TABLE IF NOT EXISTS registros_pendientes (
+      telefono VARCHAR(50) PRIMARY KEY,
+      datos JSONB NOT NULL,
+      timestamp TIMESTAMPTZ DEFAULT NOW()
+    );
+  `);
+  console.log('Tablas listas');
+}
+
+async function loginGimnasio() {
+  const r = await fetch(`${GYM_API}/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ username: process.env.GYM_USER, password: process.env.GYM_PASS }).toString(),
+    signal: AbortSignal.timeout(120000),
+  });
+  if (!r.ok) throw new Error(`Login fallido: ${r.status}`);
+  GYM_TOKEN = (await r.json()).access_token;
+  console.log('Login exitoso');
+}
+
+async function loginConReintentos(intentos = 10, esperaInicial = 10000) {
+  for (let i = 1; i <= intentos; i++) {
+    try {
+      await loginGimnasio();
+      return;
+    } catch (err) {
+      console.error(`Login intento ${i}/${intentos}: ${err.message}`);
+      if (i < intentos) await new Promise(r => setTimeout(r, Math.min(esperaInicial * i, 60000)));
+    }
+  }
+  console.warn('Login fallido tras todos los intentos');
+}
+
+function guardarMensaje(from, nombre, texto, rol, contentJson = null) {
+  pool.query(
+    'INSERT INTO conversaciones (telefono, nombre, rol, texto, content_json) VALUES ($1, $2, $3, $4, $5)',
+    [from, nombre && nombre !== from ? nombre : null, rol, texto, contentJson ? JSON.stringify(contentJson) : null]
+  ).catch(err => console.error('Error guardando mensaje:', err.message));
+}
+
+async function getHistorial(from) {
+  const result = await pool.query(
+    `SELECT rol, texto, content_json FROM conversaciones
+     WHERE telefono = $1 AND rol IN ('cliente', 'agente', 'tool_use', 'tool_result')
+     ORDER BY timestamp DESC LIMIT 20`,
+    [from]
+  );
+  return result.rows.reverse().map(row => ({
+    role: (row.rol === 'cliente' || row.rol === 'tool_result') ? 'user' : 'assistant',
+    content: row.content_json ?? row.texto,
+  }));
+}
+
+async function enviarWhatsApp(telefono, mensaje, nombre = null) {
+  try {
+    let tel = telefono.toString().replace(/\D/g, '');
+    if (tel.startsWith('549')) tel = tel.slice(2);
+    else if (tel.startsWith('54')) tel = tel.slice(2);
+    const to = `whatsapp:+54${tel}`;
+    await twilioClient.messages.create({ from: TWILIO_FROM, to, body: mensaje });
+    guardarMensaje(to, nombre, mensaje, 'agente');
+  } catch (err) {
+    console.error(`Error enviando WhatsApp a ${telefono}:`, err.message);
+  }
+}
+
+async function enviarTemplate(telefono, templateSid, variables, textoGuardar = '[Mensaje automático]') {
+  try {
+    let tel = telefono.toString().replace(/\D/g, '');
+    if (tel.startsWith('549')) tel = tel.slice(2);
+    else if (tel.startsWith('54')) tel = tel.slice(2);
+    const to = `whatsapp:+54${tel}`;
+    await twilioClient.messages.create({
+      from: process.env.TWILIO_WHATSAPP_NUMBER,
+      to,
+      contentSid: templateSid,
+      contentVariables: JSON.stringify(variables),
+    });
+    guardarMensaje(to, variables['1'] || null, textoGuardar, 'agente');
+  } catch (err) {
+    console.error(`Error enviando template a ${telefono}:`, err.message);
+  }
+}
+
+async function buscarClientePorTelefono(telefono) {
+  try {
+    const cached = await pool.query('SELECT * FROM telefono_cliente WHERE telefono = $1', [telefono]);
+    if (cached.rows.length > 0) return { id: cached.rows[0].cliente_id, nombre: cached.rows[0].cliente_nombre };
+    let tel = telefono.replace(/\D/g, '');
+    if (tel.startsWith('549')) tel = tel.slice(3);
+    else if (tel.startsWith('54')) tel = tel.slice(2);
+    const headers = { Authorization: `Bearer ${GYM_TOKEN}` };
+    for (const buscar of [tel.slice(-10), tel.slice(-8), `549${tel.slice(-10)}`]) {
+      const r = await fetch(`${GYM_API}/clientes?buscar=${buscar}`, { headers });
+      const data = await r.json();
+      const clientes = Array.isArray(data) ? data : [];
+      if (clientes.length > 0) return clientes[0];
+    }
+    return null;
+  } catch (err) {
+    console.error('Error buscarClientePorTelefono:', err.message);
+    return null;
+  }
+}
+
+function calcularFechaInicio(cliente) {
+  return (cliente.estado === 'Suspendido' || !cliente.fecha_vencimiento)
+    ? new Date().toISOString().split('T')[0]
+    : cliente.fecha_vencimiento;
+}
+
+function calcularFechaVencimiento(fecha_pago, fecha_vencimiento_actual) {
+  if (fecha_vencimiento_actual) {
+    const venc = new Date(fecha_vencimiento_actual + 'T12:00:00');
+    return new Date(venc.getFullYear(), venc.getMonth() + 1, venc.getDate()).toISOString().split('T')[0];
+  }
+  const fecha = new Date(fecha_pago + 'T12:00:00');
+  const dia = fecha.getDate();
+  let diaVenc, meses;
+  if (dia >= 6 && dia <= 15) { diaVenc = 15; meses = 1; }
+  else if (dia >= 16 && dia <= 25) { diaVenc = 25; meses = 1; }
+  else { diaVenc = 5; meses = dia >= 26 ? 2 : 1; }
+  return new Date(fecha.getFullYear(), fecha.getMonth() + meses, diaVenc).toISOString().split('T')[0];
+}
+
+const SYSTEM_PROMPT = `Sos el asistente virtual de Hockey Vivo en Santiago del Estero. Respondés en español argentino, amable y breve. Usá emojis con moderación.
+
+IDENTIFICACIÓN:
+Si el sistema indica que el cliente está identificado, usá su nombre directamente. Si lo identificás durante la conversación con get_clientes, llamá guardar_telefono_cliente con su teléfono, cliente_id y cliente_nombre.
+
+INFO DEL GIMNASIO (solo cuando pregunten puntualmente):
+- Dirección: Moreno (N) 55 entre Andes y Rivadavia, Santiago del Estero
+- Horarios: Lunes/miércoles/viernes 18:30-21hs | Martes/jueves 16-21hs
+- Planes: 1x/semana $29.000 | 2x/semana $35.000 | 3x/semana $39.000
+- Alias transferencias: hockeyvivo | Requisitos: palo, botines y agua
+- Primera clase GRATIS. Luego se abona el mes por adelantado.
+- Cupos en tiempo real: https://hockeyvivo.up.railway.app/cupos
+
+Cuando pregunten qué es Hockey Vivo o info general, respondé:
+"Hockey Vivo es un espacio de entrenamiento creado por un jugador de hockey con una perspectiva diferente: un lugar exclusivo para que mejores tu rendimiento en la cancha de forma real y medible.
+
+Cada jugador que entrena con nosotros empieza a notar mejoras desde las primeras semanas:
+🏑 Cada rutina está diseñada exclusivamente para hockey.
+🏑 Entrenamos en estaciones que fortalecen y enriquecen tu técnica.
+🏑 Tenés seguimiento constante para potenciar tu estilo de juego.
+
+Máximo 6 personas por turno para que siempre tengas la atención que necesitás.
+La primera clase es GRATIS. Si decidís quedarte, se abona el mes por adelantado. 🏑"
+
+RESERVAS:
+Cuando llegue mensaje de reserva web ("Hola! Me interesa reservar lugar..."):
+1. Extraer: nombre, fecha_nacimiento, whatsapp, equipo, nivel, turnos solicitados
+2. Máximo 3 turnos. Si piden más: 'Nuestros planes son de hasta 3 veces por semana 🏑 ¿Cuáles 3 preferís?'
+3. Usar get_turnos para verificar cupo (cupo_usado < cupo_maximo)
+4. Si hay lugar → llamar guardar_registro_pendiente PRIMERO, luego preguntar: '¿Confirmás tu inscripción en Hockey Vivo?'
+5. NUNCA registrar el cliente directamente. El sistema intercepta el SÍ automáticamente.
+Si no hay lugar → mandar a https://hockeyvivo.up.railway.app/cupos
+
+PAGOS (flujo obligatorio):
+1. Cliente menciona que pagó → pedí nombre y método si no los tenés
+2. Buscá con get_clientes
+3. Llamá SIEMPRE consultar_pago_a_cosaco (nunca saltear)
+4. Decí: 'Gracias! Ya le avisé al equipo para confirmar tu pago. En breve te avisamos 🏑'
+PROHIBIDO: decir 'quedó registrado' sin haber llamado consultar_pago_a_cosaco.
+'Quiero pagar' = intención futura → informar alias y preguntar si ya lo hizo.
+'Pagué/transferí' = pago realizado → iniciar flujo.
+
+BAJA DE CLIENTE:
+Cuando un cliente diga que no continúa → notificar a Cosaco (enviar_mensaje_cliente general) → esperar confirmación → suspender_cliente.
+
+TURNOS:
+Al confirmar registro/cambio, mostrar día y horario de cada turno asignado.
+Palabra 'sacar': preguntar siempre si quiere eliminar o agregar antes de actuar.
+Nunca confirmar cambio de turno sin haber llamado gestionar_turnos_cliente primero.
+
+SI NO PODÉS RESOLVER ALGO: 'Te paso con el equipo de Hockey Vivo, en breve te contactamos 🏑'
+
+MODO SECRETARIO (solo número de Cosaco):
+Sos su asistente administrativo. Podés:
+1. Enviar mensajes a clientes SIEMPRE con tools (nunca texto libre):
+   recordatorio/mora/suspension/pago_confirmado/general → enviar_mensaje_cliente
+   mensaje masivo por día → enviar_mensaje_masivo
+2. Buscar info de clientes con get_clientes
+3. Registrar pagos en efectivo → flujo normal de pago
+4. Gestión: registrar clientes, cambiar turnos, suspender
+5. Suspender cliente: buscar → confirmar → solo si confirma → suspender_cliente
+Respondé a Cosaco de forma concisa confirmando lo que hiciste.`;
+
+const TOOLS = [
+  {
+    name: 'get_clientes',
+    description: 'Busca clientes por nombre (con fallback sin acentos) o por estado.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        estado: { type: 'string', description: 'Filtrar: Vigente, Vencido, Suspendido' },
+        buscar: { type: 'string', description: 'Buscar por nombre o teléfono' },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'get_turnos',
+    description: 'Lista turnos con IDs, días, horarios, niveles y cupos. Sin lista de alumnos.',
+    input_schema: { type: 'object', properties: {}, required: [] },
+  },
+  {
+    name: 'registrar_cliente_y_asignar_turno',
+    description: 'Crea un cliente nuevo y le asigna turnos. Si ya existe, asigna igual.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        nombre: { type: 'string' },
+        apellido: { type: 'string' },
+        telefono: { type: 'string' },
+        fecha_nacimiento: { type: 'string', description: 'YYYY-MM-DD (opcional)' },
+        club: { type: 'string', description: 'Club (opcional)' },
+        turno_ids: { type: 'array', items: { type: 'integer' } },
+      },
+      required: ['nombre', 'apellido', 'telefono', 'turno_ids'],
+    },
+  },
+  {
+    name: 'gestionar_turnos_cliente',
+    description: 'Agrega o quita turnos a un cliente existente.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        cliente_id: { type: 'integer' },
+        turno_ids_agregar: { type: 'array', items: { type: 'integer' } },
+        turno_ids_quitar: { type: 'array', items: { type: 'integer' } },
+      },
+      required: ['cliente_id'],
+    },
+  },
+  {
+    name: 'suspender_cliente',
+    description: 'Suspende a un cliente. Solo cuando Cosaco confirme explícitamente.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        cliente_id: { type: 'integer' },
+        cliente_nombre: { type: 'string' },
+      },
+      required: ['cliente_id', 'cliente_nombre'],
+    },
+  },
+  {
+    name: 'consultar_pago_a_cosaco',
+    description: 'Guarda el pago en pagos_pendientes y notifica a Cosaco. SIEMPRE usar en vez de registrar directamente.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        cliente_id: { type: 'integer' },
+        cliente_nombre: { type: 'string' },
+        monto: { type: 'number' },
+        metodo: { type: 'string', description: 'Efectivo o Transferencia' },
+      },
+      required: ['cliente_id', 'cliente_nombre', 'monto', 'metodo'],
+    },
+  },
+  {
+    name: 'guardar_registro_pendiente',
+    description: 'Guarda datos de inscripción antes del ¿Confirmás?. Llamar SIEMPRE antes.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        telefono: { type: 'string' },
+        nombre: { type: 'string' },
+        apellido: { type: 'string' },
+        fecha_nacimiento: { type: 'string' },
+        whatsapp: { type: 'string' },
+        club: { type: 'string' },
+        turno_ids: { type: 'array', items: { type: 'integer' } },
+      },
+      required: ['telefono', 'nombre', 'turno_ids'],
+    },
+  },
+  {
+    name: 'guardar_telefono_cliente',
+    description: 'Mapea número de teléfono a cliente identificado durante la conversación.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        telefono: { type: 'string' },
+        cliente_id: { type: 'integer' },
+        cliente_nombre: { type: 'string' },
+      },
+      required: ['telefono', 'cliente_id', 'cliente_nombre'],
+    },
+  },
+  {
+    name: 'enviar_mensaje_cliente',
+    description: 'Envía template de WhatsApp a un cliente. template_tipo: recordatorio, mora, suspension, pago_confirmado, general.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        cliente_id: { type: 'integer' },
+        template_tipo: {
+          type: 'string',
+          enum: ['recordatorio', 'mora', 'suspension', 'pago_confirmado', 'general'],
+        },
+        mensaje: { type: 'string', description: 'Requerido para general' },
+        monto: { type: 'number', description: 'Requerido para pago_confirmado' },
+      },
+      required: ['cliente_id', 'template_tipo'],
+    },
+  },
+  {
+    name: 'enviar_mensaje_masivo',
+    description: 'Envía template a todos los clientes de un día de la semana.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        dia_semana: { type: 'string', description: 'lunes, martes, miercoles, jueves, viernes' },
+        mensaje: { type: 'string' },
+      },
+      required: ['dia_semana', 'mensaje'],
+    },
+  },
+];
+
+async function ejecutarTool(nombre, input, remitente) {
+  const headers = { Authorization: `Bearer ${GYM_TOKEN}`, 'Content-Type': 'application/json' };
+  try {
+    if (nombre === 'get_clientes') {
+      const params = new URLSearchParams();
+      if (input.estado) params.append('estado', input.estado);
+      if (input.buscar?.match(/^\d+$/)) {
+        params.set('buscar', input.buscar.replace(/^549/, '').replace(/^54/, '').slice(-8));
+      } else if (input.buscar) {
+        params.append('buscar', input.buscar);
+      }
+      const buscar = async (termino) => {
+        const p = new URLSearchParams();
+        if (input.estado) p.append('estado', input.estado);
+        p.append('buscar', termino);
+        const r = await fetch(`${GYM_API}/clientes?${p}`, { headers });
+        const d = await r.json();
+        return Array.isArray(d) ? d : [];
+      };
+      let res = await fetch(`${GYM_API}/clientes?${params}`, { headers });
+      let data = await res.json();
+      let resultados = Array.isArray(data) ? data : [];
+      if (resultados.length > 0) return resultados;
+      if (input.buscar && !input.buscar.match(/^\d+$/)) {
+        const sinAcentos = input.buscar.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+        if (sinAcentos !== input.buscar) {
+          resultados = await buscar(sinAcentos);
+          if (resultados.length > 0) return resultados;
+        }
+        const palabras = sinAcentos.split(' ').filter(p => p.length > 2);
+        for (const p of palabras) {
+          resultados = await buscar(p);
+          if (resultados.length > 0) return resultados;
+        }
+        for (const p of palabras) {
+          if (p.length > 4) {
+            resultados = await buscar(p.slice(0, 4));
+            if (resultados.length > 0) return resultados;
+          }
+        }
+      }
+      return resultados;
+    }
+
+    if (nombre === 'get_turnos') {
+      const r = await fetch(`${GYM_API}/turnos`, { headers });
+      const data = await r.json();
+      return (Array.isArray(data) ? data : []).map(t => ({
+        id: t.id, dia_semana: t.dia_semana, hora_inicio: t.hora_inicio,
+        nivel: t.nivel, cupo_maximo: t.cupo_maximo, cupo_usado: t.cupo_usado,
+        disponible: t.cupo_usado < t.cupo_maximo,
+      }));
+    }
+
+    if (nombre === 'registrar_cliente_y_asignar_turno') {
+      const nombreCompleto = `${input.nombre} ${input.apellido}`;
+      const asignarTurnos = async (cliente_id, turno_ids) => {
+        const asignados = [], errores = [];
+        for (const id of turno_ids) {
+          const r = await fetch(`${GYM_API}/turnos/${id}/asignar/${cliente_id}`, { method: 'POST', headers });
+          if (r.ok) asignados.push(id);
+          else errores.push(`turno ${id}: ${await r.text()}`);
+        }
+        return { asignados, errores };
+      };
+      const rBuscar = await fetch(`${GYM_API}/clientes?buscar=${encodeURIComponent(input.telefono)}`, { headers });
+      const existentes = await rBuscar.json();
+      const existente = Array.isArray(existentes) && existentes.length > 0 ? existentes[0] : null;
+      if (!existente) {
+        const body = { nombre: nombreCompleto, telefono: input.telefono };
+        if (input.fecha_nacimiento) body.fecha_nacimiento = input.fecha_nacimiento;
+        if (input.club) body.club = input.club;
+        const rNuevo = await fetch(`${GYM_API}/clientes`, { method: 'POST', headers, body: JSON.stringify(body) });
+        if (!rNuevo.ok) return { ok: false, error: `No se pudo crear: ${await rNuevo.text()}` };
+        const nuevo = await rNuevo.json();
+        const { asignados, errores } = await asignarTurnos(nuevo.id, input.turno_ids);
+        if (errores.length) return { ok: false, error: errores.join(', ') };
+        return { ok: true, nuevo: true, cliente_id: nuevo.id, nombre: nombreCompleto, turnos_asignados: asignados };
+      }
+      const { asignados, errores } = await asignarTurnos(existente.id, input.turno_ids);
+      if (errores.length) return { ok: false, error: errores.join(', ') };
+      return { ok: true, cliente_id: existente.id, nombre: existente.nombre, turnos_asignados: asignados };
+    }
+
+    if (nombre === 'gestionar_turnos_cliente') {
+      const resultados = [];
+      for (const id of (input.turno_ids_quitar || [])) {
+        const r = await fetch(`${GYM_API}/turnos/${id}/quitar/${input.cliente_id}`, { method: 'DELETE', headers });
+        resultados.push({ accion: 'quitar', turno_id: id, ok: r.ok });
+      }
+      for (const id of (input.turno_ids_agregar || [])) {
+        const r = await fetch(`${GYM_API}/turnos/${id}/asignar/${input.cliente_id}`, { method: 'POST', headers });
+        resultados.push({ accion: 'agregar', turno_id: id, ok: r.ok });
+      }
+      return { ok: resultados.every(r => r.ok), resultados };
+    }
+
+    if (nombre === 'suspender_cliente') {
+      const r = await fetch(`${GYM_API}/clientes/${input.cliente_id}/suspender`, { method: 'DELETE', headers });
+      if (!r.ok) return { error: `Error: ${await r.text()}` };
+      return { ok: true, nombre: input.cliente_nombre };
+    }
+
+    if (nombre === 'consultar_pago_a_cosaco') {
+      const metodo = input.metodo || 'Transferencia';
+      await pool.query(
+        `INSERT INTO pagos_pendientes (cliente_id, cliente_nombre, cliente_from, monto, metodo) VALUES ($1, $2, $3, $4, $5)`,
+        [input.cliente_id, input.cliente_nombre, remitente, input.monto, metodo]
+      );
+      const { rows } = await pool.query(`SELECT COUNT(*) AS count FROM pagos_pendientes WHERE esperando_confirmacion = true`);
+      if (parseInt(rows[0].count) > 1) return { ok: true, encolado: true };
+      const msg = `💰 *Confirmación de pago*\nCliente: ${input.cliente_nombre}\nMonto: $${input.monto}\nMétodo: ${metodo}\n¿Confirmás? Respondé *SÍ* o *NO*`;
+      await twilioClient.messages.create({ from: TWILIO_FROM, to: process.env.COSACO_WHATSAPP, body: msg });
+      guardarMensaje(process.env.COSACO_WHATSAPP, null, msg, 'agente');
+      return { ok: true, enviado_a_cosaco: true };
+    }
+
+    if (nombre === 'guardar_registro_pendiente') {
+      await pool.query(
+        'INSERT INTO registros_pendientes (telefono, datos) VALUES ($1, $2) ON CONFLICT (telefono) DO UPDATE SET datos = $2, timestamp = NOW()',
+        [input.telefono, JSON.stringify(input)]
+      );
+      return { ok: true };
+    }
+
+    if (nombre === 'guardar_telefono_cliente') {
+      await pool.query(
+        `INSERT INTO telefono_cliente (telefono, cliente_id, cliente_nombre) VALUES ($1, $2, $3)
+         ON CONFLICT (telefono) DO UPDATE SET cliente_id = $2, cliente_nombre = $3, updated_at = NOW()`,
+        [input.telefono, input.cliente_id, input.cliente_nombre]
+      );
+      return { ok: true };
+    }
+
+    if (nombre === 'enviar_mensaje_cliente') {
+      const rCli = await fetch(`${GYM_API}/clientes/${input.cliente_id}`, { headers });
+      const cliente = await rCli.json();
+      if (!cliente.telefono) return { error: 'Sin teléfono registrado' };
+      const nombre1 = cliente.nombre.split(' ')[0];
+      const templateMap = {
+        recordatorio: process.env.TEMPLATE_RECORDATORIO,
+        mora: process.env.TEMPLATE_MORA,
+        suspension: process.env.TEMPLATE_SUSPENSION,
+        pago_confirmado: process.env.TEMPLATE_PAGO_REGISTRADO,
+        general: process.env.TEMPLATE_MENSAJE_HOCKEYVIVO,
+      };
+      const sid = templateMap[input.template_tipo] || process.env.TEMPLATE_MENSAJE_HOCKEYVIVO;
+      let variables;
+      if (input.template_tipo === 'pago_confirmado') variables = { "1": nombre1, "2": String(input.monto) };
+      else if (['mora', 'suspension'].includes(input.template_tipo)) variables = { "1": nombre1 };
+      else variables = { "1": nombre1, "2": input.mensaje || '' };
+      await enviarTemplate(cliente.telefono, sid, variables, input.mensaje || null);
+      return { ok: true, enviado_a: cliente.nombre };
+    }
+
+    if (nombre === 'enviar_mensaje_masivo') {
+      const diaNorm = input.dia_semana.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+      const [rTurnos, rClientes] = await Promise.all([
+        fetch(`${GYM_API}/turnos`, { headers }),
+        fetch(`${GYM_API}/clientes`, { headers }),
+      ]);
+      const turnos = await rTurnos.json();
+      const todos = await rClientes.json();
+      const telPorId = {};
+      for (const c of (Array.isArray(todos) ? todos : [])) if (c.id && c.telefono) telPorId[c.id] = c.telefono;
+      const turnosDelDia = (Array.isArray(turnos) ? turnos : []).filter(t =>
+        (t.dia_semana || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').includes(diaNorm)
+      );
+      if (!turnosDelDia.length) return { ok: false, mensaje: `Sin turnos para "${input.dia_semana}"` };
+      const enviados = [], sinTel = [], ya = new Set();
+      for (const turno of turnosDelDia) {
+        for (const alumno of (turno.alumnos || [])) {
+          if (ya.has(alumno.id)) continue;
+          ya.add(alumno.id);
+          const tel = telPorId[alumno.id];
+          if (!tel) { sinTel.push(alumno.nombre); continue; }
+          await enviarTemplate(tel, process.env.TEMPLATE_MENSAJE_HOCKEYVIVO,
+            { "1": (alumno.nombre || '').split(' ')[0], "2": input.mensaje }, `[Masivo] ${input.mensaje}`);
+          enviados.push(alumno.nombre);
+        }
+      }
+      return { ok: true, enviados, sin_telefono: sinTel };
+    }
+
+    return { error: `Tool desconocida: ${nombre}` };
+  } catch (err) {
+    return { error: err.message };
+  }
+}
+
+async function manejarConfirmacionPago(mensajeUpper, pago) {
+  if (mensajeUpper === 'SIGUIENTE') {
+    await enviarWhatsApp(process.env.COSACO_WHATSAPP,
+      `💰 *Confirmación de pago*\nCliente: ${pago.cliente_nombre}\nMonto: $${pago.monto}\nMétodo: ${pago.metodo}\n¿Confirmás? SÍ o NO`);
+    return;
+  }
+  await pool.query(`DELETE FROM pagos_pendientes WHERE id = $1`, [pago.id]);
+  if (mensajeUpper === 'SI' || mensajeUpper === 'S') {
+    const hdrs = { Authorization: `Bearer ${GYM_TOKEN}`, 'Content-Type': 'application/json' };
+    const rCli = await fetch(`${GYM_API}/clientes/${pago.cliente_id}`, { headers: hdrs });
+    const cliente = await rCli.json();
+    const hoy = new Date().toISOString().split('T')[0];
+    await fetch(`${GYM_API}/pagos`, {
+      method: 'POST', headers: hdrs,
+      body: JSON.stringify({
+        cliente_id: pago.cliente_id, monto: pago.monto, metodo: pago.metodo,
+        fecha_pago: hoy, fecha_inicio: calcularFechaInicio(cliente),
+        fecha_vencimiento: calcularFechaVencimiento(hoy, cliente.fecha_vencimiento),
+        plan: cliente.plan,
+      }),
+    });
+    await enviarWhatsApp(pago.cliente_from,
+      `✅ Pago registrado: ${pago.cliente_nombre} - $${pago.monto} - ${pago.metodo} 🏑`, pago.cliente_nombre);
+    console.log(`Pago confirmado: ${pago.cliente_nombre} $${pago.monto}`);
+  } else {
+    await enviarWhatsApp(pago.cliente_from,
+      `Quedá tranquilo/a, en breve un integrante del equipo se comunica con vos 🏑`, pago.cliente_nombre);
+  }
+  const { rows: sig } = await pool.query(
+    `SELECT * FROM pagos_pendientes WHERE esperando_confirmacion = true ORDER BY id ASC LIMIT 1`
+  );
+  if (sig.length > 0) {
+    await enviarWhatsApp(process.env.COSACO_WHATSAPP,
+      `💰 Siguiente: ${sig[0].cliente_nombre} - $${sig[0].monto} - ${sig[0].metodo}\n¿Confirmás? SÍ o NO`);
+  }
+}
+
+async function procesarMensaje(mensaje, remitente, profileName = null) {
+  try {
+    const esCosaco = remitente === process.env.COSACO_WHATSAPP;
+    const mensajeUpper = mensaje.trim().toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    const esSiNo = ['SI', 'S', 'NO', 'N'].includes(mensajeUpper);
+
+    if (esCosaco) {
+      if (mensajeUpper === 'PENDIENTES' || mensajeUpper === 'PENDIENTE') {
+        const { rows: pagos } = await pool.query(`SELECT * FROM pagos_pendientes WHERE esperando_confirmacion = true ORDER BY id ASC`);
+        if (pagos.length === 0) {
+          await enviarWhatsApp(process.env.COSACO_WHATSAPP, '✅ No hay pagos pendientes');
+          return;
+        }
+        let res = `📋 *Pagos pendientes* (${pagos.length}):\n`;
+        for (const p of pagos) res += `- ${p.cliente_nombre} - $${p.monto} - ${p.metodo}\n`;
+        await enviarWhatsApp(process.env.COSACO_WHATSAPP, res);
+        return;
+      }
+
+      const { rows: pagosPend } = await pool.query(
+        `SELECT * FROM pagos_pendientes WHERE esperando_confirmacion = true ORDER BY id ASC LIMIT 1`
+      );
+      if (pagosPend.length > 0 && esSiNo) {
+        await manejarConfirmacionPago(mensajeUpper, pagosPend[0]);
+        return;
+      }
+
+      if (suspencionesPendientes.size > 0 && esSiNo) {
+        const [key, susp] = [...suspencionesPendientes.entries()][0];
+        suspencionesPendientes.delete(key);
+        if (mensajeUpper === 'SI' || mensajeUpper === 'S') {
+          await fetch(`${GYM_API}/clientes/${susp.cliente_id}/suspender`, {
+            method: 'DELETE', headers: { Authorization: `Bearer ${GYM_TOKEN}` }
+          });
+          await enviarWhatsApp(process.env.COSACO_WHATSAPP, `✅ ${susp.cliente_nombre} suspendido correctamente`);
+        } else {
+          await enviarWhatsApp(process.env.COSACO_WHATSAPP, `👍 ${susp.cliente_nombre} no fue suspendido`);
+        }
+        return;
+      }
+    }
+
+    if (!esCosaco && ['si', 'sí', 'confirmo', 'dale', 'ok', 'yes'].includes(mensaje.trim().toLowerCase())) {
+      const { rows } = await pool.query('SELECT datos FROM registros_pendientes WHERE telefono = $1', [remitente]);
+      if (rows.length > 0) {
+        const datos = rows[0].datos;
+        if (!GYM_TOKEN) await loginConReintentos(3, 3000);
+        const resultado = await ejecutarTool('registrar_cliente_y_asignar_turno', datos, remitente);
+        await pool.query('DELETE FROM registros_pendientes WHERE telefono = $1', [remitente]);
+        if (resultado.ok) {
+          const turnosData = await ejecutarTool('get_turnos', {}, remitente);
+          const turnosStr = datos.turno_ids.map(id => {
+            const t = Array.isArray(turnosData) ? turnosData.find(t => t.id === id) : null;
+            return t ? `📅 ${t.dia_semana} ${t.hora_inicio}` : `📅 Turno ${id}`;
+          }).join('\n');
+          const texto = `¡Todo listo ${datos.nombre}! Ya quedaste registrado/a en Hockey Vivo 🎉\n\nTus turnos:\n${turnosStr}\n\nNo olvidés traer: 🏑 Palo | 👟 Botines | 💧 Agua\n¡Te esperamos! 💪`;
+          await enviarWhatsApp(remitente, texto, datos.nombre);
+          guardarMensaje(remitente, datos.nombre, texto, 'agente');
+        } else {
+          await enviarWhatsApp(remitente, 'Ya tomamos nota, en breve te confirmamos tu lugar 🏑', datos.nombre);
+          await enviarWhatsApp(process.env.COSACO_WHATSAPP, `⚠️ Error al registrar a ${datos.nombre}: ${resultado.error}`);
+        }
+        return;
+      }
+    }
+
+    if (!GYM_TOKEN) await loginConReintentos(3, 3000);
+    const clienteIdentificado = await buscarClientePorTelefono(remitente);
+    const messages = await getHistorial(remitente);
+    messages.push({ role: 'user', content: mensaje });
+
+    const fechaHoy = new Date().toLocaleDateString('es-AR', {
+      timeZone: 'America/Argentina/Buenos_Aires', weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
+    });
+    const fechaISO = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Argentina/Buenos_Aires' });
+
+    let system = SYSTEM_PROMPT;
+    if (clienteIdentificado) {
+      system += `\n\nCLIENTE IDENTIFICADO: Estás hablando con ${clienteIdentificado.nombre} (plan ${clienteIdentificado.plan}, estado ${clienteIdentificado.estado}, vencimiento ${clienteIdentificado.fecha_vencimiento}). Usá su nombre directamente.`;
+    }
+    system += `\n\nFECHA ACTUAL: ${fechaHoy} (${fechaISO})`;
+
+    while (true) {
+      const respuesta = await anthropic.messages.create({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 1024,
+        system: [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }],
+        tools: TOOLS,
+        messages,
+      });
+
+      if (respuesta.stop_reason !== 'tool_use') {
+        const bloqueTexto = respuesta.content.find(b => b.type === 'text');
+        const texto = bloqueTexto?.text?.trim() || '¡Listo! Si necesitás algo más, avisame 🏑';
+        await twilioClient.messages.create({ from: TWILIO_FROM, to: remitente, body: texto });
+        guardarMensaje(remitente, null, texto, 'agente');
+        break;
+      }
+
+      messages.push({ role: 'assistant', content: respuesta.content });
+      guardarMensaje(remitente, null, '[tool_use]', 'tool_use', respuesta.content);
+      const toolResults = [];
+      for (const bloque of respuesta.content) {
+        if (bloque.type !== 'tool_use') continue;
+        console.log(`Tool: ${bloque.name}`, JSON.stringify(bloque.input).slice(0, 200));
+        const resultado = await ejecutarTool(bloque.name, bloque.input, remitente);
+        console.log(`Resultado ${bloque.name}:`, JSON.stringify(resultado).slice(0, 200));
+        toolResults.push({ type: 'tool_result', tool_use_id: bloque.id, content: JSON.stringify(resultado) });
+      }
+      messages.push({ role: 'user', content: toolResults });
+      guardarMensaje(remitente, null, '[tool_result]', 'tool_result', toolResults);
+    }
+  } catch (err) {
+    console.error(`Error procesando mensaje de ${remitente}:`, err);
+  }
+}
+
+async function clientesPorGrupo(diaGrupo, tipoJob) {
+  try {
+    const r = await fetch(`${GYM_API}/vencimientos`, { headers: { Authorization: `Bearer ${GYM_TOKEN}` } });
+    const data = await r.json();
+    const clientes = Array.isArray(data) ? data : (data[`dia${diaGrupo}`] || []);
+    const hoy = new Date();
+    return clientes.filter(c => {
+      if (!c.vencimiento) return false;
+      const venc = new Date(c.vencimiento + 'T12:00:00');
+      const dias = Math.floor((hoy - venc) / 86400000);
+      c.dias_vencido = dias;
+      if (venc.getDate() !== diaGrupo) return false;
+      if (tipoJob === 'recordatorio') return c.estado === 'Vigente' && dias >= -1 && dias <= 0;
+      if (tipoJob === 'mora') return dias >= 4 && dias <= 6;
+      if (tipoJob === 'suspension') return dias >= 9 && dias <= 11;
+      return false;
+    });
+  } catch (err) {
+    console.error('Error clientesPorGrupo:', err.message);
+    return [];
+  }
+}
+
+async function runJob(diaGrupo, tipoJob) {
+  const clientes = await clientesPorGrupo(diaGrupo, tipoJob);
+  const templateMap = {
+    recordatorio: process.env.TEMPLATE_RECORDATORIO,
+    mora: process.env.TEMPLATE_MORA,
+    suspension: process.env.TEMPLATE_SUSPENSION,
+  };
+  for (const c of clientes) {
+    await enviarTemplate(c.telefono, templateMap[tipoJob], { "1": c.nombre.split(' ')[0] }, `[${tipoJob}]`);
+    if (tipoJob === 'suspension') {
+      setTimeout(async () => {
+        suspencionesPendientes.set(c.id.toString(), { cliente_id: c.id, cliente_nombre: c.nombre, telefono: c.telefono });
+        await enviarWhatsApp(process.env.COSACO_WHATSAPP,
+          `⚠️ ${c.nombre} lleva 10 días sin pagar. ¿Suspendo su servicio?\nRespondé SÍ o NO`);
+      }, 60 * 60 * 1000);
+    }
+  }
+  console.log(`Job ${tipoJob} grupo ${diaGrupo}: ${clientes.length} clientes`);
+}
+
+cron.schedule('0 13 4 * *',  () => runJob(5, 'recordatorio'));
+cron.schedule('0 13 14 * *', () => runJob(15, 'recordatorio'));
+cron.schedule('0 13 24 * *', () => runJob(25, 'recordatorio'));
+cron.schedule('0 13 9 * *',  () => runJob(5, 'mora'));
+cron.schedule('0 13 19 * *', () => runJob(15, 'mora'));
+cron.schedule('0 13 29 * *', () => runJob(25, 'mora'));
+cron.schedule('0 13 15 * *', () => runJob(5, 'suspension'));
+cron.schedule('0 13 25 * *', () => runJob(15, 'suspension'));
+cron.schedule('0 13 5 * *',  () => runJob(25, 'suspension'));
+
+cron.schedule('0 12 * * *', async () => {
+  try {
+    const r = await fetch(`${GYM_API}/cumpleanos`, { headers: { Authorization: `Bearer ${GYM_TOKEN}` } });
+    const data = await r.json();
+    const hoy = new Date();
+    const cumpleaneros = (Array.isArray(data) ? data : []).filter(c => {
+      if (!c.fecha_nacimiento) return false;
+      const f = new Date(c.fecha_nacimiento + 'T12:00:00');
+      return f.getDate() === hoy.getDate() && f.getMonth() === hoy.getMonth();
+    });
+    for (const c of cumpleaneros) {
+      await enviarTemplate(c.telefono, process.env.TEMPLATE_CUMPLEANOS, { "1": c.nombre.split(' ')[0] }, '[Cumpleaños]');
+      await enviarWhatsApp(process.env.COSACO_WHATSAPP, `🎂 Hoy es el cumpleaños de ${c.nombre}! Saludalo desde tu celular 🏑`);
+    }
+    console.log(`Cumpleaños enviados: ${cumpleaneros.length}`);
+  } catch (err) { console.error('Error cron cumpleaños:', err.message); }
+});
+
+cron.schedule('5 12 * * *', async () => {
+  try {
+    const hoy = new Date().toLocaleDateString('es-AR', {
+      timeZone: 'America/Argentina/Buenos_Aires', day: '2-digit', month: '2-digit', year: 'numeric',
+    });
+    const informe = `📊 *Informe del día — ${hoy}*\n\n_Hockey Vivo está activo y operativo. 🏑_\n\n_Hasta mañana Cosaco! 🏑_`;
+    await enviarTemplate(
+      process.env.COSACO_WHATSAPP.replace('whatsapp:+54', ''),
+      process.env.TEMPLATE_MENSAJE_HOCKEYVIVO,
+      { "1": informe }, informe
+    );
+    console.log('Informe diario enviado');
+  } catch (err) { console.error('Error cron informe:', err.message); }
+});
+
+app.post('/webhook', (req, res) => {
+  const mensaje = req.body.Body;
+  const remitente = req.body.From;
+  const profileName = req.body.ProfileName || remitente;
+  guardarMensaje(remitente, profileName, mensaje || '[imagen]', 'cliente');
+  res.type('text/xml').send(new twilio.twiml.MessagingResponse().toString());
+  if (parseInt(req.body.NumMedia) > 0 && (!mensaje || !mensaje.trim())) {
+    const resp = 'Hola! 👋 Recibí tu imagen pero no puedo leerla. ¿Me podés escribir de qué se trata? 🏑';
+    twilioClient.messages.create({ from: TWILIO_FROM, to: remitente, body: resp })
+      .then(() => guardarMensaje(remitente, null, resp, 'agente'))
+      .catch(err => console.error('Error respondiendo imagen:', err.message));
+    return;
+  }
+  procesarMensaje(mensaje, remitente, profileName);
+});
+
+app.get('/panel', async (req, res) => {
+  try {
+    const { rows: hilos } = await pool.query(`
+      SELECT c.telefono,
+        COALESCE((SELECT nombre FROM conversaciones n WHERE n.telefono = c.telefono AND n.nombre IS NOT NULL ORDER BY n.timestamp DESC LIMIT 1), c.telefono) AS nombre,
+        c.texto AS ultimo_texto, c.timestamp AS ultimo_timestamp
+      FROM conversaciones c
+      WHERE c.id = (SELECT id FROM conversaciones sub WHERE sub.telefono = c.telefono ORDER BY sub.timestamp DESC LIMIT 1)
+      ORDER BY c.timestamp DESC
+    `);
+    const tiempoRel = (ts) => {
+      const min = Math.floor((Date.now() - new Date(ts).getTime()) / 60000);
+      if (min < 1) return 'ahora';
+      if (min < 60) return `hace ${min}m`;
+      const hs = Math.floor(min / 60);
+      return hs < 24 ? `hace ${hs}h` : `hace ${Math.floor(hs / 24)}d`;
+    };
+    const lista = hilos.map(h => {
+      const preview = (h.ultimo_texto || '').slice(0, 60) + ((h.ultimo_texto || '').length > 60 ? '…' : '');
+      const nombre = h.nombre.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      const tel = h.telefono.replace(/'/g, "\\'");
+      return `<div class="hilo" onclick="abrirHilo('${tel}')"><div class="hn">${nombre}</div><div class="hp">${preview.replace(/</g, '&lt;')}</div><div class="ht">${tiempoRel(h.ultimo_timestamp)}</div></div>`;
+    }).join('');
+    const meta = JSON.stringify(hilos.map(h => ({ telefono: h.telefono, nombre: h.nombre }))).replace(/</g, '\\u003c');
+    res.send(`<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Panel Hockey Vivo</title>
+<style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:-apple-system,sans-serif;background:#f0f2f5;height:100dvh;overflow:hidden}.app{display:flex;height:100dvh;max-width:900px;margin:0 auto;background:#fff}.sb{width:340px;min-width:340px;border-right:1px solid #e0e0e0;display:flex;flex-direction:column}.sbh{background:#075e54;color:#fff;padding:16px;font-size:18px;font-weight:600;flex-shrink:0}.hilos{overflow-y:auto;flex:1}.hilo{padding:14px 16px;border-bottom:1px solid #f0f0f0;cursor:pointer}.hilo:active,.hilo.activo{background:#f5f5f5}.hn{font-weight:600;font-size:15px}.hp{font-size:13px;color:#667;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.ht{font-size:11px;color:#999;margin-top:2px}.chat{flex:1;display:flex;flex-direction:column;min-width:0}.ch{background:#075e54;color:#fff;padding:14px 16px;font-size:16px;font-weight:600;display:flex;align-items:center;gap:12px;flex-shrink:0}.bv{display:none;background:none;border:none;color:#fff;font-size:20px;cursor:pointer}.chn{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.msgs{flex:1;overflow-y:auto;padding:16px;background:#e5ddd5}.mw{display:flex;flex-direction:column}.msg{max-width:75%;margin-bottom:10px;padding:8px 12px;border-radius:8px;font-size:14px;line-height:1.4;word-wrap:break-word}.msg.cliente{background:#fff;align-self:flex-start;border-radius:0 8px 8px 8px}.msg.agente,.msg.agente-cosaco{background:#dcf8c6;align-self:flex-end;margin-left:auto;border-radius:8px 0 8px 8px}.mt{font-size:10px;color:#999;margin-top:4px;text-align:right}.ia{padding:10px 16px;background:#f0f2f5;display:flex;gap:8px;align-items:center;flex-shrink:0}.ia input{flex:1;padding:10px 14px;border-radius:24px;border:none;font-size:16px;outline:none}.ia button{background:#075e54;color:#fff;border:none;border-radius:50%;width:42px;height:42px;font-size:18px;cursor:pointer}.ph{display:flex;align-items:center;justify-content:center;height:100%;color:#999}@media(max-width:768px){.app{max-width:100vw}.sb{position:fixed;inset:0;width:100vw;min-width:0;z-index:10;transform:translateX(0);transition:transform .25s}.sb.oculto{transform:translateX(-100%);pointer-events:none}.chat{position:fixed;inset:0;width:100vw;z-index:10;transform:translateX(100%);transition:transform .25s}.chat.visible{transform:translateX(0)}.bv{display:block}.ia{position:sticky;bottom:0;padding-bottom:max(10px,env(safe-area-inset-bottom))}}</style>
+</head><body><div class="app">
+<div class="sb" id="sb"><div class="sbh">Conversaciones</div><div class="hilos">${lista}</div></div>
+<div class="chat" id="chat">
+<div class="ch"><button class="bv" onclick="volver()">←</button><span class="chn" id="chn">Seleccioná una conversación</span></div>
+<div class="msgs" id="msgs"><div class="ph">← Seleccioná una conversación</div></div>
+<div class="ia" id="ia" style="display:none"><input type="text" id="mi" placeholder="Escribí un mensaje..." onkeydown="if(event.key==='Enter')enviar()"><button onclick="enviar()">➤</button></div>
+</div></div>
+<script>
+const meta=${meta};let tel=null;const mob=()=>window.innerWidth<=768;
+async function abrirHilo(t){tel=t;const m=meta.find(x=>x.telefono===t);document.getElementById('chn').textContent=m?m.nombre:t;document.getElementById('msgs').innerHTML='<div class="ph">Cargando...</div>';if(mob()){document.getElementById('sb').classList.add('oculto');document.getElementById('chat').classList.add('visible');}
+const r=await fetch('/panel/hilo?telefono='+encodeURIComponent(t));const d=await r.json();const w=document.createElement('div');w.className='mw';(d.mensajes||[]).forEach(m=>{const div=document.createElement('div');div.className='msg '+m.rol;const h=new Date(m.timestamp).toLocaleTimeString('es-AR',{hour:'2-digit',minute:'2-digit'});div.innerHTML='<div>'+m.texto.replace(/\n/g,'<br>')+'</div><div class="mt">'+h+'</div>';w.appendChild(div);});const c=document.getElementById('msgs');c.innerHTML='';c.appendChild(w);c.scrollTop=c.scrollHeight;document.getElementById('ia').style.display='flex';}
+function volver(){document.getElementById('chat').classList.remove('visible');document.getElementById('sb').classList.remove('oculto');tel=null;}
+async function enviar(){const i=document.getElementById('mi');const t=i.value.trim();if(!t||!tel)return;i.value='';const r=await fetch('/panel/enviar',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({telefono:tel,mensaje:t})});if((await r.json()).ok)location.reload();}
+</script></body></html>`);
+  } catch (err) { res.status(500).send('Error: ' + err.message); }
+});
+
+app.get('/panel/hilo', async (req, res) => {
+  if (!req.query.telefono) return res.status(400).json({ error: 'Falta telefono' });
+  try {
+    const { rows } = await pool.query(
+      'SELECT rol, texto, timestamp FROM conversaciones WHERE telefono = $1 ORDER BY timestamp ASC',
+      [req.query.telefono]
+    );
+    res.json({ mensajes: rows });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/panel/enviar', async (req, res) => {
+  const { telefono, mensaje } = req.body;
+  if (!telefono || !mensaje) return res.status(400).json({ error: 'Faltan datos' });
+  try {
+    let tel = telefono.replace(/\D/g, '');
+    if (tel.startsWith('549')) tel = tel.slice(2);
+    else if (tel.startsWith('54')) tel = tel.slice(2);
+    const to = `whatsapp:+54${tel}`;
+    await twilioClient.messages.create({ from: TWILIO_FROM, to, body: mensaje });
+    guardarMensaje(to, null, mensaje, 'agente-cosaco');
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/admin/importar-telefonos', async (req, res) => {
+  if (req.query.secret !== 'hockeyvivo') return res.status(403).json({ error: 'Acceso denegado' });
+  try {
+    const r = await fetch(`${GYM_API}/clientes`, { headers: { Authorization: `Bearer ${GYM_TOKEN}` } });
+    const clientes = await r.json();
+    let importados = 0;
+    for (const c of (Array.isArray(clientes) ? clientes : [])) {
+      if (!c.telefono || !c.id) continue;
+      let tel = c.telefono.replace(/\D/g, '');
+      if (tel.startsWith('549')) tel = tel.slice(2);
+      else if (tel.startsWith('54')) tel = tel.slice(2);
+      await pool.query(
+        `INSERT INTO telefono_cliente (telefono, cliente_id, cliente_nombre) VALUES ($1, $2, $3)
+         ON CONFLICT (telefono) DO UPDATE SET cliente_id = $2, cliente_nombre = $3, updated_at = NOW()`,
+        [`whatsapp:+54${tel}`, c.id, c.nombre]
+      );
+      importados++;
+    }
+    res.json({ ok: true, importados });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/test-jobs', async (req, res) => {
+  if (req.query.secret !== 'hockeyvivo') return res.status(403).json({ error: 'Acceso denegado' });
+  const job = req.query.job;
+  if (!job) return res.status(400).json({ error: 'job requerido: recordatorio, mora, suspension, cumpleanos, informe' });
+  try {
+    if (['recordatorio', 'mora', 'suspension'].includes(job)) {
+      const dia = new Date().getDate();
+      const grupo = dia <= 10 ? 5 : dia <= 20 ? 15 : 25;
+      await runJob(grupo, job);
+      return res.json({ ok: true, job, grupo });
+    }
+    if (job === 'cumpleanos') {
+      const r = await fetch(`${GYM_API}/cumpleanos`, { headers: { Authorization: `Bearer ${GYM_TOKEN}` } });
+      const data = await r.json();
+      const hoy = new Date();
+      const lista = (Array.isArray(data) ? data : []).filter(c => {
+        if (!c.fecha_nacimiento) return false;
+        const f = new Date(c.fecha_nacimiento + 'T12:00:00');
+        return f.getDate() === hoy.getDate() && f.getMonth() === hoy.getMonth();
+      });
+      for (const c of lista) {
+        await enviarTemplate(c.telefono, process.env.TEMPLATE_CUMPLEANOS, { "1": c.nombre.split(' ')[0] }, '[Cumpleaños]');
+      }
+      return res.json({ ok: true, job, enviados: lista.map(c => c.nombre) });
+    }
+    if (job === 'informe') {
+      const hoy = new Date().toLocaleDateString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires', day: '2-digit', month: '2-digit', year: 'numeric' });
+      const informe = `📊 *Informe — ${hoy}*\n(Test manual)\n_Hockey Vivo 🏑_`;
+      await enviarTemplate(
+        process.env.COSACO_WHATSAPP.replace('whatsapp:+54', ''),
+        process.env.TEMPLATE_MENSAJE_HOCKEYVIVO,
+        { "1": informe }, informe
+      );
+      return res.json({ ok: true, job });
+    }
+    res.status(400).json({ error: `Job desconocido: ${job}` });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Servidor en puerto ${PORT}`);
+  initDB().catch(err => console.error('Error initDB:', err.message));
+  loginConReintentos().catch(() => {});
+});
