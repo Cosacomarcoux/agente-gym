@@ -1005,20 +1005,13 @@ async function abrirHilo(telefono, nombre, divEl) {
 
   for (const m of (d.mensajes || [])) {
     const tx = m.texto || '';
-    const esPlaceholder = !tx || tx === '[sin texto]' || (tx.startsWith('[') && tx.endsWith(']'));
+    if (!tx || tx === '[sin texto]' || (tx.startsWith('[') && tx.endsWith(']'))) continue;
 
     const div = document.createElement('div');
-    div.className = 'msg ' + m.rol + (esPlaceholder ? ' ph-msg' : '');
+    div.className = 'msg ' + m.rol;
 
     const content = document.createElement('div');
-    if (esPlaceholder) {
-      const span = document.createElement('span');
-      span.className = 'ph-txt';
-      span.textContent = tx;
-      content.appendChild(span);
-    } else {
-      content.textContent = tx;
-    }
+    content.textContent = tx;
 
     const time = document.createElement('div');
     time.className = 'msg-time';
