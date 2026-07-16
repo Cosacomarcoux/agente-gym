@@ -211,62 +211,35 @@ INFO DEL GIMNASIO (solo cuando pregunten puntualmente):
 - Primera clase GRATIS. Luego se abona el mes por adelantado.
 - Cupos en tiempo real: https://hockeyvivo.up.railway.app/cupos
 
-Cuando pregunten qué es Hockey Vivo o info general, respondé:
+Cuando pregunten qué es Hockey Vivo:
 "Hockey Vivo es un espacio de entrenamiento creado por un jugador de hockey con una perspectiva diferente: un lugar exclusivo para que mejores tu rendimiento en la cancha de forma real y medible.
-
 Cada jugador que entrena con nosotros empieza a notar mejoras desde las primeras semanas:
 🏑 Cada rutina está diseñada exclusivamente para hockey.
 🏑 Entrenamos en estaciones que fortalecen y enriquecen tu técnica.
 🏑 Tenés seguimiento constante para potenciar tu estilo de juego.
+Máximo 6 personas por turno. La primera clase es GRATIS. Si decidís quedarte, se abona el mes por adelantado. 🏑"
 
-Máximo 6 personas por turno para que siempre tengas la atención que necesitás.
-La primera clase es GRATIS. Si decidís quedarte, se abona el mes por adelantado. 🏑"
-
-RESERVAS:
-Cuando llegue mensaje de reserva web ("Hola! Me interesa reservar lugar..."):
-1. Extraer: nombre, fecha_nacimiento, whatsapp, equipo, nivel, turnos solicitados
-2. Máximo 3 turnos. Si piden más: 'Nuestros planes son de hasta 3 veces por semana 🏑 ¿Cuáles 3 preferís?'
-3. Usar get_turnos para verificar cupo (cupo_usado < cupo_maximo)
-4. Si hay lugar → llamar guardar_registro_pendiente PRIMERO, luego preguntar: '¿Confirmás tu inscripción en Hockey Vivo?'
-5. NUNCA registrar el cliente directamente. El sistema intercepta el SÍ automáticamente.
-Si no hay lugar → mandar a https://hockeyvivo.up.railway.app/cupos
-
-PAGOS (flujo obligatorio):
-1. Cliente menciona que pagó → pedí nombre y método si no los tenés
-2. Buscá con get_clientes
-3. Llamá SIEMPRE consultar_pago_a_cosaco (nunca saltear)
-4. Decí: 'Gracias! Ya le avisé al equipo para confirmar tu pago. En breve te avisamos 🏑'
-PROHIBIDO: decir 'quedó registrado' sin haber llamado consultar_pago_a_cosaco.
-'Quiero pagar' = intención futura → informar alias y preguntar si ya lo hizo.
-'Pagué/transferí' = pago realizado → iniciar flujo.
-
-BAJA DE CLIENTE:
-Cuando un cliente diga que no continúa → notificar a Cosaco (enviar_mensaje_cliente general) → esperar confirmación → suspender_cliente.
+IMPORTANTE: El sistema maneja automáticamente reservas, confirmaciones de inscripción, pagos reportados y solicitudes de baja. Solo respondé preguntas generales sobre el gimnasio, saludos y consultas que no sean acciones críticas.
 
 TURNOS:
-Al confirmar registro/cambio, mostrar día y horario de cada turno asignado.
+Al confirmar cambio de turno, mostrar día y horario asignado.
 Palabra 'sacar': preguntar siempre si quiere eliminar o agregar antes de actuar.
-Nunca confirmar cambio de turno sin haber llamado gestionar_turnos_cliente primero.
+Nunca confirmar cambio sin haber llamado gestionar_turnos_cliente primero.
 
 SI NO PODÉS RESOLVER ALGO: 'Te paso con el equipo de Hockey Vivo, en breve te contactamos 🏑'
 
 MODO SECRETARIO (solo número de Cosaco):
-Sos su asistente administrativo. Podés:
-1. Enviar mensajes a clientes SIEMPRE con tools (nunca texto libre):
-   recordatorio/mora/suspension/pago_confirmado/general → enviar_mensaje_cliente
-   mensaje masivo por día → enviar_mensaje_masivo
-2. Buscar info de clientes con get_clientes
-3. Registrar pagos en efectivo → flujo normal de pago
-4. Gestión: registrar clientes, cambiar turnos, suspender
-5. Suspender cliente: buscar → confirmar → solo si confirma → suspender_cliente
-Respondé a Cosaco de forma concisa confirmando lo que hiciste.
+Sos su asistente administrativo. Usá las tools disponibles para:
+- Buscar info de clientes con get_clientes
+- Enviar templates con enviar_mensaje_cliente (recordatorio/mora/suspension/pago_confirmado/general)
+- Mensajes masivos por día con enviar_mensaje_masivo
+- Cambiar turnos con gestionar_turnos_cliente
+Respondé de forma concisa confirmando lo que hiciste.
 
-COMANDOS RÁPIDOS (solo número de Cosaco +5493855857000):
-- 'Mandále un recordatorio/mora/suspensión/pago confirmado a [Nombre]' → enviar_mensaje_cliente con el template_tipo correcto
-- '[Nombre Apellido] pagó $[monto] en efectivo' → flujo normal de pago (get_clientes → consultar_pago_a_cosaco)
-- 'Suspendé a [Nombre Apellido]' → get_clientes → confirmar → suspender_cliente
-- 'Pendientes' → mostrar pagos y suspensiones esperando confirmación
-- 'Mandales a todos los del [día] que [mensaje]' → enviar_mensaje_masivo`;
+COMANDOS SECRETARIO:
+- 'Mandále un recordatorio/mora/suspensión/pago confirmado a [Nombre]' → enviar_mensaje_cliente
+- 'Mandales a todos los del [día] que [mensaje]' → enviar_mensaje_masivo
+- 'Cambiá los turnos de [Nombre]' → get_clientes → gestionar_turnos_cliente`;
 
 const TOOLS = [
   {
@@ -636,7 +609,9 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
     const mensajeUpper = mensaje.trim().toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
     const esSiNo = ['SI', 'S', 'NO', 'N'].includes(mensajeUpper);
 
+    // ── 1. MODO SECRETARIO (solo Cosaco) ──────────────────────────────────
     if (esCosaco) {
+      // "pendientes"
       if (mensajeUpper === 'PENDIENTES' || mensajeUpper === 'PENDIENTE') {
         const { rows: pagos } = await pool.query(`SELECT * FROM pagos_pendientes WHERE esperando_confirmacion = true ORDER BY id ASC`);
         const { rows: susps } = await pool.query(`SELECT * FROM suspensiones_pendientes WHERE esperando_confirmacion = true ORDER BY timestamp ASC`);
@@ -644,19 +619,20 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
           await enviarWhatsApp(process.env.COSACO_WHATSAPP, '✅ No hay pendientes de confirmación');
           return;
         }
-        let res = `📋 *Pendientes de confirmación:*\n`;
+        let res = '📋 Pendientes:\n';
         if (pagos.length > 0) {
-          res += `\n💰 *Pagos* (${pagos.length}):\n`;
-          for (const p of pagos) res += `- ${p.cliente_nombre} - $${p.monto} - ${p.metodo}\n`;
+          res += `\n💰 Pagos (${pagos.length}):\n`;
+          for (const p of pagos) res += `- ${p.cliente_nombre} $${p.monto} ${p.metodo}\n`;
         }
         if (susps.length > 0) {
-          res += `\n⚠️ *Suspensiones* (${susps.length}):\n`;
+          res += `\n⚠️ Suspensiones (${susps.length}):\n`;
           for (const s of susps) res += `- ${s.cliente_nombre}\n`;
         }
         await enviarWhatsApp(process.env.COSACO_WHATSAPP, res);
         return;
       }
 
+      // Si/No → pago pendiente
       const { rows: pagosPend } = await pool.query(
         `SELECT * FROM pagos_pendientes WHERE esperando_confirmacion = true ORDER BY id ASC LIMIT 1`
       );
@@ -665,6 +641,7 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
         return;
       }
 
+      // Si/No → suspensión pendiente
       const { rows: suspsPend } = await pool.query(
         `SELECT * FROM suspensiones_pendientes WHERE esperando_confirmacion = true ORDER BY timestamp ASC LIMIT 1`
       );
@@ -684,12 +661,127 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
         );
         if (sig.length > 0) {
           await enviarWhatsApp(process.env.COSACO_WHATSAPP,
-            `⚠️ Siguiente: ${sig[0].cliente_nombre} lleva 10 días sin pagar. ¿Suspendo?\nRespondé SÍ o NO`);
+            `⚠️ Siguiente: ${sig[0].cliente_nombre} lleva días sin pagar. ¿Suspendo? SÍ o NO`);
         }
         return;
       }
+
+      // "[Nombre] pagó $[monto] en efectivo"
+      const matchPagoEfectivo = mensaje.match(/^(.+?)\s+pag[oó]\s+\$?([\d.,]+)\s+en\s+efectivo/i);
+      if (matchPagoEfectivo) {
+        const nombreBuscar = matchPagoEfectivo[1].trim();
+        const monto = parseFloat(matchPagoEfectivo[2].replace(/\./g, '').replace(',', '.'));
+        if (!GYM_TOKEN) await loginConReintentos(3, 3000);
+        const clientes = await ejecutarTool('get_clientes', { buscar: nombreBuscar }, remitente);
+        if (Array.isArray(clientes) && clientes.length > 0) {
+          const cliente = clientes[0];
+          await pool.query(
+            `INSERT INTO pagos_pendientes (cliente_id, cliente_nombre, cliente_from, monto, metodo) VALUES ($1, $2, $3, $4, $5)`,
+            [cliente.id, cliente.nombre, remitente, monto, 'Efectivo']
+          );
+          const { rows: existing } = await pool.query(`SELECT COUNT(*) AS count FROM pagos_pendientes WHERE esperando_confirmacion = true`);
+          if (parseInt(existing[0].count) > 1) {
+            await enviarWhatsApp(process.env.COSACO_WHATSAPP, `✅ Pago de ${cliente.nombre} $${monto} encolado`);
+          } else {
+            await enviarWhatsApp(process.env.COSACO_WHATSAPP,
+              `💰 ${cliente.nombre} - $${monto} - Efectivo\n¿Confirmás? SÍ o NO`);
+          }
+        } else {
+          await enviarWhatsApp(process.env.COSACO_WHATSAPP, `⚠️ No encontré cliente con el nombre "${nombreBuscar}"`);
+        }
+        return;
+      }
+
+      // "suspendé a [nombre]"
+      const matchSuspender = mensaje.match(/suspen[dé]+\s+a\s+(.+)/i);
+      if (matchSuspender) {
+        const nombreBuscar = matchSuspender[1].trim();
+        if (!GYM_TOKEN) await loginConReintentos(3, 3000);
+        const clientes = await ejecutarTool('get_clientes', { buscar: nombreBuscar }, remitente);
+        if (Array.isArray(clientes) && clientes.length > 0) {
+          const cliente = clientes[0];
+          await pool.query(
+            `INSERT INTO suspensiones_pendientes (cliente_id, cliente_nombre, esperando_confirmacion) VALUES ($1, $2, true)`,
+            [cliente.id, cliente.nombre]
+          );
+          await enviarWhatsApp(process.env.COSACO_WHATSAPP, `⚠️ ¿Suspendés a ${cliente.nombre}? SÍ o NO`);
+        } else {
+          await enviarWhatsApp(process.env.COSACO_WHATSAPP, `⚠️ No encontré cliente con el nombre "${nombreBuscar}"`);
+        }
+        return;
+      }
+
+      // Todo lo demás de Cosaco → Claude (fall through)
     }
 
+    // ── 2. MENSAJE DE RESERVA ──────────────────────────────────────────────
+    const esReserva = /me interesa reservar lugar en hockey vivo/i.test(mensaje) ||
+      (/turnos elegidos:/i.test(mensaje) && /mis datos:/i.test(mensaje));
+
+    if (esReserva) {
+      const extraer = (pattern) => mensaje.match(pattern)?.[1]?.trim() || '';
+      const nombre = extraer(/nombre[:\s]+([^\n\r]+)/i);
+      const apellido = extraer(/apellido[:\s]+([^\n\r]+)/i);
+      const nacimiento = extraer(/(?:nacimiento|fecha de nacimiento)[:\s]+([^\n\r]+)/i);
+      const whatsapp = extraer(/whatsapp[:\s]+([^\n\r]+)/i);
+      const equipo = extraer(/equipo[:\s]+([^\n\r]+)/i);
+
+      // Extraer líneas de turnos
+      const bloqueTurnos = mensaje.match(/turnos elegidos[\s\S]*$/i)?.[0] || '';
+      const lineasTurnos = bloqueTurnos.split('\n')
+        .filter(l => /lunes|martes|mi[eé]rcoles|jueves|viernes/i.test(l));
+
+      if (!GYM_TOKEN) await loginConReintentos(3, 3000);
+      const turnosData = await ejecutarTool('get_turnos', {}, remitente);
+      const turnos = Array.isArray(turnosData) ? turnosData : [];
+
+      const normStr = s => (s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+      const turnoIds = [];
+      const turnosTexto = [];
+
+      for (const linea of lineasTurnos) {
+        const lineaNorm = normStr(linea);
+        const match = turnos.find(t =>
+          !turnoIds.includes(t.id) &&
+          lineaNorm.includes(normStr(t.dia_semana)) &&
+          (t.hora_inicio ? lineaNorm.includes(t.hora_inicio.slice(0, 5)) : true)
+        );
+        if (match) {
+          turnoIds.push(match.id);
+          turnosTexto.push(`${match.dia_semana} ${match.hora_inicio}`);
+        }
+      }
+
+      if (turnoIds.length === 0) {
+        await enviarWhatsApp(remitente,
+          `Hola${nombre ? ' ' + nombre : ''}! Vi tu consulta pero no pude identificar los turnos. Podés ver los disponibles en: https://hockeyvivo.up.railway.app/cupos 🏑`,
+          nombre || null);
+        return;
+      }
+
+      const sinCupo = turnos.filter(t => turnoIds.includes(t.id) && t.cupo_usado >= t.cupo_maximo);
+      if (sinCupo.length > 0) {
+        await enviarWhatsApp(remitente,
+          `Hola${nombre ? ' ' + nombre : ''}! Lamentablemente los turnos que pediste no tienen lugar disponible. Podés ver los cupos en: https://hockeyvivo.up.railway.app/cupos 🏑`,
+          nombre || null);
+        return;
+      }
+
+      const telefonoFinal = whatsapp || remitente;
+      const datos = { nombre, apellido, telefono: telefonoFinal, fecha_nacimiento: nacimiento, club: equipo, turno_ids: turnoIds };
+      await pool.query(
+        'INSERT INTO registros_pendientes (telefono, datos) VALUES ($1, $2) ON CONFLICT (telefono) DO UPDATE SET datos = $2, timestamp = NOW()',
+        [remitente, JSON.stringify(datos)]
+      );
+
+      const turnosStr = turnosTexto.join(', ');
+      await enviarWhatsApp(remitente,
+        `¡Hola ${nombre}! Verificamos y ${turnosStr} ${turnoIds.length > 1 ? 'tienen' : 'tiene'} lugar disponible 🏑\n¿Confirmás tu inscripción en Hockey Vivo?`,
+        nombre);
+      return;
+    }
+
+    // ── 3. CONFIRMACIÓN DE INSCRIPCIÓN ─────────────────────────────────────
     if (!esCosaco && ['si', 'sí', 'confirmo', 'dale', 'ok', 'yes'].includes(mensaje.trim().toLowerCase())) {
       const { rows } = await pool.query('SELECT datos FROM registros_pendientes WHERE telefono = $1', [remitente]);
       if (rows.length > 0) {
@@ -714,6 +806,45 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
       }
     }
 
+    // ── 4. INTENCIÓN DE PAGO ───────────────────────────────────────────────
+    if (!esCosaco) {
+      const esPagoRealizado = /pagu[eé]|transfer[ií]|hice el pago|ya pagu[eé]|acabo de transferir/i.test(mensaje);
+      const esIntFutura = /quiero pagar|voy a pagar|puedo pagar|c[oó]mo pago|quisiera pagar/i.test(mensaje);
+      if (esPagoRealizado && !esIntFutura) {
+        if (!GYM_TOKEN) await loginConReintentos(3, 3000);
+        const cliente = await buscarClientePorTelefono(remitente);
+        if (cliente) {
+          await pool.query(
+            `INSERT INTO pagos_pendientes (cliente_id, cliente_nombre, cliente_from, monto, metodo) VALUES ($1, $2, $3, $4, $5)`,
+            [cliente.id, cliente.nombre, remitente, 0, 'Transferencia']
+          );
+          const { rows: existing } = await pool.query(`SELECT COUNT(*) AS count FROM pagos_pendientes WHERE esperando_confirmacion = true`);
+          if (parseInt(existing[0].count) <= 1) {
+            const msg = `💰 Pago pendiente de ${cliente.nombre} (Transferencia)\n¿Confirmás? SÍ o NO`;
+            await twilioClient.messages.create({ from: TWILIO_FROM, to: process.env.COSACO_WHATSAPP, body: msg });
+            guardarMensaje(process.env.COSACO_WHATSAPP, null, msg, 'agente');
+          }
+          await enviarWhatsApp(remitente, `Gracias! Ya le avisé al equipo, en breve te confirmamos 🏑`, cliente.nombre);
+        } else {
+          await enviarWhatsApp(remitente, `¡Gracias por avisarnos! ¿Podés decirme tu nombre completo para identificarte?`);
+        }
+        return;
+      }
+    }
+
+    // ── 5. BAJA DE CLIENTE ─────────────────────────────────────────────────
+    if (!esCosaco) {
+      const esBaja = /no voy a continuar|me doy de baja|quiero darme de baja|no puedo seguir|voy a pausar/i.test(mensaje);
+      if (esBaja) {
+        const nombreMostrar = profileName || remitente;
+        await enviarWhatsApp(process.env.COSACO_WHATSAPP, `⚠️ ${nombreMostrar} quiere darse de baja`);
+        await enviarWhatsApp(remitente,
+          `Lamentamos que te vayas 😔 Ya le avisamos al equipo, en breve se comunican con vos 🏑`, profileName || null);
+        return;
+      }
+    }
+
+    // ── 6. TODO LO DEMÁS → Claude ──────────────────────────────────────────
     if (!GYM_TOKEN) await loginConReintentos(3, 3000);
     const clienteIdentificado = await buscarClientePorTelefono(remitente);
     const messages = await getHistorial(remitente);
