@@ -858,7 +858,7 @@ cron.schedule('5 12 * * *', async () => {
     console.log('COSACO_WHATSAPP valor:', process.env.COSACO_WHATSAPP);
     await enviarTemplate(
       process.env.COSACO_WHATSAPP,
-      process.env.TEMPLATE_MENSAJE_HOCKEYVIVO,
+      process.env.TEMPLATE_NOTIFICACION_COSACO,
       { "1": informe }, informe
     );
     console.log('Informe diario enviado');
