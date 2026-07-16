@@ -128,6 +128,7 @@ async function enviarWhatsApp(telefono, mensaje, nombre = null) {
 }
 
 async function enviarTemplate(telefono, templateSid, variables, textoGuardar = '[Mensaje automático]') {
+  console.log('enviarTemplate recibió telefono:', telefono);
   try {
     let to;
     if (telefono.startsWith('whatsapp:')) {
@@ -854,6 +855,7 @@ cron.schedule('5 12 * * *', async () => {
       timeZone: 'America/Argentina/Buenos_Aires', day: '2-digit', month: '2-digit', year: 'numeric',
     });
     const informe = `📊 *Informe del día — ${hoy}*\n\n_Hockey Vivo está activo y operativo. 🏑_\n\n_Hasta mañana Cosaco! 🏑_`;
+    console.log('COSACO_WHATSAPP valor:', process.env.COSACO_WHATSAPP);
     await enviarTemplate(
       process.env.COSACO_WHATSAPP,
       process.env.TEMPLATE_MENSAJE_HOCKEYVIVO,
