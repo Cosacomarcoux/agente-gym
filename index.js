@@ -129,10 +129,15 @@ async function enviarWhatsApp(telefono, mensaje, nombre = null) {
 
 async function enviarTemplate(telefono, templateSid, variables, textoGuardar = '[Mensaje automático]') {
   try {
-    let tel = telefono.toString().replace(/\D/g, '');
-    if (tel.startsWith('549')) tel = tel.slice(2);
-    else if (tel.startsWith('54')) tel = tel.slice(2);
-    const to = `whatsapp:+54${tel}`;
+    let to;
+    if (telefono.startsWith('whatsapp:')) {
+      to = telefono;
+    } else {
+      let tel = telefono.toString().replace(/\D/g, '');
+      if (tel.startsWith('549')) tel = tel.slice(2);
+      else if (tel.startsWith('54')) tel = tel.slice(2);
+      to = `whatsapp:+54${tel}`;
+    }
     await twilioClient.messages.create({
       from: process.env.TWILIO_WHATSAPP_NUMBER,
       to,
@@ -850,7 +855,7 @@ cron.schedule('5 12 * * *', async () => {
     });
     const informe = `📊 *Informe del día — ${hoy}*\n\n_Hockey Vivo está activo y operativo. 🏑_\n\n_Hasta mañana Cosaco! 🏑_`;
     await enviarTemplate(
-      process.env.COSACO_WHATSAPP.replace('whatsapp:+54', ''),
+      process.env.COSACO_WHATSAPP,
       process.env.TEMPLATE_MENSAJE_HOCKEYVIVO,
       { "1": informe }, informe
     );
@@ -1152,7 +1157,7 @@ app.get('/test-jobs', async (req, res) => {
       const hoy = new Date().toLocaleDateString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires', day: '2-digit', month: '2-digit', year: 'numeric' });
       const informe = `📊 *Informe — ${hoy}*\n(Test manual)\n_Hockey Vivo 🏑_`;
       await enviarTemplate(
-        process.env.COSACO_WHATSAPP.replace('whatsapp:+54', ''),
+        process.env.COSACO_WHATSAPP,
         process.env.TEMPLATE_MENSAJE_HOCKEYVIVO,
         { "1": informe }, informe
       );
