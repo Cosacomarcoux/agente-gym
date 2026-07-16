@@ -104,7 +104,7 @@ function guardarMensaje(from, nombre, texto, rol, contentJson = null) {
 async function getHistorial(from) {
   const result = await pool.query(
     `SELECT rol, texto, content_json FROM conversaciones
-     WHERE telefono = $1 AND rol IN ('cliente', 'agente', 'tool_use', 'tool_result')
+     WHERE telefono = $1 AND rol IN ('cliente', 'agente')
      ORDER BY timestamp DESC LIMIT 20`,
     [from]
   );
@@ -508,9 +508,10 @@ async function ejecutarTool(nombre, input, remitente) {
     }
 
     if (nombre === 'guardar_registro_pendiente') {
+      const telefonoFinal = input.telefono || remitente;
       await pool.query(
         'INSERT INTO registros_pendientes (telefono, datos) VALUES ($1, $2) ON CONFLICT (telefono) DO UPDATE SET datos = $2, timestamp = NOW()',
-        [input.telefono, JSON.stringify(input)]
+        [telefonoFinal, JSON.stringify(input)]
       );
       return { ok: true };
     }
@@ -538,7 +539,7 @@ async function ejecutarTool(nombre, input, remitente) {
       };
       const sid = templateMap[input.template_tipo] || process.env.TEMPLATE_MENSAJE_HOCKEYVIVO;
       let variables;
-      if (input.template_tipo === 'pago_confirmado') variables = { "1": nombre1, "2": String(input.monto) };
+      if (input.template_tipo === 'pago_confirmado') variables = { "1": nombre1, "2": String(input.monto || '') };
       else if (['mora', 'suspension'].includes(input.template_tipo)) variables = { "1": nombre1 };
       else variables = { "1": nombre1, "2": input.mensaje || '' };
       await enviarTemplate(cliente.telefono, sid, variables, input.mensaje || null);
