@@ -1166,7 +1166,7 @@ app.get('/test-jobs', async (req, res) => {
       const informe = `📊 *Informe — ${hoy}*\n(Test manual)\n_Hockey Vivo 🏑_`;
       await enviarTemplate(
         process.env.COSACO_WHATSAPP,
-        process.env.TEMPLATE_MENSAJE_HOCKEYVIVO,
+        process.env.TEMPLATE_NOTIFICACION_COSACO,
         { "1": informe }, informe
       );
       return res.json({ ok: true, job });
