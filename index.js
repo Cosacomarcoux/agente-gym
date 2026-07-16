@@ -139,6 +139,12 @@ async function enviarTemplate(telefono, templateSid, variables, textoGuardar = '
       else if (tel.startsWith('54')) tel = tel.slice(2);
       to = `whatsapp:+54${tel}`;
     }
+    console.log('Twilio params:', JSON.stringify({
+      from: process.env.TWILIO_WHATSAPP_NUMBER,
+      to,
+      contentSid: templateSid,
+      contentVariables: JSON.stringify(variables),
+    }));
     await twilioClient.messages.create({
       from: process.env.TWILIO_WHATSAPP_NUMBER,
       to,
