@@ -860,7 +860,7 @@ cron.schedule('5 12 * * *', async () => {
     const hoy = new Date().toLocaleDateString('es-AR', {
       timeZone: 'America/Argentina/Buenos_Aires', day: '2-digit', month: '2-digit', year: 'numeric',
     });
-    const informe = `Informe del dia ${hoy}\nMensajes: -\nNuevos clientes: -\nPagos: $-\nTurnos cambiados: -\nHasta manana Cosaco!`;
+    const informe = `Informe del dia ${hoy} | Mensajes: - | Nuevos clientes: - | Pagos: $- | Turnos: - | Hasta manana Cosaco!`;
     console.log('COSACO_WHATSAPP valor:', process.env.COSACO_WHATSAPP);
     await enviarTemplate(
       process.env.COSACO_WHATSAPP,
@@ -1163,7 +1163,7 @@ app.get('/test-jobs', async (req, res) => {
     }
     if (job === 'informe') {
       const hoy = new Date().toLocaleDateString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires', day: '2-digit', month: '2-digit', year: 'numeric' });
-      const informe = `Informe del dia ${hoy}\nMensajes: -\nNuevos clientes: -\nPagos: $-\nTurnos cambiados: -\nHasta manana Cosaco!`;
+      const informe = `Informe del dia ${hoy} | Mensajes: - | Nuevos clientes: - | Pagos: $- | Turnos: - | Hasta manana Cosaco!`;
       await enviarTemplate(
         process.env.COSACO_WHATSAPP,
         process.env.TEMPLATE_NOTIFICACION_COSACO,
