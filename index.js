@@ -1162,8 +1162,7 @@ app.get('/test-jobs', async (req, res) => {
       return res.json({ ok: true, job, enviados: lista.map(c => c.nombre) });
     }
     if (job === 'informe') {
-      const hoy = new Date().toLocaleDateString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires', day: '2-digit', month: '2-digit', year: 'numeric' });
-      const informe = `📊 *Informe — ${hoy}*\n(Test manual)\n_Hockey Vivo 🏑_`;
+      const informe = 'Informe del dia ' + new Date().toLocaleDateString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' });
       await enviarTemplate(
         process.env.COSACO_WHATSAPP,
         process.env.TEMPLATE_NOTIFICACION_COSACO,
