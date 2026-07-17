@@ -614,8 +614,10 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
     if (esCosaco) {
       // "pendientes"
       if (mensajeUpper === 'PENDIENTES' || mensajeUpper === 'PENDIENTE') {
+        console.log('Procesando pendientes para Cosaco...');
         const { rows: pagos } = await pool.query(`SELECT * FROM pagos_pendientes WHERE esperando_confirmacion = true ORDER BY id ASC`);
         const { rows: susps } = await pool.query(`SELECT * FROM suspensiones_pendientes WHERE esperando_confirmacion = true ORDER BY timestamp ASC`);
+        console.log('Pagos pendientes:', pagos.length, '| Suspensiones:', susps.length);
         if (pagos.length === 0 && susps.length === 0) {
           await enviarWhatsApp(process.env.COSACO_WHATSAPP, '✅ No hay pendientes de confirmación');
           return;
