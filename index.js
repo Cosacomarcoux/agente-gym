@@ -198,6 +198,19 @@ function calcularFechaVencimiento(fecha_pago, fecha_vencimiento_actual) {
   return new Date(fecha.getFullYear(), fecha.getMonth() + meses, diaVenc).toISOString().split('T')[0];
 }
 
+function parsearFecha(fechaStr) {
+  if (!fechaStr) return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(fechaStr)) return fechaStr;
+  const partes = fechaStr.split('/');
+  if (partes.length === 3) {
+    const dia = partes[0].padStart(2, '0');
+    const mes = partes[1].padStart(2, '0');
+    const anio = partes[2];
+    return `${anio}-${mes}-${dia}`;
+  }
+  return fechaStr;
+}
+
 const SYSTEM_PROMPT = `Sos el asistente virtual de Hockey Vivo en Santiago del Estero. Respondés en español argentino, amable y breve. Usá emojis con moderación.
 
 IDENTIFICACIÓN:
@@ -775,7 +788,7 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
       }
 
       const telefonoFinal = whatsapp || remitente;
-      const datos = { nombre, apellido, telefono: telefonoFinal, fecha_nacimiento: nacimiento, club: equipo, turno_ids: turnoIds };
+      const datos = { nombre, apellido, telefono: telefonoFinal, fecha_nacimiento: parsearFecha(nacimiento), club: equipo, turno_ids: turnoIds };
       await pool.query(
         'INSERT INTO registros_pendientes (telefono, datos) VALUES ($1, $2) ON CONFLICT (telefono) DO UPDATE SET datos = $2, timestamp = NOW()',
         [remitente, JSON.stringify(datos)]
