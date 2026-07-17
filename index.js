@@ -606,6 +606,7 @@ async function manejarConfirmacionPago(mensajeUpper, pago) {
 async function procesarMensaje(mensaje, remitente, profileName = null) {
   try {
     const esCosaco = remitente === process.env.COSACO_WHATSAPP;
+    console.log('remitente:', remitente, '| esCosaco:', esCosaco);
     const mensajeUpper = mensaje.trim().toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
     const esSiNo = ['SI', 'S', 'NO', 'N'].includes(mensajeUpper);
 
