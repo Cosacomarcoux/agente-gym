@@ -717,6 +717,10 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
       // Todo lo demás de Cosaco → Claude (fall through)
     }
 
+    console.log('Mensaje a procesar:', mensaje);
+    console.log('Contiene pago?:', /pagu[eé]|transfer[ií]|hice el pago|acabo de transferir/i.test(mensaje));
+    console.log('Contiene reserva?:', /me interesa reservar|turnos elegidos/i.test(mensaje));
+
     // ── 2. MENSAJE DE RESERVA ──────────────────────────────────────────────
     const esReserva = /me interesa reservar lugar en hockey vivo/i.test(mensaje) ||
       (/turnos elegidos:/i.test(mensaje) && /mis datos:/i.test(mensaje));
