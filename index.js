@@ -665,6 +665,8 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
         const susp = suspsPend[0];
         await pool.query(`DELETE FROM suspensiones_pendientes WHERE id = $1`, [susp.id]);
         if (mensajeUpper === 'SI' || mensajeUpper === 'S') {
+          const suspsPendientes = await pool.query('SELECT * FROM suspensiones_pendientes WHERE esperando_confirmacion = true');
+          console.log('Suspensiones pendientes en DB:', suspsPendientes.rows.length);
           await fetch(`${GYM_API}/clientes/${susp.cliente_id}/suspender`, {
             method: 'DELETE', headers: { Authorization: `Bearer ${GYM_TOKEN}` }
           });
@@ -856,8 +858,10 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
     if (!esCosaco) {
       const esBaja = /no voy a continuar|me doy de baja|quiero darme de baja|no puedo seguir|voy a pausar/i.test(mensaje);
       if (esBaja) {
+        console.log('Baja detectada de:', remitente);
         if (!GYM_TOKEN) await loginConReintentos(3, 3000);
         const cliente = await buscarClientePorTelefono(remitente);
+        console.log('Cliente encontrado:', cliente ? cliente.nombre : 'ninguno');
         const nombreMostrar = cliente?.nombre || profileName || remitente;
 
         await enviarWhatsApp(remitente,
