@@ -670,7 +670,7 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
           });
           await enviarWhatsApp(process.env.COSACO_WHATSAPP, `✅ ${susp.cliente_nombre} suspendido correctamente`);
         } else {
-          await enviarWhatsApp(process.env.COSACO_WHATSAPP, `👍 ${susp.cliente_nombre} no fue suspendido`);
+          await enviarWhatsApp(process.env.COSACO_WHATSAPP, `👍 Ok, ${susp.cliente_nombre} no fue suspendido`);
         }
         const { rows: sig } = await pool.query(
           `SELECT * FROM suspensiones_pendientes WHERE esperando_confirmacion = true ORDER BY timestamp ASC LIMIT 1`
@@ -856,10 +856,23 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
     if (!esCosaco) {
       const esBaja = /no voy a continuar|me doy de baja|quiero darme de baja|no puedo seguir|voy a pausar/i.test(mensaje);
       if (esBaja) {
-        const nombreMostrar = profileName || remitente;
-        await enviarWhatsApp(process.env.COSACO_WHATSAPP, `⚠️ ${nombreMostrar} quiere darse de baja`);
+        if (!GYM_TOKEN) await loginConReintentos(3, 3000);
+        const cliente = await buscarClientePorTelefono(remitente);
+        const nombreMostrar = cliente?.nombre || profileName || remitente;
+
         await enviarWhatsApp(remitente,
-          `Lamentamos que te vayas 😔 Ya le avisamos al equipo, en breve se comunican con vos 🏑`, profileName || null);
+          `Lamentamos mucho que te vayas 😔 Antes de que te vayas queremos que sepas que las puertas siempre van a estar abiertas para vos. En unos minutos confirmamos tu baja y preparamos todo para cuando quieras volver. ¡Te esperamos! 🏑`,
+          profileName || null);
+
+        if (cliente?.id) {
+          await pool.query(
+            `INSERT INTO suspensiones_pendientes (cliente_id, cliente_nombre, telefono, esperando_confirmacion) VALUES ($1, $2, $3, true)`,
+            [cliente.id, cliente.nombre, remitente]
+          );
+        }
+
+        await enviarWhatsApp(process.env.COSACO_WHATSAPP,
+          `⚠️ ${nombreMostrar} quiere darse de baja. ¿Confirmás la suspensión? Respondé SÍ o NO`);
         return;
       }
     }
