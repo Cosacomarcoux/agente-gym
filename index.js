@@ -23,6 +23,7 @@ const TWILIO_FROM = process.env.TWILIO_WHATSAPP_NUMBER?.startsWith('whatsapp:')
 let GYM_TOKEN = null;
 const pagosEsperandoNombre = new Map(); // telefono → { monto, metodo }
 const comprobantePendiente = new Map(); // telefono → true (mandó imagen/comprobante)
+const cobrosPendientesDatos = new Map(); // telefonoCosaco → { nombreCliente, metodo, clienteId, clienteNombre }
 
 async function initDB() {
   await pool.query(`
@@ -721,6 +722,30 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
         return;
       }
 
+      // Cosaco mandó solo un número → completar cobro pendiente de datos
+      const matchNumeroSolo = mensaje.match(/^\$?([\d.,]+)\s*(transferencia|efectivo)?$/i);
+      if (matchNumeroSolo && cobrosPendientesDatos.has(remitente)) {
+        const datos = cobrosPendientesDatos.get(remitente);
+        cobrosPendientesDatos.delete(remitente);
+        const monto = parseFloat(matchNumeroSolo[1].replace(/\./g, '').replace(',', '.'));
+        const metodo = matchNumeroSolo[2]
+          ? (matchNumeroSolo[2].charAt(0).toUpperCase() + matchNumeroSolo[2].slice(1).toLowerCase())
+          : datos.metodo || 'Transferencia';
+        await pool.query(`DELETE FROM pagos_pendientes WHERE esperando_confirmacion = true AND cliente_id = $1`, [datos.clienteId]);
+        await pool.query(
+          `INSERT INTO pagos_pendientes (cliente_id, cliente_nombre, cliente_from, monto, metodo) VALUES ($1, $2, $3, $4, $5)`,
+          [datos.clienteId, datos.clienteNombre, remitente, monto, metodo]
+        );
+        const { rows: existing } = await pool.query(`SELECT COUNT(*) AS count FROM pagos_pendientes WHERE esperando_confirmacion = true`);
+        if (parseInt(existing[0].count) > 1) {
+          await enviarWhatsApp(process.env.COSACO_WHATSAPP, `✅ Pago de ${datos.clienteNombre} $${monto} encolado`);
+        } else {
+          await enviarWhatsApp(process.env.COSACO_WHATSAPP,
+            `💰 ${datos.clienteNombre} - $${monto} - ${metodo}\n¿Confirmás? SÍ o NO`);
+        }
+        return;
+      }
+
       // "confirmar/registrar el pago de [Nombre] [$monto] [metodo]"
       const matchConfirmar = mensaje.match(/(?:confirmar?|registrar?)\s+el\s+pago\s+de\s+(.+?)(?:\s+\$?([\d.,]+))?(?:\s+(transferencia|efectivo))?$/i);
       // "[Nombre] pagó/pago [$monto] [metodo]" — solo cuando empieza con nombre
@@ -731,29 +756,38 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
         const nombreBuscar = (matchConfirmar ? matchConfirmar[1] : matchPagoNombre[1]).trim();
         const montoRaw = matchConfirmar ? matchConfirmar[2] : matchPagoNombre[2];
         const metodoRaw = matchConfirmar ? matchConfirmar[3] : matchPagoNombre[3];
-        const monto = montoRaw ? parseFloat(montoRaw.replace(/\./g, '').replace(',', '.')) : 0;
-        const metodo = metodoRaw ? (metodoRaw.charAt(0).toUpperCase() + metodoRaw.slice(1).toLowerCase()) : 'Efectivo';
+        const monto = montoRaw ? parseFloat(montoRaw.replace(/\./g, '').replace(',', '.')) : null;
+        const metodo = metodoRaw
+          ? (metodoRaw.charAt(0).toUpperCase() + metodoRaw.slice(1).toLowerCase())
+          : 'Transferencia';
 
         if (!GYM_TOKEN) await loginConReintentos(3, 3000);
         const clientes = await ejecutarTool('get_clientes', { buscar: nombreBuscar }, remitente);
-        if (Array.isArray(clientes) && clientes.length > 0) {
-          const cliente = clientes[0];
-          // Limpiar pagos no confirmados anteriores para este cliente
-          await pool.query(`DELETE FROM pagos_pendientes WHERE esperando_confirmacion = true AND cliente_id = $1`, [cliente.id]);
-          await pool.query(
-            `INSERT INTO pagos_pendientes (cliente_id, cliente_nombre, cliente_from, monto, metodo) VALUES ($1, $2, $3, $4, $5)`,
-            [cliente.id, cliente.nombre, remitente, monto, metodo]
-          );
-          const { rows: existing } = await pool.query(`SELECT COUNT(*) AS count FROM pagos_pendientes WHERE esperando_confirmacion = true`);
-          const montoStr = monto > 0 ? ` $${monto}` : ' (monto no especificado)';
-          if (parseInt(existing[0].count) > 1) {
-            await enviarWhatsApp(process.env.COSACO_WHATSAPP, `✅ Pago de ${cliente.nombre}${montoStr} encolado`);
-          } else {
-            await enviarWhatsApp(process.env.COSACO_WHATSAPP,
-              `💰 ${cliente.nombre} -${montoStr} - ${metodo}\n¿Confirmás? SÍ o NO`);
-          }
-        } else {
+        if (!Array.isArray(clientes) || clientes.length === 0) {
           await enviarWhatsApp(process.env.COSACO_WHATSAPP, `⚠️ No encontré cliente con el nombre "${nombreBuscar}"`);
+          return;
+        }
+        const cliente = clientes[0];
+
+        // Sin monto → guardar en Map y preguntar
+        if (!monto) {
+          cobrosPendientesDatos.set(remitente, { nombreCliente: nombreBuscar, metodo, clienteId: cliente.id, clienteNombre: cliente.nombre });
+          await enviarWhatsApp(process.env.COSACO_WHATSAPP, `Encontré a ${cliente.nombre}. ¿Cuál fue el monto transferido?`);
+          return;
+        }
+
+        // Con nombre y monto → encolar
+        await pool.query(`DELETE FROM pagos_pendientes WHERE esperando_confirmacion = true AND cliente_id = $1`, [cliente.id]);
+        await pool.query(
+          `INSERT INTO pagos_pendientes (cliente_id, cliente_nombre, cliente_from, monto, metodo) VALUES ($1, $2, $3, $4, $5)`,
+          [cliente.id, cliente.nombre, remitente, monto, metodo]
+        );
+        const { rows: existing } = await pool.query(`SELECT COUNT(*) AS count FROM pagos_pendientes WHERE esperando_confirmacion = true`);
+        if (parseInt(existing[0].count) > 1) {
+          await enviarWhatsApp(process.env.COSACO_WHATSAPP, `✅ Pago de ${cliente.nombre} $${monto} encolado`);
+        } else {
+          await enviarWhatsApp(process.env.COSACO_WHATSAPP,
+            `💰 ${cliente.nombre} - $${monto} - ${metodo}\n¿Confirmás? SÍ o NO`);
         }
         return;
       }
