@@ -1079,6 +1079,8 @@ async function runJob(diaGrupo, tipoJob) {
     const nombre = c.nombre.split(' ')[0];
     const textoGuardar = tipoJob === 'mora'
       ? `Hola ${nombre}! 👋 Te extrañamos en Hockey Vivo Gym y vimos que todavía no se acreditó tu pago. ¿Fue un error o necesitás ayuda con algo? Sabés que siempre podés contar con nosotros. Un abrazo! 🏑`
+      : tipoJob === 'recordatorio'
+      ? `Hola ${nombre}! 👋 Te recordamos que tu cuota de Hockey Vivo está por vencer. Podés transferir al alias hockeyvivo o pagarlo en efectivo en el gimnasio. ¡Cualquier duda avisanos! 🏑`
       : `[${tipoJob}]`;
     await enviarTemplate(c.telefono, templateMap[tipoJob], { "1": nombre }, textoGuardar);
     if (tipoJob === 'suspension') {
