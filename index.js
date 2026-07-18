@@ -1081,6 +1081,8 @@ async function runJob(diaGrupo, tipoJob) {
       ? `Hola ${nombre}! 👋 Te extrañamos en Hockey Vivo Gym y vimos que todavía no se acreditó tu pago. ¿Fue un error o necesitás ayuda con algo? Sabés que siempre podés contar con nosotros. Un abrazo! 🏑`
       : tipoJob === 'recordatorio'
       ? `Hola ${nombre}! 👋 Te recordamos que tu cuota de Hockey Vivo está por vencer. Podés transferir al alias hockeyvivo o pagarlo en efectivo en el gimnasio. ¡Cualquier duda avisanos! 🏑`
+      : tipoJob === 'suspension'
+      ? `Hola ${nombre}! 👋 Tu membresía en Hockey Vivo fue suspendida por falta de pago. Cuando estés listo/a para volver, avisanos y te reactivamos enseguida. ¡Te esperamos! 🏑`
       : `[${tipoJob}]`;
     await enviarTemplate(c.telefono, templateMap[tipoJob], { "1": nombre }, textoGuardar);
     if (tipoJob === 'suspension') {
