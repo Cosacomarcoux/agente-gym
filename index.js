@@ -663,6 +663,55 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
 
     // ── 1. MODO SECRETARIO (solo Cosaco) ──────────────────────────────────
     if (esCosaco) {
+      // Lista de pagos múltiples: 2+ líneas con "Nombre $monto"
+      const lineas = mensaje.split('\n').map(l => l.trim()).filter(l => l);
+      const esPagoMultiple = lineas.length >= 2 && lineas.every(l => /\w+.*\$?[\d.,]+/.test(l));
+      if (esPagoMultiple) {
+        const parsearLinea = (l) => {
+          const matchBeca = l.match(/beca[^\d]*([\d]+)%/i);
+          const beca = matchBeca ? matchBeca[1] : null;
+          const matchMonto = l.match(/\$?([\d.,]+)/);
+          const montoBase = matchMonto ? parseFloat(matchMonto[1].replace(/\./g, '').replace(',', '.')) : 0;
+          const monto = beca ? Math.round(montoBase * (1 - parseInt(beca) / 100)) : montoBase;
+          const nombre = l.replace(/\$?[\d.,]+.*$/, '').replace(/beca.*/i, '').trim();
+          return { nombre, monto, beca };
+        };
+
+        if (!GYM_TOKEN) await loginConReintentos(3, 3000);
+        const procesados = [];
+        for (const linea of lineas) {
+          const { nombre, monto, beca } = parsearLinea(linea);
+          if (!nombre) continue;
+          const clientes = await ejecutarTool('get_clientes', { buscar: nombre }, remitente);
+          if (Array.isArray(clientes) && clientes.length > 0) {
+            const cliente = clientes[0];
+            const metodo = beca ? `Transferencia (Beca ${beca}%)` : 'Transferencia';
+            await pool.query(`DELETE FROM pagos_pendientes WHERE esperando_confirmacion = true AND cliente_id = $1`, [cliente.id]);
+            await pool.query(
+              `INSERT INTO pagos_pendientes (cliente_id, cliente_nombre, cliente_from, monto, metodo) VALUES ($1, $2, $3, $4, $5)`,
+              [cliente.id, cliente.nombre, remitente, monto, metodo]
+            );
+            procesados.push({ nombre: cliente.nombre, monto, beca });
+          } else {
+            procesados.push({ nombre, monto, beca, noEncontrado: true });
+          }
+        }
+
+        const { rows: cola } = await pool.query(`SELECT * FROM pagos_pendientes WHERE esperando_confirmacion = true ORDER BY id ASC`);
+        const formatMonto = n => n.toLocaleString('es-AR');
+        let resumen = `Procesé ${procesados.filter(p => !p.noEncontrado).length} pagos:\n\n`;
+        for (const p of procesados) {
+          if (p.noEncontrado) resumen += `⚠️ No encontré: ${p.nombre}\n`;
+          else resumen += `💰 ${p.nombre} - $${formatMonto(p.monto)}${p.beca ? ` - Beca ${p.beca}%` : ''}\n`;
+        }
+        if (cola.length > 0) {
+          const primero = cola[0];
+          resumen += `\n¿Confirmás el pago de ${primero.cliente_nombre} por $${formatMonto(primero.monto)}? SÍ o NO`;
+        }
+        await enviarWhatsApp(process.env.COSACO_WHATSAPP, resumen);
+        return;
+      }
+
       // "pendientes"
       if (mensajeUpper === 'PENDIENTES' || mensajeUpper === 'PENDIENTE') {
         console.log('Procesando pendientes para Cosaco...');
