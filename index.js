@@ -721,16 +721,25 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
         return;
       }
 
-      // "[Nombre] pagó [monto] [efectivo|transferencia]" — flexible
-      const matchPagoNombre = mensaje.match(/^(.+?)\s+pag[oó]\s*\$?(\d[\d.]*)?[\s,]*(efectivo|transferencia)?/i);
-      if (matchPagoNombre) {
-        const nombreBuscar = matchPagoNombre[1].trim();
-        const monto = matchPagoNombre[2] ? parseFloat(matchPagoNombre[2].replace(/\./g, '')) : 0;
-        const metodo = matchPagoNombre[3] ? (matchPagoNombre[3].charAt(0).toUpperCase() + matchPagoNombre[3].slice(1).toLowerCase()) : 'Efectivo';
+      // "confirmar/registrar el pago de [Nombre] [$monto] [metodo]"
+      const matchConfirmar = mensaje.match(/(?:confirmar?|registrar?)\s+el\s+pago\s+de\s+(.+?)(?:\s+\$?([\d.,]+))?(?:\s+(transferencia|efectivo))?$/i);
+      // "[Nombre] pagó/pago [$monto] [metodo]" — solo cuando empieza con nombre
+      const matchPagoNombre = !matchConfirmar && mensaje.match(/^([A-Za-záéíóúüñÁÉÍÓÚÜÑ\s]+?)\s+pag[oó]\s*\$?([\d.,]+)?[\s,]*(efectivo|transferencia)?$/i);
+
+      const matchPago = matchConfirmar || matchPagoNombre;
+      if (matchPago) {
+        const nombreBuscar = (matchConfirmar ? matchConfirmar[1] : matchPagoNombre[1]).trim();
+        const montoRaw = matchConfirmar ? matchConfirmar[2] : matchPagoNombre[2];
+        const metodoRaw = matchConfirmar ? matchConfirmar[3] : matchPagoNombre[3];
+        const monto = montoRaw ? parseFloat(montoRaw.replace(/\./g, '').replace(',', '.')) : 0;
+        const metodo = metodoRaw ? (metodoRaw.charAt(0).toUpperCase() + metodoRaw.slice(1).toLowerCase()) : 'Efectivo';
+
         if (!GYM_TOKEN) await loginConReintentos(3, 3000);
         const clientes = await ejecutarTool('get_clientes', { buscar: nombreBuscar }, remitente);
         if (Array.isArray(clientes) && clientes.length > 0) {
           const cliente = clientes[0];
+          // Limpiar pagos no confirmados anteriores para este cliente
+          await pool.query(`DELETE FROM pagos_pendientes WHERE esperando_confirmacion = true AND cliente_id = $1`, [cliente.id]);
           await pool.query(
             `INSERT INTO pagos_pendientes (cliente_id, cliente_nombre, cliente_from, monto, metodo) VALUES ($1, $2, $3, $4, $5)`,
             [cliente.id, cliente.nombre, remitente, monto, metodo]
