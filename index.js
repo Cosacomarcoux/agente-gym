@@ -684,6 +684,31 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
         return;
       }
 
+      // "[Nombre] pagó" o "[Nombre] pago" sin monto ni método → efectivo sin monto
+      const matchPagoSimple = mensaje.match(/^(.+)\s+pag[oó]\s*$/i);
+      if (matchPagoSimple) {
+        const nombreBuscar = matchPagoSimple[1].trim();
+        if (!GYM_TOKEN) await loginConReintentos(3, 3000);
+        const clientes = await ejecutarTool('get_clientes', { buscar: nombreBuscar }, remitente);
+        if (Array.isArray(clientes) && clientes.length > 0) {
+          const cliente = clientes[0];
+          await pool.query(
+            `INSERT INTO pagos_pendientes (cliente_id, cliente_nombre, cliente_from, monto, metodo) VALUES ($1, $2, $3, $4, $5)`,
+            [cliente.id, cliente.nombre, remitente, 0, 'Efectivo']
+          );
+          const { rows: existing } = await pool.query(`SELECT COUNT(*) AS count FROM pagos_pendientes WHERE esperando_confirmacion = true`);
+          if (parseInt(existing[0].count) > 1) {
+            await enviarWhatsApp(process.env.COSACO_WHATSAPP, `✅ Pago de ${cliente.nombre} encolado`);
+          } else {
+            await enviarWhatsApp(process.env.COSACO_WHATSAPP,
+              `💰 ${cliente.nombre} - Efectivo (monto no especificado)\n¿Confirmás? SÍ o NO`);
+          }
+        } else {
+          await enviarWhatsApp(process.env.COSACO_WHATSAPP, `⚠️ No encontré cliente con el nombre "${nombreBuscar}"`);
+        }
+        return;
+      }
+
       // "[Nombre] pagó $[monto] en efectivo"
       const matchPagoEfectivo = mensaje.match(/^(.+?)\s+pag[oó]\s+\$?([\d.,]+)\s+en\s+efectivo/i);
       if (matchPagoEfectivo) {
@@ -830,7 +855,7 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
 
     // ── 4. INTENCIÓN DE PAGO ───────────────────────────────────────────────
     if (!esCosaco) {
-      const esPagoRealizado = /pagu[eé]|transfer[ií]|hice el pago|ya pagu[eé]|acabo de transferir/i.test(mensaje);
+      const esPagoRealizado = /pagu[eé]|pago[^s]|transfer[ií]|hice el pago|acabo de transferir|ya pag/i.test(mensaje);
       const esIntFutura = /quiero pagar|voy a pagar|puedo pagar|c[oó]mo pago|quisiera pagar/i.test(mensaje);
       if (esPagoRealizado && !esIntFutura) {
         if (!GYM_TOKEN) await loginConReintentos(3, 3000);
