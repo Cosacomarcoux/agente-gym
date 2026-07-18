@@ -1292,6 +1292,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .app{display:flex;height:100dvh;max-width:900px;margin:0 auto;background:#fff}
 .sb{width:340px;min-width:340px;border-right:1px solid #e0e0e0;display:flex;flex-direction:column}
 .sbh{background:#075e54;color:#fff;padding:16px;font-size:18px;font-weight:600;flex-shrink:0}
+.sbs{padding:8px 10px;border-bottom:1px solid #e0e0e0;flex-shrink:0}
+.sbs input{width:100%;padding:7px 10px;border:1px solid #ddd;border-radius:20px;font-size:13px;outline:none}
+.sbs input:focus{border-color:#075e54}
 .hilos{overflow-y:auto;flex:1}
 .hilo{padding:14px 16px;border-bottom:1px solid #f0f0f0;cursor:pointer}
 .hilo:hover,.hilo.activo{background:#f5f5f5}
@@ -1329,6 +1332,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 <div class="app">
   <div class="sb" id="sb">
     <div class="sbh">Conversaciones</div>
+    <div class="sbs"><input type="text" id="buscador" placeholder="Buscar por nombre o mensaje..."></div>
     <div class="hilos" id="hilos"><div class="ph">Cargando...</div></div>
   </div>
   <div class="chat" id="chat">
@@ -1345,6 +1349,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 </div>
 <script>
 let telefonoActual = null;
+let todosLosHilos = [];
 const mob = () => window.innerWidth <= 768;
 
 function tiempoRel(ts) {
@@ -1355,42 +1360,74 @@ function tiempoRel(ts) {
   return hs < 24 ? 'hace ' + hs + 'h' : 'hace ' + Math.floor(hs / 24) + 'd';
 }
 
+function renderHilos(hilos) {
+  const cont = document.getElementById('hilos');
+  cont.innerHTML = '';
+  if (!hilos || hilos.length === 0) {
+    cont.innerHTML = '<div class="ph">Sin resultados</div>';
+    return;
+  }
+  for (const h of hilos) {
+    const div = document.createElement('div');
+    div.className = 'hilo';
+    const hn = document.createElement('div');
+    hn.className = 'hn';
+    hn.textContent = h.nombre;
+    const hp = document.createElement('div');
+    hp.className = 'hp';
+    hp.textContent = (h.ultimo_texto || '').slice(0, 60);
+    const ht = document.createElement('div');
+    ht.className = 'ht';
+    ht.textContent = h.ultimo_timestamp ? tiempoRel(h.ultimo_timestamp) : '';
+    div.appendChild(hn);
+    div.appendChild(hp);
+    div.appendChild(ht);
+    div.addEventListener('click', () => abrirHilo(h.telefono, h.nombre, div));
+    cont.appendChild(div);
+  }
+}
+
 async function cargarHilos() {
   const cont = document.getElementById('hilos');
   try {
     const r = await fetch('/panel/data');
     const d = await r.json();
-    cont.innerHTML = '';
-    if (!d.hilos || d.hilos.length === 0) {
+    todosLosHilos = d.hilos || [];
+    if (todosLosHilos.length === 0) {
       cont.innerHTML = '<div class="ph">Sin conversaciones</div>';
       return;
     }
-    for (const h of d.hilos) {
-      const div = document.createElement('div');
-      div.className = 'hilo';
-
-      const hn = document.createElement('div');
-      hn.className = 'hn';
-      hn.textContent = h.nombre;
-
-      const hp = document.createElement('div');
-      hp.className = 'hp';
-      hp.textContent = (h.ultimo_texto || '').slice(0, 60);
-
-      const ht = document.createElement('div');
-      ht.className = 'ht';
-      ht.textContent = tiempoRel(h.ultimo_timestamp);
-
-      div.appendChild(hn);
-      div.appendChild(hp);
-      div.appendChild(ht);
-      div.addEventListener('click', () => abrirHilo(h.telefono, h.nombre, div));
-      cont.appendChild(div);
-    }
+    renderHilos(todosLosHilos);
   } catch (err) {
     cont.innerHTML = '<div class="ph">Error cargando conversaciones</div>';
   }
 }
+
+let buscarTimer = null;
+document.getElementById('buscador').addEventListener('input', async function() {
+  const q = this.value.trim();
+  clearTimeout(buscarTimer);
+  if (!q) { renderHilos(todosLosHilos); return; }
+  // Filtro local inmediato
+  const qLow = q.toLowerCase();
+  const local = todosLosHilos.filter(h =>
+    (h.nombre || '').toLowerCase().includes(qLow) ||
+    (h.ultimo_texto || '').toLowerCase().includes(qLow)
+  );
+  renderHilos(local);
+  // Búsqueda en DB si hay 3+ caracteres
+  if (q.length >= 3) {
+    buscarTimer = setTimeout(async () => {
+      try {
+        const r = await fetch('/panel/buscar?q=' + encodeURIComponent(q));
+        const d = await r.json();
+        if (document.getElementById('buscador').value.trim() === q) {
+          renderHilos(d.hilos || []);
+        }
+      } catch (e) {}
+    }, 400);
+  }
+});
 
 async function abrirHilo(telefono, nombre, divEl) {
   telefonoActual = telefono;
@@ -1477,6 +1514,28 @@ app.get('/panel/data', async (req, res) => {
       WHERE c.id = (SELECT id FROM conversaciones sub WHERE sub.telefono = c.telefono ORDER BY sub.timestamp DESC LIMIT 1)
       ORDER BY c.timestamp DESC
     `);
+    res.json({ hilos: rows });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/panel/buscar', async (req, res) => {
+  const q = (req.query.q || '').trim();
+  if (!q) return res.json({ hilos: [] });
+  try {
+    const { rows } = await pool.query(`
+      SELECT DISTINCT ON (c.telefono)
+        c.telefono,
+        COALESCE(
+          (SELECT nombre FROM conversaciones n WHERE n.telefono = c.telefono AND n.nombre IS NOT NULL ORDER BY n.timestamp DESC LIMIT 1),
+          c.telefono
+        ) AS nombre,
+        c.texto AS ultimo_texto,
+        c.timestamp AS ultimo_timestamp
+      FROM conversaciones c
+      WHERE c.nombre ILIKE $1 OR c.texto ILIKE $1
+      ORDER BY c.telefono, c.timestamp DESC
+      LIMIT 20
+    `, [`%${q}%`]);
     res.json({ hilos: rows });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
