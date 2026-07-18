@@ -24,6 +24,7 @@ let GYM_TOKEN = null;
 const pagosEsperandoNombre = new Map(); // telefono → { monto, metodo }
 const comprobantePendiente = new Map(); // telefono → true (mandó imagen/comprobante)
 const cobrosPendientesDatos = new Map(); // telefonoCosaco → { nombreCliente, metodo, clienteId, clienteNombre }
+const tercerTurnoPendiente = new Map(); // telefonoCosaco → { clienteId, clienteNombre, turnoId, clienteFrom }
 
 async function initDB() {
   await pool.query(`
@@ -226,6 +227,12 @@ Cuando llega el mensaje de reserva con formato, verificá cupos con get_turnos y
 TURNOS:
 Al confirmar cambio de turno, mostrar día y horario asignado.
 Nunca confirmar cambio sin haber llamado gestionar_turnos_cliente primero.
+
+LÍMITE DE TURNOS:
+- Máximo 2 turnos por alumno por defecto.
+- Si un alumno quiere un 3er turno, el sistema consulta a Cosaco antes de asignarlo.
+- Si tiene 2 turnos y pide otro: "¿Querés agregar un 3er turno (requiere autorización especial) o cambiar uno de tus turnos actuales?"
+- Si tiene 3 turnos y pide otro, siempre preguntarle cuál quiere cambiar, nunca agregar.
 
 INFORMACIÓN:
 - Dirección: Moreno (N) 55 entre Andes y Rivadavia, Santiago del Estero
@@ -468,6 +475,31 @@ async function ejecutarTool(nombre, input, remitente) {
       for (const id of (input.turno_ids_quitar || [])) {
         const r = await fetch(`${GYM_API}/turnos/${id}/quitar/${input.cliente_id}`, { method: 'DELETE', headers });
         resultados.push({ accion: 'quitar', turno_id: id, ok: r.ok });
+      }
+      if ((input.turno_ids_agregar || []).length > 0) {
+        // Verificar turnos actuales del cliente
+        const rCli = await fetch(`${GYM_API}/clientes/${input.cliente_id}`, { headers });
+        const cliData = await rCli.json();
+        const turnosActuales = (cliData.turnos || []).length;
+        const turnosQuitar = (input.turno_ids_quitar || []).length;
+        const turnosPost = turnosActuales - turnosQuitar + (input.turno_ids_agregar || []).length;
+
+        if (turnosActuales >= 3) {
+          return { ok: false, limite: true, mensaje: `${cliData.nombre} ya tiene ${turnosActuales} turnos. Preguntale cuál quiere cambiar.` };
+        }
+        if (turnosPost > 2) {
+          // Pide 3er turno → guardar pendiente y notificar a Cosaco
+          const turnoId = input.turno_ids_agregar[0];
+          tercerTurnoPendiente.set(process.env.COSACO_WHATSAPP, {
+            clienteId: input.cliente_id,
+            clienteNombre: input.cliente_nombre || cliData.nombre,
+            turnoId,
+            clienteFrom: remitente,
+          });
+          await enviarWhatsApp(process.env.COSACO_WHATSAPP,
+            `⚠️ ${cliData.nombre} quiere agregar un 3er turno (actualmente tiene ${turnosActuales}). ¿Autorizás? SÍ o NO`);
+          return { ok: false, requiere_autorizacion: true, mensaje: 'Tu solicitud fue enviada al equipo para autorización. En breve te confirmamos 🏑' };
+        }
       }
       for (const id of (input.turno_ids_agregar || [])) {
         const r = await fetch(`${GYM_API}/turnos/${id}/asignar/${input.cliente_id}`, { method: 'POST', headers });
@@ -732,6 +764,28 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
           for (const s of susps) res += `- ${s.cliente_nombre}\n`;
         }
         await enviarWhatsApp(process.env.COSACO_WHATSAPP, res);
+        return;
+      }
+
+      // Si/No → tercer turno pendiente de autorización
+      if (esSiNo && tercerTurnoPendiente.has(remitente)) {
+        const datos = tercerTurnoPendiente.get(remitente);
+        tercerTurnoPendiente.delete(remitente);
+        if (mensajeUpper === 'SI' || mensajeUpper === 'S') {
+          if (!GYM_TOKEN) await loginConReintentos(3, 3000);
+          const r = await fetch(`${GYM_API}/turnos/${datos.turnoId}/asignar/${datos.clienteId}`,
+            { method: 'POST', headers: { Authorization: `Bearer ${GYM_TOKEN}` } });
+          if (r.ok) {
+            await enviarWhatsApp(process.env.COSACO_WHATSAPP, `✅ 3er turno asignado a ${datos.clienteNombre}`);
+            await enviarWhatsApp(datos.clienteFrom, `¡Listo! Tu 3er turno fue autorizado y asignado 🏑`, datos.clienteNombre);
+          } else {
+            await enviarWhatsApp(process.env.COSACO_WHATSAPP, `⚠️ Error al asignar el turno a ${datos.clienteNombre}`);
+          }
+        } else {
+          await enviarWhatsApp(process.env.COSACO_WHATSAPP, `👍 3er turno de ${datos.clienteNombre} no autorizado`);
+          await enviarWhatsApp(datos.clienteFrom,
+            `Tu solicitud no fue aprobada por el momento. Podés elegir cambiar uno de tus turnos actuales si querés 🏑`, datos.clienteNombre);
+        }
         return;
       }
 
