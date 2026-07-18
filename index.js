@@ -877,7 +877,10 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
           }
           await enviarWhatsApp(remitente, `Gracias! Ya le avisé al equipo, en breve te confirmamos 🏑`, cliente.nombre);
         } else {
-          pagosEsperandoNombre.set(remitente, { monto: 0, metodo: 'Transferencia' });
+          const matchMonto = mensaje.match(/\$?(\d[\d.,]*)\s*(transferencia|efectivo)?/i);
+          const montoDetectado = matchMonto ? parseFloat(matchMonto[1].replace(/\./g, '').replace(',', '.')) : 0;
+          const metodoDetectado = matchMonto?.[2] ? (matchMonto[2].charAt(0).toUpperCase() + matchMonto[2].slice(1).toLowerCase()) : 'Transferencia';
+          pagosEsperandoNombre.set(remitente, { monto: montoDetectado, metodo: metodoDetectado });
           await enviarWhatsApp(remitente, `¡Gracias por avisarnos! ¿Podés decirme tu nombre completo para identificarte?`);
         }
         return;
