@@ -1076,7 +1076,11 @@ async function runJob(diaGrupo, tipoJob) {
     suspension: process.env.TEMPLATE_SUSPENSION,
   };
   for (const c of clientes) {
-    await enviarTemplate(c.telefono, templateMap[tipoJob], { "1": c.nombre.split(' ')[0] }, `[${tipoJob}]`);
+    const nombre = c.nombre.split(' ')[0];
+    const textoGuardar = tipoJob === 'mora'
+      ? `Hola ${nombre}! 👋 Te extrañamos en Hockey Vivo Gym y vimos que todavía no se acreditó tu pago. ¿Fue un error o necesitás ayuda con algo? Sabés que siempre podés contar con nosotros. Un abrazo! 🏑`
+      : `[${tipoJob}]`;
+    await enviarTemplate(c.telefono, templateMap[tipoJob], { "1": nombre }, textoGuardar);
     if (tipoJob === 'suspension') {
       await pool.query(
         `INSERT INTO suspensiones_pendientes (cliente_id, cliente_nombre, telefono)
