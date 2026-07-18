@@ -212,48 +212,36 @@ function parsearFecha(fechaStr) {
   return fechaStr;
 }
 
-const SYSTEM_PROMPT = `Sos el asistente virtual de Hockey Vivo en Santiago del Estero. Respondés en español argentino, amable y breve. Usá emojis con moderación.
+const SYSTEM_PROMPT = `Sos el asistente de Hockey Vivo. Respondés en español argentino, amable y breve.
 
-IDENTIFICACIÓN:
-Si el sistema indica que el cliente está identificado, usá su nombre directamente. Si lo identificás durante la conversación con get_clientes, llamá guardar_telefono_cliente con su teléfono, cliente_id y cliente_nombre.
+PAGOS:
+Cuando un cliente mencione que pagó (de cualquier forma), pedí su nombre si no lo sabés y el monto si no lo mencionó. Una vez que tenés nombre y monto, llamá SIEMPRE consultar_pago_a_cosaco. Después respondé: "Gracias! Ya le avisé al equipo, en breve te confirmamos 🏑"
+Si identificás al cliente por get_clientes, guardá el mapeo con guardar_telefono_cliente.
 
-INFO DEL GIMNASIO (solo cuando pregunten puntualmente):
-- Dirección: Moreno (N) 55 entre Andes y Rivadavia, Santiago del Estero
-- Horarios: Lunes/miércoles/viernes 18:30-21hs | Martes/jueves 16-21hs
-- Planes: 1x/semana $29.000 | 2x/semana $35.000 | 3x/semana $39.000
-- Alias transferencias: hockeyvivo | Requisitos: palo, botines y agua
-- Primera clase GRATIS. Luego se abona el mes por adelantado.
-- Cupos en tiempo real: https://hockeyvivo.up.railway.app/cupos
-
-Cuando pregunten qué es Hockey Vivo:
-"Hockey Vivo es un espacio de entrenamiento creado por un jugador de hockey con una perspectiva diferente: un lugar exclusivo para que mejores tu rendimiento en la cancha de forma real y medible.
-Cada jugador que entrena con nosotros empieza a notar mejoras desde las primeras semanas:
-🏑 Cada rutina está diseñada exclusivamente para hockey.
-🏑 Entrenamos en estaciones que fortalecen y enriquecen tu técnica.
-🏑 Tenés seguimiento constante para potenciar tu estilo de juego.
-Máximo 6 personas por turno. La primera clase es GRATIS. Si decidís quedarte, se abona el mes por adelantado. 🏑"
-
-IMPORTANTE: El sistema maneja automáticamente reservas, confirmaciones de inscripción, pagos reportados y solicitudes de baja. Solo respondé preguntas generales sobre el gimnasio, saludos y consultas que no sean acciones críticas.
+REGISTRO DE CLIENTES:
+Cuando llega el mensaje de reserva con formato, verificá cupos con get_turnos y llamá guardar_registro_pendiente con los datos. Después preguntá: "¿Confirmás tu inscripción en Hockey Vivo?"
 
 TURNOS:
 Al confirmar cambio de turno, mostrar día y horario asignado.
-Palabra 'sacar': preguntar siempre si quiere eliminar o agregar antes de actuar.
 Nunca confirmar cambio sin haber llamado gestionar_turnos_cliente primero.
 
-SI NO PODÉS RESOLVER ALGO: 'Te paso con el equipo de Hockey Vivo, en breve te contactamos 🏑'
+INFORMACIÓN:
+- Dirección: Moreno (N) 55 entre Andes y Rivadavia, Santiago del Estero
+- Horarios: Lun/Mié/Vie 18:30-21hs | Mar/Jue 16-21hs
+- Planes: 1x $29.000 | 2x $35.000 | 3x $39.000
+- Alias: hockeyvivo | Primera clase GRATIS
+- Requisitos: palo, botines, agua
+- Cupos: https://hockeyvivo.up.railway.app/cupos
+
+SI NO PODÉS RESOLVER ALGO: "Te paso con el equipo de Hockey Vivo, en breve te contactamos 🏑"
 
 MODO SECRETARIO (solo número de Cosaco):
-Sos su asistente administrativo. Usá las tools disponibles para:
-- Buscar info de clientes con get_clientes
-- Enviar templates con enviar_mensaje_cliente (recordatorio/mora/suspension/pago_confirmado/general)
-- Mensajes masivos por día con enviar_mensaje_masivo
-- Cambiar turnos con gestionar_turnos_cliente
-Respondé de forma concisa confirmando lo que hiciste.
-
-COMANDOS SECRETARIO:
-- 'Mandále un recordatorio/mora/suspensión/pago confirmado a [Nombre]' → enviar_mensaje_cliente
-- 'Mandales a todos los del [día] que [mensaje]' → enviar_mensaje_masivo
-- 'Cambiá los turnos de [Nombre]' → get_clientes → gestionar_turnos_cliente`;
+Sos su asistente administrativo. Usá las tools para:
+- Buscar clientes: get_clientes
+- Enviar templates: enviar_mensaje_cliente (recordatorio/mora/suspension/pago_confirmado/general)
+- Mensajes masivos: enviar_mensaje_masivo
+- Cambiar turnos: gestionar_turnos_cliente
+Respondé de forma concisa confirmando lo que hiciste.`;
 
 const TOOLS = [
   {
@@ -500,9 +488,13 @@ async function ejecutarTool(nombre, input, remitente) {
       );
       const { rows } = await pool.query(`SELECT COUNT(*) AS count FROM pagos_pendientes WHERE esperando_confirmacion = true`);
       if (parseInt(rows[0].count) > 1) return { ok: true, encolado: true };
-      const msg = `💰 *Confirmación de pago*\nCliente: ${input.cliente_nombre}\nMonto: $${input.monto}\nMétodo: ${metodo}\n¿Confirmás? Respondé *SÍ* o *NO*`;
-      await twilioClient.messages.create({ from: TWILIO_FROM, to: process.env.COSACO_WHATSAPP, body: msg });
-      guardarMensaje(process.env.COSACO_WHATSAPP, null, msg, 'agente');
+      const msg = `💰 Confirmacion de pago\nCliente: ${input.cliente_nombre}\nMonto: $${input.monto}\nMetodo: ${metodo}\n¿Confirmas? SI o NO`;
+      try {
+        await twilioClient.messages.create({ from: TWILIO_FROM, to: process.env.COSACO_WHATSAPP, body: msg });
+        guardarMensaje(process.env.COSACO_WHATSAPP, null, msg, 'agente');
+      } catch (err) {
+        console.error('Error notificando pago a Cosaco:', err.message);
+      }
       return { ok: true, enviado_a_cosaco: true };
     }
 
@@ -933,7 +925,7 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
 
     while (true) {
       const respuesta = await anthropic.messages.create({
-        model: 'claude-haiku-4-5-20251001',
+        model: 'claude-sonnet-4-6',
         max_tokens: 1024,
         system: [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }],
         tools: TOOLS,
