@@ -22,6 +22,7 @@ const TWILIO_FROM = process.env.TWILIO_WHATSAPP_NUMBER?.startsWith('whatsapp:')
   : `whatsapp:${process.env.TWILIO_WHATSAPP_NUMBER}`;
 let GYM_TOKEN = null;
 const pagosEsperandoNombre = new Map(); // telefono → { monto, metodo }
+const comprobantePendiente = new Map(); // telefono → true (mandó imagen/comprobante)
 
 async function initDB() {
   await pool.query(`
@@ -616,6 +617,49 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
     const mensajeUpper = mensaje.trim().toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
     const esSiNo = ['SI', 'S', 'NO', 'N'].includes(mensajeUpper);
 
+    // ── 0. COMPROBANTE PENDIENTE ───────────────────────────────────────────
+    if (!esCosaco && comprobantePendiente.has(remitente)) {
+      comprobantePendiente.delete(remitente);
+      // Intentar extraer nombre y monto del mensaje
+      const matchMonto = mensaje.match(/\$?([\d.,]+)/);
+      const monto = matchMonto ? parseFloat(matchMonto[1].replace(/\./g, '').replace(',', '.')) : null;
+      // Nombre: todo lo que no sea números ni símbolos de monto, tomando las primeras palabras
+      const sinMonto = mensaje.replace(/\$?[\d.,]+/g, '').replace(/transferencia|efectivo/gi, '').trim();
+      const nombre = sinMonto.length > 2 ? sinMonto : null;
+
+      if (nombre && monto) {
+        if (!GYM_TOKEN) await loginConReintentos(3, 3000);
+        const clientes = await ejecutarTool('get_clientes', { buscar: nombre }, remitente);
+        if (Array.isArray(clientes) && clientes.length > 0) {
+          const cliente = clientes[0];
+          await pool.query(
+            `INSERT INTO pagos_pendientes (cliente_id, cliente_nombre, cliente_from, monto, metodo) VALUES ($1, $2, $3, $4, $5)`,
+            [cliente.id, cliente.nombre, remitente, monto, 'Transferencia']
+          );
+          const { rows: existing } = await pool.query(`SELECT COUNT(*) AS count FROM pagos_pendientes WHERE esperando_confirmacion = true`);
+          if (parseInt(existing[0].count) <= 1) {
+            const msg = `💰 Comprobante de ${cliente.nombre} - $${monto} - Transferencia\n¿Confirmás? SÍ o NO`;
+            await twilioClient.messages.create({ from: TWILIO_FROM, to: process.env.COSACO_WHATSAPP, body: msg });
+            guardarMensaje(process.env.COSACO_WHATSAPP, null, msg, 'agente');
+          }
+          await enviarWhatsApp(remitente, `Gracias! Ya le avisé al equipo, en breve te confirmamos 🏑`, cliente.nombre);
+        } else {
+          // No encontró cliente → pedir nombre de nuevo
+          comprobantePendiente.set(remitente, true);
+          await enviarWhatsApp(remitente, `No encontré a "${nombre}" en el sistema. ¿Podés decirme tu nombre completo tal como está registrado?`);
+        }
+      } else if (!nombre) {
+        comprobantePendiente.set(remitente, true);
+        await enviarWhatsApp(remitente, `Necesito tu nombre completo para identificarte. ¿Cómo te llamás?`);
+      } else {
+        // Tiene nombre pero falta monto
+        comprobantePendiente.set(remitente, true);
+        pagosEsperandoNombre.set(remitente, { monto: 0, metodo: 'Transferencia', nombreYaConocido: nombre });
+        await enviarWhatsApp(remitente, `¿Cuál fue el monto que transferiste?`);
+      }
+      return;
+    }
+
     // ── 1. MODO SECRETARIO (solo Cosaco) ──────────────────────────────────
     if (esCosaco) {
       // "pendientes"
@@ -1071,10 +1115,11 @@ app.post('/webhook', (req, res) => {
   guardarMensaje(remitente, profileName, mensaje || '[imagen]', 'cliente');
   res.type('text/xml').send(new twilio.twiml.MessagingResponse().toString());
   if (parseInt(req.body.NumMedia) > 0 && (!mensaje || !mensaje.trim())) {
-    const resp = 'Hola! 👋 Recibí tu imagen pero no puedo leerla. ¿Me podés escribir de qué se trata? 🏑';
+    comprobantePendiente.set(remitente, true);
+    const resp = '¡Recibí tu comprobante de transferencia! 🏑 Para registrar tu pago necesito:\n- Tu nombre completo\n- El monto que transferiste\n\nEscribime los dos datos y listo 😊';
     twilioClient.messages.create({ from: TWILIO_FROM, to: remitente, body: resp })
       .then(() => guardarMensaje(remitente, null, resp, 'agente'))
-      .catch(err => console.error('Error respondiendo imagen:', err.message));
+      .catch(err => console.error('Error respondiendo comprobante:', err.message));
     return;
   }
   procesarMensaje(mensaje, remitente, profileName);
