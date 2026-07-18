@@ -21,6 +21,7 @@ const TWILIO_FROM = process.env.TWILIO_WHATSAPP_NUMBER?.startsWith('whatsapp:')
   ? process.env.TWILIO_WHATSAPP_NUMBER
   : `whatsapp:${process.env.TWILIO_WHATSAPP_NUMBER}`;
 let GYM_TOKEN = null;
+const pagosEsperandoNombre = new Map(); // telefono → { monto, metodo }
 
 async function initDB() {
   await pool.query(`
@@ -684,50 +685,27 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
         return;
       }
 
-      // "[Nombre] pagó" o "[Nombre] pago" sin monto ni método → efectivo sin monto
-      const matchPagoSimple = mensaje.match(/^(.+)\s+pag[oó]\s*$/i);
-      if (matchPagoSimple) {
-        const nombreBuscar = matchPagoSimple[1].trim();
+      // "[Nombre] pagó [monto] [efectivo|transferencia]" — flexible
+      const matchPagoNombre = mensaje.match(/^(.+?)\s+pag[oó]\s*\$?(\d[\d.]*)?[\s,]*(efectivo|transferencia)?/i);
+      if (matchPagoNombre) {
+        const nombreBuscar = matchPagoNombre[1].trim();
+        const monto = matchPagoNombre[2] ? parseFloat(matchPagoNombre[2].replace(/\./g, '')) : 0;
+        const metodo = matchPagoNombre[3] ? (matchPagoNombre[3].charAt(0).toUpperCase() + matchPagoNombre[3].slice(1).toLowerCase()) : 'Efectivo';
         if (!GYM_TOKEN) await loginConReintentos(3, 3000);
         const clientes = await ejecutarTool('get_clientes', { buscar: nombreBuscar }, remitente);
         if (Array.isArray(clientes) && clientes.length > 0) {
           const cliente = clientes[0];
           await pool.query(
             `INSERT INTO pagos_pendientes (cliente_id, cliente_nombre, cliente_from, monto, metodo) VALUES ($1, $2, $3, $4, $5)`,
-            [cliente.id, cliente.nombre, remitente, 0, 'Efectivo']
+            [cliente.id, cliente.nombre, remitente, monto, metodo]
           );
           const { rows: existing } = await pool.query(`SELECT COUNT(*) AS count FROM pagos_pendientes WHERE esperando_confirmacion = true`);
+          const montoStr = monto > 0 ? ` $${monto}` : ' (monto no especificado)';
           if (parseInt(existing[0].count) > 1) {
-            await enviarWhatsApp(process.env.COSACO_WHATSAPP, `✅ Pago de ${cliente.nombre} encolado`);
+            await enviarWhatsApp(process.env.COSACO_WHATSAPP, `✅ Pago de ${cliente.nombre}${montoStr} encolado`);
           } else {
             await enviarWhatsApp(process.env.COSACO_WHATSAPP,
-              `💰 ${cliente.nombre} - Efectivo (monto no especificado)\n¿Confirmás? SÍ o NO`);
-          }
-        } else {
-          await enviarWhatsApp(process.env.COSACO_WHATSAPP, `⚠️ No encontré cliente con el nombre "${nombreBuscar}"`);
-        }
-        return;
-      }
-
-      // "[Nombre] pagó $[monto] en efectivo"
-      const matchPagoEfectivo = mensaje.match(/^(.+?)\s+pag[oó]\s+\$?([\d.,]+)\s+en\s+efectivo/i);
-      if (matchPagoEfectivo) {
-        const nombreBuscar = matchPagoEfectivo[1].trim();
-        const monto = parseFloat(matchPagoEfectivo[2].replace(/\./g, '').replace(',', '.'));
-        if (!GYM_TOKEN) await loginConReintentos(3, 3000);
-        const clientes = await ejecutarTool('get_clientes', { buscar: nombreBuscar }, remitente);
-        if (Array.isArray(clientes) && clientes.length > 0) {
-          const cliente = clientes[0];
-          await pool.query(
-            `INSERT INTO pagos_pendientes (cliente_id, cliente_nombre, cliente_from, monto, metodo) VALUES ($1, $2, $3, $4, $5)`,
-            [cliente.id, cliente.nombre, remitente, monto, 'Efectivo']
-          );
-          const { rows: existing } = await pool.query(`SELECT COUNT(*) AS count FROM pagos_pendientes WHERE esperando_confirmacion = true`);
-          if (parseInt(existing[0].count) > 1) {
-            await enviarWhatsApp(process.env.COSACO_WHATSAPP, `✅ Pago de ${cliente.nombre} $${monto} encolado`);
-          } else {
-            await enviarWhatsApp(process.env.COSACO_WHATSAPP,
-              `💰 ${cliente.nombre} - $${monto} - Efectivo\n¿Confirmás? SÍ o NO`);
+              `💰 ${cliente.nombre} -${montoStr} - ${metodo}\n¿Confirmás? SÍ o NO`);
           }
         } else {
           await enviarWhatsApp(process.env.COSACO_WHATSAPP, `⚠️ No encontré cliente con el nombre "${nombreBuscar}"`);
@@ -855,6 +833,32 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
 
     // ── 4. INTENCIÓN DE PAGO ───────────────────────────────────────────────
     if (!esCosaco) {
+      // Si el cliente ya avisó que pagó y estamos esperando su nombre
+      if (pagosEsperandoNombre.has(remitente)) {
+        const datosPago = pagosEsperandoNombre.get(remitente);
+        pagosEsperandoNombre.delete(remitente);
+        if (!GYM_TOKEN) await loginConReintentos(3, 3000);
+        const clientes = await ejecutarTool('get_clientes', { buscar: mensaje.trim() }, remitente);
+        if (Array.isArray(clientes) && clientes.length > 0) {
+          const cliente = clientes[0];
+          await pool.query(
+            `INSERT INTO pagos_pendientes (cliente_id, cliente_nombre, cliente_from, monto, metodo) VALUES ($1, $2, $3, $4, $5)`,
+            [cliente.id, cliente.nombre, remitente, datosPago.monto || 0, datosPago.metodo || 'Transferencia']
+          );
+          const { rows: existing } = await pool.query(`SELECT COUNT(*) AS count FROM pagos_pendientes WHERE esperando_confirmacion = true`);
+          if (parseInt(existing[0].count) <= 1) {
+            const msg = `💰 Pago pendiente de ${cliente.nombre} (${datosPago.metodo || 'Transferencia'})\n¿Confirmás? SÍ o NO`;
+            await twilioClient.messages.create({ from: TWILIO_FROM, to: process.env.COSACO_WHATSAPP, body: msg });
+            guardarMensaje(process.env.COSACO_WHATSAPP, null, msg, 'agente');
+          }
+          await enviarWhatsApp(remitente, `Gracias! Ya le avisé al equipo, en breve te confirmamos 🏑`, cliente.nombre);
+        } else {
+          await enviarWhatsApp(remitente, `No encontré ese nombre. ¿Podés decirme tu nombre completo?`);
+          pagosEsperandoNombre.set(remitente, datosPago); // seguir esperando
+        }
+        return;
+      }
+
       const esPagoRealizado = /pagu[eé]|pago[^s]|transfer[ií]|hice el pago|acabo de transferir|ya pag/i.test(mensaje);
       const esIntFutura = /quiero pagar|voy a pagar|puedo pagar|c[oó]mo pago|quisiera pagar/i.test(mensaje);
       if (esPagoRealizado && !esIntFutura) {
@@ -873,6 +877,7 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
           }
           await enviarWhatsApp(remitente, `Gracias! Ya le avisé al equipo, en breve te confirmamos 🏑`, cliente.nombre);
         } else {
+          pagosEsperandoNombre.set(remitente, { monto: 0, metodo: 'Transferencia' });
           await enviarWhatsApp(remitente, `¡Gracias por avisarnos! ¿Podés decirme tu nombre completo para identificarte?`);
         }
         return;
