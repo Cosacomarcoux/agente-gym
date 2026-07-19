@@ -235,6 +235,7 @@ const SYSTEM_PROMPT = `Sos el asistente de Hockey Vivo. Respondés en español a
 
 PAGOS:
 Cuando un cliente mencione que pagó (de cualquier forma), pedí su nombre si no lo sabés y el monto si no lo mencionó. Una vez que tenés nombre y monto, llamá SIEMPRE consultar_pago_a_cosaco. Después respondé: "Gracias! Ya le avisé al equipo, en breve te confirmamos 🏑"
+IMPORTANTE sobre pagos: consultar_pago_a_cosaco es SOLO para pagos YA REALIZADOS con monto concreto mayor a 0. Si el cliente dice que va a pagar más adelante ("te pago el viernes", "esta semana paso"), NO llames la herramienta: respondé amable ("Dale, cuando abones avisame por acá 🏑") y listo. Nunca inventes ni asumas un monto: si no lo dijo, preguntalo.
 Si identificás al cliente por get_clientes, guardá el mapeo con guardar_telefono_cliente.
 
 REGISTRO DE CLIENTES:
@@ -288,7 +289,7 @@ const TOOLS = [
   },
   {
     name: 'registrar_cliente_y_asignar_turno',
-    description: 'Crea un cliente nuevo y le asigna turnos. Si ya existe, asigna igual.',
+    description: 'Crea un cliente nuevo y le asigna turnos. Si el teléfono ya corresponde a un cliente (aunque figure Vencido o Suspendido), NO crea uno nuevo: reutiliza la ficha existente y devuelve ya_existia/estado_anterior. Usala también cuando vuelve un ex-alumno.',
     input_schema: {
       type: 'object',
       properties: {
@@ -329,7 +330,7 @@ const TOOLS = [
   },
   {
     name: 'consultar_pago_a_cosaco',
-    description: 'Guarda el pago en pagos_pendientes y notifica a Cosaco. SIEMPRE usar en vez de registrar directamente.',
+    description: 'Guarda el pago en pagos_pendientes y notifica a Cosaco. SIEMPRE usar en vez de registrar directamente. SOLO para pagos YA realizados con monto > 0 — nunca para promesas de pago futuro. Si ya hay una confirmación pendiente del mismo cliente, no duplica.',
     input_schema: {
       type: 'object',
       properties: {
@@ -467,9 +468,25 @@ async function ejecutarTool(nombre, input, remitente) {
         }
         return { asignados, errores };
       };
-      const rBuscar = await fetch(`${GYM_API}/clientes?buscar=${encodeURIComponent(input.telefono)}`, { headers });
-      const existentes = await rBuscar.json();
-      const existente = Array.isArray(existentes) && existentes.length > 0 ? existentes[0] : null;
+      // FIX duplicados: 1) memoria propia del bot (telefono → cliente),
+      // 2) búsqueda en el sistema (ahora también matchea por teléfono).
+      // Si el cliente existe — aunque esté Vencido o Suspendido — se REUTILIZA.
+      let existente = null;
+      try {
+        const tels = [input.telefono, remitente].filter(Boolean);
+        for (const t of tels) {
+          const { rows } = await pool.query('SELECT cliente_id FROM telefono_cliente WHERE telefono = $1', [t]);
+          if (rows.length > 0) {
+            const rCli = await fetch(`${GYM_API}/clientes/${rows[0].cliente_id}`, { headers });
+            if (rCli.ok) { existente = await rCli.json(); break; }
+          }
+        }
+      } catch (e) { console.warn('lookup telefono_cliente:', e.message); }
+      if (!existente) {
+        const rBuscar = await fetch(`${GYM_API}/clientes?buscar=${encodeURIComponent(input.telefono)}`, { headers });
+        const existentes = await rBuscar.json();
+        existente = Array.isArray(existentes) && existentes.length > 0 ? existentes[0] : null;
+      }
       if (!existente) {
         const body = { nombre: nombreCompleto, telefono: input.telefono };
         if (input.fecha_nacimiento) body.fecha_nacimiento = input.fecha_nacimiento;
@@ -483,7 +500,17 @@ async function ejecutarTool(nombre, input, remitente) {
       }
       const { asignados, errores } = await asignarTurnos(existente.id, input.turno_ids);
       if (errores.length) return { ok: false, error: errores.join(', ') };
-      return { ok: true, cliente_id: existente.id, nombre: existente.nombre, turnos_asignados: asignados };
+      const eraInactivo = existente.estado === 'Suspendido' || existente.estado === 'Vencido';
+      if (eraInactivo) {
+        // Avisar a Cosaco que volvió un cliente inactivo (no se creó duplicado)
+        try {
+          await enviarWhatsApp(process.env.COSACO_WHATSAPP,
+            `🔄 ${existente.nombre} (estado: ${existente.estado}) volvió y pidió turnos. Se reutilizó su ficha existente, no se creó duplicado. Recordá registrarle el pago para reactivarlo.`);
+        } catch (e) { console.warn('aviso reactivacion:', e.message); }
+      }
+      return { ok: true, cliente_id: existente.id, nombre: existente.nombre,
+               ya_existia: true, estado_anterior: existente.estado, reactivado: eraInactivo,
+               turnos_asignados: asignados };
     }
 
     if (nombre === 'gestionar_turnos_cliente') {
@@ -532,9 +559,26 @@ async function ejecutarTool(nombre, input, remitente) {
 
     if (nombre === 'consultar_pago_a_cosaco') {
       const metodo = input.metodo || 'Transferencia';
+      // FIX: nunca confirmar pagos de $0. Si el cliente dice que va a pagar
+      // más adelante, NO es un pago: no se registra nada.
+      const monto = Number(input.monto);
+      if (!monto || monto <= 0) {
+        return { ok: false, rechazado: true,
+          error: 'Monto inválido o $0. Esta herramienta es SOLO para pagos ya realizados con monto concreto. Si el cliente va a pagar más adelante, no registres nada: respondele amablemente que puede abonar cuando venga.' };
+      }
+      // FIX: no duplicar. Si ya hay una confirmación pendiente para este
+      // cliente, no se inserta otra (evita que Cosaco reciba el mismo pago 2 veces).
+      const { rows: dup } = await pool.query(
+        `SELECT id, monto FROM pagos_pendientes WHERE esperando_confirmacion = true AND cliente_id = $1`,
+        [input.cliente_id]
+      );
+      if (dup.length > 0) {
+        return { ok: true, ya_pendiente: true,
+          mensaje: `Ya hay una confirmación pendiente para este cliente ($${dup[0].monto}). No se duplicó el aviso.` };
+      }
       await pool.query(
         `INSERT INTO pagos_pendientes (cliente_id, cliente_nombre, cliente_from, monto, metodo) VALUES ($1, $2, $3, $4, $5)`,
-        [input.cliente_id, input.cliente_nombre, remitente, input.monto, metodo]
+        [input.cliente_id, input.cliente_nombre, remitente, monto, metodo]
       );
       const { rows } = await pool.query(`SELECT COUNT(*) AS count FROM pagos_pendientes WHERE esperando_confirmacion = true`);
       if (parseInt(rows[0].count) > 1) return { ok: true, encolado: true };
