@@ -453,7 +453,9 @@ async function ejecutarTool(nombre, input, remitente) {
       return (Array.isArray(data) ? data : []).map(t => ({
         id: t.id, dia_semana: t.dia_semana, hora_inicio: t.hora_inicio,
         nivel: t.nivel, cupo_maximo: t.cupo_maximo, cupo_usado: t.cupo_usado,
-        disponible: t.cupo_usado < t.cupo_maximo,
+        bloqueado: !!t.bloqueado,
+        // Un turno bloqueado NUNCA está disponible, aunque tenga cupo libre
+        disponible: !t.bloqueado && t.cupo_usado < t.cupo_maximo,
       }));
     }
 
