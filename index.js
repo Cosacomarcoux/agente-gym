@@ -97,6 +97,22 @@ async function loginConReintentos(intentos = 10, esperaInicial = 10000) {
   console.warn('Login fallido tras todos los intentos');
 }
 
+// ─── Red de seguridad: cualquier 401 de la API → re-login y reintento único ───
+// Complementa el refresco programado de cada 12 h: aunque el token venza igual
+// (ej. cambio de SECRET_KEY en el backend), el bot se recupera solo.
+const _fetchOriginal = global.fetch;
+global.fetch = async function (url, opts = {}) {
+  const r = await _fetchOriginal(url, opts);
+  const esApiGym = typeof url === 'string' && url.startsWith(GYM_API) && !url.includes('/login');
+  if (esApiGym && r.status === 401) {
+    console.warn('401 de la API (token vencido) → re-login y reintento');
+    try { await loginGimnasio(); } catch (e) { return r; }
+    const opts2 = { ...opts, headers: { ...(opts.headers || {}), Authorization: `Bearer ${GYM_TOKEN}` } };
+    return _fetchOriginal(url, opts2);
+  }
+  return r;
+};
+
 function guardarMensaje(from, nombre, texto, rol, contentJson = null) {
   const textoFinal = (!texto || !texto.trim() || texto.trim().startsWith('[')) ? '[sin texto]' : texto;
   pool.query(
@@ -1199,6 +1215,13 @@ async function runJob(diaGrupo, tipoJob) {
   }
   console.log(`Job ${tipoJob} grupo ${diaGrupo}: ${clientes.length} clientes`);
 }
+
+// ─── FIX CRÍTICO: refresco proactivo del token ───
+// El bot se logueaba UNA vez al arrancar y usaba ese token para siempre.
+// Con tokens de 30 días + reinicios frecuentes zafaba; ahora los tokens duran
+// 48 h (Etapa 0 del backend), así que sin esto el bot muere a los 2 días.
+// Refrescamos cada 12 h: el token nunca llega ni cerca de vencer.
+cron.schedule('0 */12 * * *', () => loginConReintentos(3, 5000));
 
 cron.schedule('0 13 4 * *',  () => runJob(5, 'recordatorio'));
 cron.schedule('0 13 14 * *', () => runJob(15, 'recordatorio'));
