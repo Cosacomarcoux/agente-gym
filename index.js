@@ -38,6 +38,18 @@ async function initDB() {
       timestamp TIMESTAMPTZ DEFAULT NOW()
     );
     CREATE INDEX IF NOT EXISTS idx_conv_telefono ON conversaciones(telefono);
+    CREATE INDEX IF NOT EXISTS idx_conv_ts ON conversaciones(timestamp);
+    -- Registro de actividad del bot: alimenta el informe diario.
+    -- Antes el informe se armaba con guiones fijos porque no existía este log.
+    CREATE TABLE IF NOT EXISTS actividad (
+      id SERIAL PRIMARY KEY,
+      tipo VARCHAR(40) NOT NULL,
+      detalle TEXT,
+      monto NUMERIC,
+      telefono VARCHAR(50),
+      timestamp TIMESTAMPTZ DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_actividad_ts ON actividad(timestamp);
     CREATE TABLE IF NOT EXISTS telefono_cliente (
       telefono VARCHAR(50) PRIMARY KEY,
       cliente_id INTEGER NOT NULL,
@@ -112,6 +124,15 @@ global.fetch = async function (url, opts = {}) {
   }
   return r;
 };
+
+// Registra un evento del bot para el informe diario. No bloquea ni rompe
+// el flujo si falla (el informe es importante, pero nunca más que operar).
+function logActividad(tipo, detalle, monto = null, telefono = null) {
+  pool.query(
+    'INSERT INTO actividad (tipo, detalle, monto, telefono) VALUES ($1, $2, $3, $4)',
+    [tipo, detalle, monto, telefono]
+  ).catch(err => console.error('Error logActividad:', err.message));
+}
 
 function guardarMensaje(from, nombre, texto, rol, contentJson = null) {
   const textoFinal = (!texto || !texto.trim() || texto.trim().startsWith('[')) ? '[sin texto]' : texto;
@@ -498,11 +519,15 @@ async function ejecutarTool(nombre, input, remitente) {
         const nuevo = await rNuevo.json();
         const { asignados, errores } = await asignarTurnos(nuevo.id, input.turno_ids);
         if (errores.length) return { ok: false, error: errores.join(', ') };
+        logActividad('cliente_nuevo', nombreCompleto, null, input.telefono);
+        if (asignados.length) logActividad('turnos_asignados', `${nombreCompleto}: ${asignados.length} turno(s)`, asignados.length, input.telefono);
         return { ok: true, nuevo: true, cliente_id: nuevo.id, nombre: nombreCompleto, turnos_asignados: asignados };
       }
       const { asignados, errores } = await asignarTurnos(existente.id, input.turno_ids);
       if (errores.length) return { ok: false, error: errores.join(', ') };
+      if (asignados.length) logActividad('turnos_asignados', `${existente.nombre}: ${asignados.length} turno(s)`, asignados.length, input.telefono);
       const eraInactivo = existente.estado === 'Suspendido' || existente.estado === 'Vencido';
+      if (eraInactivo) logActividad('cliente_volvio', `${existente.nombre} (estaba ${existente.estado})`, null, input.telefono);
       if (eraInactivo) {
         // Avisar a Cosaco que volvió un cliente inactivo (no se creó duplicado)
         try {
@@ -692,6 +717,7 @@ async function manejarConfirmacionPago(mensajeUpper, pago) {
     await enviarWhatsApp(pago.cliente_from,
       `✅ Pago registrado: ${pago.cliente_nombre} - $${pago.monto} - ${pago.metodo} 🏑`, pago.cliente_nombre);
     console.log(`Pago confirmado: ${pago.cliente_nombre} $${pago.monto}`);
+    logActividad('pago_confirmado', `${pago.cliente_nombre} (${pago.metodo})`, pago.monto, pago.cliente_from);
   } else {
     await enviarWhatsApp(pago.cliente_from,
       `Quedá tranquilo/a, en breve un integrante del equipo se comunica con vos 🏑`, pago.cliente_nombre);
@@ -1315,13 +1341,53 @@ cron.schedule('0 12 * * *', async () => {
   } catch (err) { console.error('Error cron cumpleaños:', err.message); }
 });
 
+// ────────────────────────────────────────────────────────────────────────────
+//  INFORME DIARIO — ahora con datos reales
+//  Antes mandaba guiones fijos porque no se registraba la actividad.
+//  Cubre las últimas 24 h (de informe a informe), hora de Argentina.
+// ────────────────────────────────────────────────────────────────────────────
+async function generarInforme() {
+  const hoy = new Date().toLocaleDateString('es-AR', {
+    timeZone: 'America/Argentina/Buenos_Aires', day: '2-digit', month: '2-digit', year: 'numeric',
+  });
+  const DESDE = "NOW() - INTERVAL '24 hours'";
+
+  const [msgs, act, pend] = await Promise.all([
+    pool.query(`SELECT
+        COUNT(*) FILTER (WHERE rol = 'cliente')                    AS recibidos,
+        COUNT(*) FILTER (WHERE rol IN ('agente','agente-cosaco'))  AS enviados,
+        COUNT(DISTINCT telefono)                                   AS personas
+      FROM conversaciones WHERE timestamp >= ${DESDE}`),
+    pool.query(`SELECT tipo, COUNT(*)::int AS n, COALESCE(SUM(monto),0) AS total
+      FROM actividad WHERE timestamp >= ${DESDE} GROUP BY tipo`),
+    pool.query(`SELECT COUNT(*)::int AS n FROM pagos_pendientes WHERE esperando_confirmacion = true`),
+  ]);
+
+  const m = msgs.rows[0] || {};
+  const porTipo = {};
+  for (const r of act.rows) porTipo[r.tipo] = { n: r.n, total: Number(r.total) };
+  const g = (t) => porTipo[t] || { n: 0, total: 0 };
+
+  const pagos = g('pago_confirmado');
+  const partes = [
+    `Informe ${hoy}`,
+    `Mensajes: ${m.recibidos || 0} recibidos / ${m.enviados || 0} enviados (${m.personas || 0} personas)`,
+    `Pagos: ${pagos.n} por $${Number(pagos.total).toLocaleString('es-AR')}`,
+    `Clientes nuevos: ${g('cliente_nuevo').n}`,
+  ];
+  if (g('cliente_volvio').n) partes.push(`Reingresos: ${g('cliente_volvio').n}`);
+  partes.push(`Turnos asignados: ${g('turnos_asignados').total}`);
+  const nPend = pend.rows[0]?.n || 0;
+  if (nPend) partes.push(`PENDIENTE: ${nPend} pago(s) esperando tu SI/NO`);
+  partes.push('Buen dia Cosaco!');
+
+  return partes.join(' | ');
+}
+
 cron.schedule('5 12 * * *', async () => {
   try {
-    const hoy = new Date().toLocaleDateString('es-AR', {
-      timeZone: 'America/Argentina/Buenos_Aires', day: '2-digit', month: '2-digit', year: 'numeric',
-    });
-    const informe = `Informe del dia ${hoy} | Mensajes: - | Nuevos clientes: - | Pagos: $- | Turnos: - | Hasta manana Cosaco!`;
-    console.log('COSACO_WHATSAPP valor:', process.env.COSACO_WHATSAPP);
+    const informe = await generarInforme();
+    console.log('[INFORME]', informe);
     await enviarTemplate(
       process.env.COSACO_WHATSAPP,
       process.env.TEMPLATE_NOTIFICACION_COSACO,
@@ -1502,7 +1568,8 @@ async function abrirHilo(telefono, nombre, divEl) {
   telefonoActual = telefono;
   document.querySelectorAll('.hilo.activo').forEach(el => el.classList.remove('activo'));
   if (divEl) divEl.classList.add('activo');
-  document.getElementById('chn').textContent = nombre;
+  // Si viene null (refresco tras enviar), conservar el nombre que ya se muestra
+  if (nombre) document.getElementById('chn').textContent = nombre;
   const msgs = document.getElementById('msgs');
   msgs.innerHTML = '<div class="ph">Cargando...</div>';
   if (mob()) {
@@ -1550,13 +1617,30 @@ async function enviar() {
   const input = document.getElementById('mi');
   const texto = input.value.trim();
   if (!texto || !telefonoActual) return;
+  const btn = document.getElementById('btn-enviar');
   input.value = '';
-  const r = await fetch('/panel/enviar', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ telefono: telefonoActual, mensaje: texto }),
-  });
-  if ((await r.json()).ok) cargarHilos();
+  if (btn) { btn.disabled = true; btn.textContent = '...'; }
+  try {
+    const r = await fetch('/panel/enviar', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ telefono: telefonoActual, mensaje: texto }),
+    });
+    const d = await r.json();
+    if (d.ok) {
+      abrirHilo(telefonoActual, null, null);  // refrescar el hilo abierto
+      cargarHilos();
+    } else {
+      // Antes fallaba en silencio: el mensaje desaparecía sin explicación
+      alert('No se pudo enviar:\n\n' + (d.error || 'Error desconocido'));
+      input.value = texto;  // devolver el texto para no perderlo
+    }
+  } catch (e) {
+    alert('Error de conexión: ' + e.message);
+    input.value = texto;
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '➤'; }
+  }
 }
 
 document.getElementById('btn-volver').addEventListener('click', volver);
@@ -1625,13 +1709,25 @@ app.post('/panel/enviar', async (req, res) => {
   if (!telefono || !mensaje) return res.status(400).json({ error: 'Faltan datos' });
   try {
     let tel = telefono.replace(/\D/g, '');
-    if (tel.startsWith('549')) tel = tel.slice(2);
-    else if (tel.startsWith('54')) tel = tel.slice(2);
-    const to = `whatsapp:+54${tel}`;
+    if (tel.startsWith('549')) tel = tel.slice(3);       // 549 + área
+    else if (tel.startsWith('54')) tel = tel.slice(2);   // 54 + área
+    const to = `whatsapp:+549${tel}`;                    // Argentina: siempre 549
     await twilioClient.messages.create({ from: TWILIO_FROM, to, body: mensaje });
-    guardarMensaje(to, null, mensaje, 'agente-cosaco');
+    guardarMensaje(telefono, null, mensaje, 'agente-cosaco'); // guardar con el MISMO
+    // teléfono del hilo (antes usaba 'to' normalizado y el mensaje aparecía en
+    // un hilo separado, como si fuera otra conversación)
+    logActividad('mensaje_manual', `Cosaco → ${telefono}`, null, telefono);
     res.json({ ok: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error('[PANEL/ENVIAR]', err.code, err.message);
+    // 63016 = fuera de la ventana de 24 h de WhatsApp (regla de Meta)
+    const fueraDeVentana = err.code === 63016 || /24 hour|freeform/i.test(err.message || '');
+    res.status(500).json({
+      error: fueraDeVentana
+        ? 'Pasaron más de 24 h desde el último mensaje del cliente. WhatsApp no permite escribir libre; el cliente tiene que escribirte primero.'
+        : (err.message || 'Error enviando'),
+    });
+  }
 });
 
 app.get('/admin/importar-telefonos', async (req, res) => {
@@ -1682,8 +1778,9 @@ app.get('/test-jobs', async (req, res) => {
       return res.json({ ok: true, job, enviados: lista.map(c => c.nombre) });
     }
     if (job === 'informe') {
-      const hoy = new Date().toLocaleDateString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires', day: '2-digit', month: '2-digit', year: 'numeric' });
-      const informe = `Informe del dia ${hoy} | Mensajes: - | Nuevos clientes: - | Pagos: $- | Turnos: - | Hasta manana Cosaco!`;
+      const informe = await generarInforme();
+      // ?preview=1 → solo devuelve el texto sin mandar WhatsApp (para probar)
+      if (req.query.preview === '1') return res.json({ ok: true, preview: informe });
       await enviarTemplate(
         process.env.COSACO_WHATSAPP,
         process.env.TEMPLATE_NOTIFICACION_COSACO,
