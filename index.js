@@ -24,7 +24,9 @@ let GYM_TOKEN = null;
 const pagosEsperandoNombre = new Map(); // telefono → { monto, metodo }
 const comprobantePendiente = new Map(); // telefono → true (mandó imagen/comprobante)
 const cobrosPendientesDatos = new Map(); // telefonoCosaco → { nombreCliente, metodo, clienteId, clienteNombre }
-const tercerTurnoPendiente = new Map(); // telefonoCosaco → { clienteId, clienteNombre, turnoId, clienteFrom }
+const tercerTurnoPendiente = new Map(); // telefonoCosaco → { clienteId, clienteNombre, turnoIds, clienteFrom }
+const montoPendiente = new Map();       // remitente → { clienteId, clienteNombre, metodo } esperando que diga el monto
+const promesaAvisada = new Map();       // remitente → timestamp del último aviso de "paga después" (throttle 1h)
 
 async function initDB() {
   await pool.query(`
@@ -132,6 +134,15 @@ function logActividad(tipo, detalle, monto = null, telefono = null) {
     'INSERT INTO actividad (tipo, detalle, monto, telefono) VALUES ($1, $2, $3, $4)',
     [tipo, detalle, monto, telefono]
   ).catch(err => console.error('Error logActividad:', err.message));
+}
+
+// ¿Este cliente ya tiene un pago esperando confirmación? (anti-duplicados)
+async function hayPagoPendiente(clienteId) {
+  const { rows } = await pool.query(
+    `SELECT id FROM pagos_pendientes WHERE esperando_confirmacion = true AND cliente_id = $1`,
+    [clienteId]
+  );
+  return rows.length > 0;
 }
 
 function guardarMensaje(from, nombre, texto, rol, contentJson = null) {
@@ -256,7 +267,8 @@ const SYSTEM_PROMPT = `Sos el asistente de Hockey Vivo. Respondés en español a
 
 PAGOS:
 Cuando un cliente mencione que pagó (de cualquier forma), pedí su nombre si no lo sabés y el monto si no lo mencionó. Una vez que tenés nombre y monto, llamá SIEMPRE consultar_pago_a_cosaco. Después respondé: "Gracias! Ya le avisé al equipo, en breve te confirmamos 🏑"
-IMPORTANTE sobre pagos: consultar_pago_a_cosaco es SOLO para pagos YA REALIZADOS con monto concreto mayor a 0. Si el cliente dice que va a pagar más adelante ("te pago el viernes", "esta semana paso"), NO llames la herramienta: respondé amable ("Dale, cuando abones avisame por acá 🏑") y listo. Nunca inventes ni asumas un monto: si no lo dijo, preguntalo.
+IMPORTANTE sobre pagos: consultar_pago_a_cosaco es SOLO para pagos YA REALIZADOS con monto concreto mayor a 0. Si el cliente dice que va a pagar más adelante ("te pago el viernes", "esta semana paso"), NO llames ninguna herramienta de pago: el sistema ya le avisa a Cosaco automáticamente. Vos solo respondé amable ("Dale, cuando abones avisame por acá 🏑"). Nunca inventes ni asumas un monto: si no lo dijo, preguntalo.
+REGLA DE ORO: si estás por decirle al cliente "el equipo se va a contactar", "le aviso al equipo", "en breve te confirmamos" o cualquier variante, PRIMERO llamá notificar_cosaco con el motivo. Decirlo sin llamar la herramienta = nadie se entera y el cliente queda esperando para siempre. Esto aplica a: dudas que no podés resolver, quejas, pedidos especiales, problemas con turnos o cualquier situación que necesite a un humano.
 Si identificás al cliente por get_clientes, guardá el mapeo con guardar_telefono_cliente.
 
 REGISTRO DE CLIENTES:
@@ -347,6 +359,18 @@ const TOOLS = [
         cliente_nombre: { type: 'string' },
       },
       required: ['cliente_id', 'cliente_nombre'],
+    },
+  },
+  {
+    name: 'notificar_cosaco',
+    description: 'Envía un aviso por WhatsApp a Cosaco (el dueño). USALA SIEMPRE que: (a) el cliente necesite algo que no podés resolver vos, (b) estés por decirle al cliente "el equipo se va a contactar" o "le aviso al equipo" — si decís eso sin llamar esta herramienta, NADIE se entera y el cliente queda colgado. NO la uses para pagos ya realizados (para eso está consultar_pago_a_cosaco) ni para promesas de pago futuro (eso lo avisa el sistema automáticamente).',
+    input_schema: {
+      type: 'object',
+      properties: {
+        motivo: { type: 'string', description: 'Qué pasó y qué se necesita, en una frase' },
+        cliente_nombre: { type: 'string', description: 'Nombre del cliente si se conoce' },
+      },
+      required: ['motivo'],
     },
   },
   {
@@ -558,16 +582,19 @@ async function ejecutarTool(nombre, input, remitente) {
           return { ok: false, limite: true, mensaje: `${cliData.nombre} ya tiene ${turnosActuales} turnos. Preguntale cuál quiere cambiar.` };
         }
         if (turnosPost > 2) {
-          // Pide 3er turno → guardar pendiente y notificar a Cosaco
-          const turnoId = input.turno_ids_agregar[0];
+          // Supera el límite → guardar TODOS los turnos pedidos y pedir
+          // autorización. (FIX: antes se guardaba solo el primero, y al
+          // autorizar se cargaba 1 solo turno de los que pidió.)
+          const turnoIds = (input.turno_ids_agregar || []).slice();
           tercerTurnoPendiente.set(process.env.COSACO_WHATSAPP, {
             clienteId: input.cliente_id,
             clienteNombre: input.cliente_nombre || cliData.nombre,
-            turnoId,
+            turnoIds,
+            quitarIds: (input.turno_ids_quitar || []).slice(),
             clienteFrom: remitente,
           });
           await enviarWhatsApp(process.env.COSACO_WHATSAPP,
-            `⚠️ ${cliData.nombre} quiere agregar un 3er turno (actualmente tiene ${turnosActuales}). ¿Autorizás? SÍ o NO`);
+            `⚠️ ${cliData.nombre} tiene ${turnosActuales} turno(s) y pide agregar ${turnoIds.length} más (quedaría con ${turnosPost}). ¿Autorizás TODOS? SÍ o NO`);
           return { ok: false, requiere_autorizacion: true, mensaje: 'Tu solicitud fue enviada al equipo para autorización. En breve te confirmamos 🏑' };
         }
       }
@@ -582,6 +609,15 @@ async function ejecutarTool(nombre, input, remitente) {
       const r = await fetch(`${GYM_API}/clientes/${input.cliente_id}/suspender`, { method: 'DELETE', headers });
       if (!r.ok) return { error: `Error: ${await r.text()}` };
       return { ok: true, nombre: input.cliente_nombre };
+    }
+
+    if (nombre === 'notificar_cosaco') {
+      const quien = input.cliente_nombre ? `${input.cliente_nombre}: ` : '';
+      const desde = remitente && remitente !== process.env.COSACO_WHATSAPP
+        ? `\n(De: ${String(remitente).replace('whatsapp:', '')})` : '';
+      await enviarWhatsApp(process.env.COSACO_WHATSAPP, `📣 ${quien}${input.motivo}${desde}`);
+      logActividad('aviso_cosaco', `${quien}${input.motivo}`, null, remitente);
+      return { ok: true, avisado: true, nota: 'Cosaco ya fue notificado. Ahora sí podés decirle al cliente que el equipo está al tanto.' };
     }
 
     if (nombre === 'consultar_pago_a_cosaco') {
@@ -738,6 +774,32 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
     const mensajeUpper = mensaje.trim().toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
     const esSiNo = ['SI', 'S', 'NO', 'N'].includes(mensajeUpper);
 
+    // ── 0-bis. ESPERANDO EL MONTO (le preguntamos "¿cuánto pagaste?") ─────
+    if (!esCosaco && montoPendiente.has(remitente)) {
+      const datos = montoPendiente.get(remitente);
+      const mM = mensaje.match(/\$?\s*([\d]{3,}[\d.,]*)/);
+      const monto = mM ? parseFloat(mM[1].replace(/\./g, '').replace(',', '.')) : 0;
+      if (monto > 0) {
+        montoPendiente.delete(remitente);
+        if (!(await hayPagoPendiente(datos.clienteId))) {
+          await pool.query(
+            `INSERT INTO pagos_pendientes (cliente_id, cliente_nombre, cliente_from, monto, metodo) VALUES ($1, $2, $3, $4, $5)`,
+            [datos.clienteId, datos.clienteNombre, remitente, monto, datos.metodo || 'Transferencia']
+          );
+          const { rows: existing } = await pool.query(`SELECT COUNT(*) AS count FROM pagos_pendientes WHERE esperando_confirmacion = true`);
+          if (parseInt(existing[0].count) <= 1) {
+            const msg = `💰 ${datos.clienteNombre} - $${monto} - ${datos.metodo || 'Transferencia'}\n¿Confirmás? SÍ o NO`;
+            await twilioClient.messages.create({ from: TWILIO_FROM, to: process.env.COSACO_WHATSAPP, body: msg });
+            guardarMensaje(process.env.COSACO_WHATSAPP, null, msg, 'agente');
+          }
+        }
+        await enviarWhatsApp(remitente, `¡Perfecto! Ya le avisé al equipo, en breve te confirmamos 🏑`, datos.clienteNombre);
+      } else {
+        await enviarWhatsApp(remitente, `No pude leer el monto 😅 ¿Me lo decís en números? Ej: 35000`, datos.clienteNombre);
+      }
+      return;
+    }
+
     // ── 0. COMPROBANTE PENDIENTE ───────────────────────────────────────────
     if (!esCosaco && comprobantePendiente.has(remitente)) {
       comprobantePendiente.delete(remitente);
@@ -753,6 +815,10 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
         const clientes = await ejecutarTool('get_clientes', { buscar: nombre }, remitente);
         if (Array.isArray(clientes) && clientes.length > 0) {
           const cliente = clientes[0];
+          if (await hayPagoPendiente(cliente.id)) {
+            await enviarWhatsApp(remitente, `¡Ya lo tengo registrado! En breve te confirmamos 🏑`, cliente.nombre);
+            return;
+          }
           await pool.query(
             `INSERT INTO pagos_pendientes (cliente_id, cliente_nombre, cliente_from, monto, metodo) VALUES ($1, $2, $3, $4, $5)`,
             [cliente.id, cliente.nombre, remitente, monto, 'Transferencia']
@@ -802,6 +868,7 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
         for (const linea of lineas) {
           const { nombre, monto, beca } = parsearLinea(linea);
           if (!nombre) continue;
+          if (!(monto > 0)) { procesados.push({ nombre, monto, beca, montoInvalido: true }); continue; }
           const clientes = await ejecutarTool('get_clientes', { buscar: nombre }, remitente);
           if (Array.isArray(clientes) && clientes.length > 0) {
             const cliente = clientes[0];
@@ -821,7 +888,8 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
         const formatMonto = n => n.toLocaleString('es-AR');
         let resumen = `Procesé ${procesados.filter(p => !p.noEncontrado).length} pagos:\n\n`;
         for (const p of procesados) {
-          if (p.noEncontrado) resumen += `⚠️ No encontré: ${p.nombre}\n`;
+          if (p.montoInvalido) resumen += `⚠️ Monto inválido (no encolé): ${p.nombre}\n`;
+          else if (p.noEncontrado) resumen += `⚠️ No encontré: ${p.nombre}\n`;
           else resumen += `💰 ${p.nombre} - $${formatMonto(p.monto)}${p.beca ? ` - Beca ${p.beca}%` : ''}\n`;
         }
         if (cola.length > 0) {
@@ -861,13 +929,28 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
         tercerTurnoPendiente.delete(remitente);
         if (mensajeUpper === 'SI' || mensajeUpper === 'S') {
           if (!GYM_TOKEN) await loginConReintentos(3, 3000);
-          const r = await fetch(`${GYM_API}/turnos/${datos.turnoId}/asignar/${datos.clienteId}`,
-            { method: 'POST', headers: { Authorization: `Bearer ${GYM_TOKEN}` } });
-          if (r.ok) {
-            await enviarWhatsApp(process.env.COSACO_WHATSAPP, `✅ 3er turno asignado a ${datos.clienteNombre}`);
-            await enviarWhatsApp(datos.clienteFrom, `¡Listo! Tu 3er turno fue autorizado y asignado 🏑`, datos.clienteNombre);
+          const hdrs = { Authorization: `Bearer ${GYM_TOKEN}` };
+          // Primero los quitados acordados (si el pedido incluía cambios)
+          for (const qid of (datos.quitarIds || [])) {
+            await fetch(`${GYM_API}/turnos/${qid}/quitar/${datos.clienteId}`, { method: 'DELETE', headers: hdrs }).catch(() => {});
+          }
+          // FIX: asignar TODOS los turnos autorizados (antes solo el primero)
+          const ids = datos.turnoIds || (datos.turnoId ? [datos.turnoId] : []);
+          const ok = [], mal = [];
+          for (const tid of ids) {
+            const r = await fetch(`${GYM_API}/turnos/${tid}/asignar/${datos.clienteId}`, { method: 'POST', headers: hdrs });
+            if (r.ok) ok.push(tid); else mal.push(tid);
+          }
+          logActividad('turnos_asignados', `${datos.clienteNombre}: ${ok.length} turno(s) autorizados`, ok.length, datos.clienteFrom);
+          if (mal.length === 0) {
+            await enviarWhatsApp(process.env.COSACO_WHATSAPP, `✅ ${ok.length} turno(s) asignados a ${datos.clienteNombre}`);
+            await enviarWhatsApp(datos.clienteFrom, `¡Listo! Tus ${ok.length} turno(s) fueron autorizados y asignados 🏑`, datos.clienteNombre);
           } else {
-            await enviarWhatsApp(process.env.COSACO_WHATSAPP, `⚠️ Error al asignar el turno a ${datos.clienteNombre}`);
+            await enviarWhatsApp(process.env.COSACO_WHATSAPP,
+              `⚠️ ${datos.clienteNombre}: asigné ${ok.length}, fallaron ${mal.length} (turnos ${mal.join(', ')} — ¿llenos o bloqueados?). Revisá la grilla.`);
+            await enviarWhatsApp(datos.clienteFrom,
+              ok.length ? `Se asignaron ${ok.length} de tus turnos; el equipo está revisando el resto 🏑` : `Hubo un problema con la asignación; el equipo lo está revisando 🏑`,
+              datos.clienteNombre);
           }
         } else {
           await enviarWhatsApp(process.env.COSACO_WHATSAPP, `👍 3er turno de ${datos.clienteNombre} no autorizado`);
@@ -922,6 +1005,11 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
         const metodo = matchNumeroSolo[2]
           ? (matchNumeroSolo[2].charAt(0).toUpperCase() + matchNumeroSolo[2].slice(1).toLowerCase())
           : datos.metodo || 'Transferencia';
+        if (!(monto > 0)) {
+          cobrosPendientesDatos.set(remitente, datos); // seguir esperando un monto válido
+          await enviarWhatsApp(process.env.COSACO_WHATSAPP, `⚠️ Ese monto no es válido. ¿Cuál fue el monto de ${datos.clienteNombre}?`);
+          return;
+        }
         await pool.query(`DELETE FROM pagos_pendientes WHERE esperando_confirmacion = true AND cliente_id = $1`, [datos.clienteId]);
         await pool.query(
           `INSERT INTO pagos_pendientes (cliente_id, cliente_nombre, cliente_from, monto, metodo) VALUES ($1, $2, $3, $4, $5)`,
@@ -1111,13 +1199,24 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
         const clientes = await ejecutarTool('get_clientes', { buscar: mensaje.trim() }, remitente);
         if (Array.isArray(clientes) && clientes.length > 0) {
           const cliente = clientes[0];
+          const montoDP = Number(datosPago.monto) || 0;
+          // FIX $0: si no sabemos el monto, preguntarlo en vez de encolar $0
+          if (!(montoDP > 0)) {
+            montoPendiente.set(remitente, { clienteId: cliente.id, clienteNombre: cliente.nombre, metodo: datosPago.metodo || 'Transferencia' });
+            await enviarWhatsApp(remitente, `Gracias ${cliente.nombre.split(' ')[0]}! ¿Cuál fue el monto que pagaste? 🏑`, cliente.nombre);
+            return;
+          }
+          if (await hayPagoPendiente(cliente.id)) {
+            await enviarWhatsApp(remitente, `¡Ya lo tengo registrado! En breve te confirmamos 🏑`, cliente.nombre);
+            return;
+          }
           await pool.query(
             `INSERT INTO pagos_pendientes (cliente_id, cliente_nombre, cliente_from, monto, metodo) VALUES ($1, $2, $3, $4, $5)`,
-            [cliente.id, cliente.nombre, remitente, datosPago.monto || 0, datosPago.metodo || 'Transferencia']
+            [cliente.id, cliente.nombre, remitente, montoDP, datosPago.metodo || 'Transferencia']
           );
           const { rows: existing } = await pool.query(`SELECT COUNT(*) AS count FROM pagos_pendientes WHERE esperando_confirmacion = true`);
           if (parseInt(existing[0].count) <= 1) {
-            const msg = `💰 Pago pendiente de ${cliente.nombre} (${datosPago.metodo || 'Transferencia'})\n¿Confirmás? SÍ o NO`;
+            const msg = `💰 ${cliente.nombre} - $${montoDP} - ${datosPago.metodo || 'Transferencia'}\n¿Confirmás? SÍ o NO`;
             await twilioClient.messages.create({ from: TWILIO_FROM, to: process.env.COSACO_WHATSAPP, body: msg });
             guardarMensaje(process.env.COSACO_WHATSAPP, null, msg, 'agente');
           }
@@ -1130,18 +1229,48 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
       }
 
       const esPagoRealizado = /pagu[eé]|pago[^s]|transfer[ií]|hice el pago|acabo de transferir|ya pag/i.test(mensaje);
-      const esIntFutura = /quiero pagar|voy a pagar|puedo pagar|c[oó]mo pago|quisiera pagar/i.test(mensaje);
+      const esIntFutura = /quiero pagar|voy a pagar|puedo pagar|c[oó]mo pago|quisiera pagar|despu[eé]s (te |lo )?pago|pago (el|la|los) |esta semana pago/i.test(mensaje);
+
+      // ── PROMESA DE PAGO FUTURO: avisar a Cosaco y nada más ──
+      // No se encola NADA (nada de confirmaciones de $0). Solo un aviso
+      // informativo, con throttle de 1 h por cliente para no spamear.
+      if (esIntFutura && !esPagoRealizado) {
+        const ultimo = promesaAvisada.get(remitente) || 0;
+        if (Date.now() - ultimo > 3600000) {
+          promesaAvisada.set(remitente, Date.now());
+          const cliP = await buscarClientePorTelefono(remitente).catch(() => null);
+          const quien = cliP ? cliP.nombre : remitente.replace('whatsapp:', '');
+          enviarWhatsApp(process.env.COSACO_WHATSAPP,
+            `📣 ${quien} avisó que va a pagar más adelante: "${mensaje.slice(0, 120)}"\n(Solo aviso — no hay nada que confirmar)`).catch(() => {});
+          logActividad('promesa_pago', quien, null, remitente);
+        }
+        // sin return: Claude le responde amablemente al cliente
+      }
+
       if (esPagoRealizado && !esIntFutura) {
         if (!GYM_TOKEN) await loginConReintentos(3, 3000);
         const cliente = await buscarClientePorTelefono(remitente);
         if (cliente) {
+          // FIX $0: intentar leer el monto del propio mensaje ("transferí 35000")
+          const mMonto = mensaje.match(/\$?\s*([\d]{4,}[\d.,]*)/);
+          const montoMsg = mMonto ? parseFloat(mMonto[1].replace(/\./g, '').replace(',', '.')) : 0;
+          if (!(montoMsg > 0)) {
+            // Sin monto → NO encolar $0: preguntarle cuánto pagó
+            montoPendiente.set(remitente, { clienteId: cliente.id, clienteNombre: cliente.nombre, metodo: 'Transferencia' });
+            await enviarWhatsApp(remitente, `¡Gracias por avisar! ¿Cuál fue el monto que pagaste? 🏑`, cliente.nombre);
+            return;
+          }
+          if (await hayPagoPendiente(cliente.id)) {
+            await enviarWhatsApp(remitente, `¡Ya lo tengo registrado! En breve te confirmamos 🏑`, cliente.nombre);
+            return;
+          }
           await pool.query(
             `INSERT INTO pagos_pendientes (cliente_id, cliente_nombre, cliente_from, monto, metodo) VALUES ($1, $2, $3, $4, $5)`,
-            [cliente.id, cliente.nombre, remitente, 0, 'Transferencia']
+            [cliente.id, cliente.nombre, remitente, montoMsg, 'Transferencia']
           );
           const { rows: existing } = await pool.query(`SELECT COUNT(*) AS count FROM pagos_pendientes WHERE esperando_confirmacion = true`);
           if (parseInt(existing[0].count) <= 1) {
-            const msg = `💰 Pago pendiente de ${cliente.nombre} (Transferencia)\n¿Confirmás? SÍ o NO`;
+            const msg = `💰 ${cliente.nombre} - $${montoMsg} - Transferencia\n¿Confirmás? SÍ o NO`;
             await twilioClient.messages.create({ from: TWILIO_FROM, to: process.env.COSACO_WHATSAPP, body: msg });
             guardarMensaje(process.env.COSACO_WHATSAPP, null, msg, 'agente');
           }
@@ -1376,6 +1505,7 @@ async function generarInforme() {
     `Clientes nuevos: ${g('cliente_nuevo').n}`,
   ];
   if (g('cliente_volvio').n) partes.push(`Reingresos: ${g('cliente_volvio').n}`);
+  if (g('promesa_pago').n) partes.push(`Prometieron pagar: ${g('promesa_pago').n}`);
   partes.push(`Turnos asignados: ${g('turnos_asignados').total}`);
   const nPend = pend.rows[0]?.n || 0;
   if (nPend) partes.push(`PENDIENTE: ${nPend} pago(s) esperando tu SI/NO`);
