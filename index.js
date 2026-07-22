@@ -1632,7 +1632,8 @@ async function enviar() {
       cargarHilos();
     } else {
       // Antes fallaba en silencio: el mensaje desaparecía sin explicación
-      alert('No se pudo enviar:\n\n' + (d.error || 'Error desconocido'));
+      // (\\n escapado: este código viaja dentro de un template literal del server)
+      alert('No se pudo enviar:\\n\\n' + (d.error || 'Error desconocido'));
       input.value = texto;  // devolver el texto para no perderlo
     }
   } catch (e) {
