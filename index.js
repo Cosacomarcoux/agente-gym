@@ -265,9 +265,15 @@ function parsearFecha(fechaStr) {
 
 const SYSTEM_PROMPT = `Sos el asistente de Hockey Vivo. Respondés en español argentino, amable y breve.
 
-PAGOS:
-Cuando un cliente mencione que pagó (de cualquier forma), pedí su nombre si no lo sabés y el monto si no lo mencionó. Una vez que tenés nombre y monto, llamá SIEMPRE consultar_pago_a_cosaco. Después respondé: "Gracias! Ya le avisé al equipo, en breve te confirmamos 🏑"
-IMPORTANTE sobre pagos: consultar_pago_a_cosaco es SOLO para pagos YA REALIZADOS con monto concreto mayor a 0. Si el cliente dice que va a pagar más adelante ("te pago el viernes", "esta semana paso"), NO llames ninguna herramienta de pago: el sistema ya le avisa a Cosaco automáticamente. Vos solo respondé amable ("Dale, cuando abones avisame por acá 🏑"). Nunca inventes ni asumas un monto: si no lo dijo, preguntalo.
+PAGOS (LEER CON ATENCIÓN):
+Solo registrás un pago si el cliente DICE, con sus propias palabras, que YA pagó/transfirió/depositó/abonó. Ahí sí: si no dio el monto, preguntáselo; con nombre y monto, llamá consultar_pago_a_cosaco (poniendo en texto_cliente la frase textual donde dijo que pagó). Después: "Gracias! Ya le avisé al equipo, en breve te confirmamos 🏑".
+
+PROHIBIDO registrar pagos en estos casos (NO son pagos):
+- "Este mes no voy" / "no voy a ir" → es una baja/pausa, NO un pago.
+- "Quiero pausar" / "me doy de baja" → gestión, NO un pago. Usá notificar_cosaco.
+- "Gracias" / "dale" / "ok" → cortesía, NO un pago.
+- "Te pago el viernes" / "esta semana paso" → promesa futura: NO llames ninguna tool, el sistema ya avisa solo. Respondé "Dale, cuando abones avisame 🏑".
+NUNCA saques el monto del precio del plan. NUNCA inventes un pago que el cliente no mencionó. Ante la duda, NO registres: preguntá "¿ya hiciste el pago?" antes de hacer nada.
 REGLA DE ORO: si estás por decirle al cliente "el equipo se va a contactar", "le aviso al equipo", "en breve te confirmamos" o cualquier variante, PRIMERO llamá notificar_cosaco con el motivo. Decirlo sin llamar la herramienta = nadie se entera y el cliente queda esperando para siempre. Esto aplica a: dudas que no podés resolver, quejas, pedidos especiales, problemas con turnos o cualquier situación que necesite a un humano.
 Si identificás al cliente por get_clientes, guardá el mapeo con guardar_telefono_cliente.
 
@@ -375,16 +381,17 @@ const TOOLS = [
   },
   {
     name: 'consultar_pago_a_cosaco',
-    description: 'Guarda el pago en pagos_pendientes y notifica a Cosaco. SIEMPRE usar en vez de registrar directamente. SOLO para pagos YA realizados con monto > 0 — nunca para promesas de pago futuro. Si ya hay una confirmación pendiente del mismo cliente, no duplica.',
+    description: 'Registra un pago YA REALIZADO y lo manda a confirmar a Cosaco. USAR SOLO si el cliente dijo con sus propias palabras que pagó/transfirió/depositó/abonó, Y dio un monto concreto. NUNCA la uses por: "no voy", "quiero pausar", "gracias", "me doy de baja" o cualquier frase que no sea un pago. NUNCA saques el monto del precio del plan: tiene que haberlo dicho el cliente.',
     input_schema: {
       type: 'object',
       properties: {
         cliente_id: { type: 'integer' },
         cliente_nombre: { type: 'string' },
-        monto: { type: 'number' },
+        monto: { type: 'number', description: 'El monto que el cliente dijo haber pagado. Prohibido inventarlo o deducirlo del plan.' },
         metodo: { type: 'string', description: 'Efectivo o Transferencia' },
+        texto_cliente: { type: 'string', description: 'La frase TEXTUAL del cliente donde dice que pagó (ej: "ya transferí 35000"). Obligatoria: si el cliente no dijo que pagó, no llames esta herramienta.' },
       },
-      required: ['cliente_id', 'cliente_nombre', 'monto', 'metodo'],
+      required: ['cliente_id', 'cliente_nombre', 'monto', 'metodo', 'texto_cliente'],
     },
   },
   {
@@ -622,12 +629,21 @@ async function ejecutarTool(nombre, input, remitente) {
 
     if (nombre === 'consultar_pago_a_cosaco') {
       const metodo = input.metodo || 'Transferencia';
-      // FIX: nunca confirmar pagos de $0. Si el cliente dice que va a pagar
-      // más adelante, NO es un pago: no se registra nada.
+      // FIX: nunca confirmar pagos de $0.
       const monto = Number(input.monto);
       if (!monto || monto <= 0) {
         return { ok: false, rechazado: true,
-          error: 'Monto inválido o $0. Esta herramienta es SOLO para pagos ya realizados con monto concreto. Si el cliente va a pagar más adelante, no registres nada: respondele amablemente que puede abonar cuando venga.' };
+          error: 'Monto inválido o $0. Esta herramienta es SOLO para pagos ya realizados con monto concreto. Si el cliente va a pagar más adelante, no registres nada.' };
+      }
+      // FIX pagos inventados: la frase del cliente debe SONAR a pago. Si el bot
+      // "alucina" un pago en una charla que no lo menciona (ej: "no voy este
+      // mes", "gracias"), el texto_cliente no va a contener palabras de pago y
+      // se rechaza. Candado de código contra confirmaciones fantasma.
+      const txt = String(input.texto_cliente || '').toLowerCase();
+      const suenaAPago = /pag|transf|deposit|abon|envi[eé]|mand[eé]|efectivo|plata|guita|comprobante|\$|\d{4,}/.test(txt);
+      if (!txt.trim() || !suenaAPago) {
+        return { ok: false, rechazado: true,
+          error: 'RECHAZADO: no hay evidencia de que el cliente haya pagado. El texto_cliente no menciona un pago. NO inventes pagos: si el cliente no dijo que pagó, no registres nada y seguí la conversación normal.' };
       }
       // FIX: no duplicar. Si ya hay una confirmación pendiente para este
       // cliente, no se inserta otra (evita que Cosaco reciba el mismo pago 2 veces).
@@ -678,6 +694,32 @@ async function ejecutarTool(nombre, input, remitente) {
       const cliente = await rCli.json();
       if (!cliente.telefono) return { error: 'Sin teléfono registrado' };
       const nombre1 = cliente.nombre.split(' ')[0];
+
+      // FIX mensaje "random": para un mensaje PERSONALIZADO de Cosaco (general)
+      // se envía EXACTAMENTE lo que escribió, como texto libre. Antes usaba el
+      // template TEMPLATE_MENSAJE_HOCKEYVIVO, cuyo cuerpo fijo pisaba el texto
+      // real → al cliente le llegaba un mensaje genérico, no el que pidió Cosaco.
+      if (input.template_tipo === 'general') {
+        if (!input.mensaje || !input.mensaje.trim()) {
+          return { error: 'Falta el texto del mensaje a enviar' };
+        }
+        let tel = String(cliente.telefono).replace(/\D/g, '');
+        if (tel.startsWith('549')) tel = tel.slice(3);
+        else if (tel.startsWith('54')) tel = tel.slice(2);
+        const to = `whatsapp:+549${tel}`;
+        try {
+          await twilioClient.messages.create({ from: TWILIO_FROM, to, body: input.mensaje });
+          guardarMensaje(to, cliente.nombre, input.mensaje, 'agente-cosaco');
+          logActividad('mensaje_manual', `Cosaco → ${cliente.nombre}: ${input.mensaje.slice(0, 60)}`, null, to);
+          return { ok: true, enviado_a: cliente.nombre, texto_enviado: input.mensaje };
+        } catch (err) {
+          const fueraVentana = err.code === 63016 || /24 hour|freeform/i.test(err.message || '');
+          return { ok: false, error: fueraVentana
+            ? `No se pudo enviar a ${cliente.nombre}: pasaron +24h desde su último mensaje, WhatsApp no deja escribir libre. El cliente tiene que escribir primero.`
+            : (err.message || 'Error enviando') };
+        }
+      }
+
       const templateMap = {
         recordatorio: process.env.TEMPLATE_RECORDATORIO,
         mora: process.env.TEMPLATE_MORA,
