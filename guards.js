@@ -47,6 +47,12 @@ function montoValido(n) {
   return Number.isFinite(x) && x > 0;
 }
 
+// ¿Cosaco escribió un comando para arrancar la confirmación de pagos?
+// (flujo determinístico de a uno; nunca lo maneja la IA)
+function esComandoConfirmarPagos(texto) {
+  return /^(pendientes?|confirmar( pagos?)?|confirmemos|ver pendientes|revisar pendientes)$/i.test(String(texto || '').trim());
+}
+
 // ── TELÉFONOS ──────────────────────────────────────────────────────────────
 
 // Normaliza cualquier formato de teléfono argentino a "whatsapp:+549XXXXXXXXXX".
@@ -76,6 +82,7 @@ module.exports = {
   suenaAPago,
   esPagoRealizado,
   esPromesaFutura,
+  esComandoConfirmarPagos,
   parsearMonto,
   montoValido,
   normalizarWhatsApp,

@@ -104,3 +104,23 @@ test('REGRESIÓN: la conversación de Josefina NO genera un pago', () => {
     assert.strictEqual(g.parsearMonto(m), null, `"${m}" no tiene monto`);
   }
 });
+
+// ── El caso real de Justina (regresión: "Hola si!!" no es un pago) ───────────
+test('REGRESIÓN: "Hola si!!" y "2 veces x semana" NO son pagos', () => {
+  for (const m of ['Hola si!!', 'si!!', '2 veces x semana', 'Alias porfa']) {
+    assert.strictEqual(g.suenaAPago(m), false, `"${m}" no es un pago`);
+  }
+});
+
+// ── Comando de confirmación de pagos (uno por uno) ──────────────────────────
+test('esComandoConfirmarPagos reconoce los comandos de Cosaco', () => {
+  for (const m of ['pendientes', 'Pendientes', 'confirmar', 'Confirmar', 'confirmar pagos', 'ver pendientes']) {
+    assert.ok(g.esComandoConfirmarPagos(m), `debería reconocer: "${m}"`);
+  }
+});
+
+test('esComandoConfirmarPagos NO se dispara con SÍ/NO ni frases sueltas', () => {
+  for (const m of ['si', 'no', 'hola', 'confirmá el pago de Juan', 'quiero confirmar el pago de maria']) {
+    assert.strictEqual(g.esComandoConfirmarPagos(m), false, `no debería dispararse: "${m}"`);
+  }
+});

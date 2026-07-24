@@ -307,7 +307,9 @@ Sos su asistente administrativo. Usá las tools para:
 - Enviar templates: enviar_mensaje_cliente (recordatorio/mora/suspension/pago_confirmado/general)
 - Mensajes masivos: enviar_mensaje_masivo
 - Cambiar turnos: gestionar_turnos_cliente
-Respondé de forma concisa confirmando lo que hiciste.`;
+Respondé de forma concisa confirmando lo que hiciste.
+
+CONFIRMACIÓN DE PAGOS (CRÍTICO): vos NO confirmás ni registrás pagos, y NUNCA digas que confirmaste, registraste o notificaste un pago. Ese proceso es automático y va de a uno. Si Cosaco dice "confirmar", "confirmar pagos", "pendientes" o similar, el sistema ya lo maneja solo (no tenés que hacer nada). Si te pregunta por pagos pendientes, decile que escriba "pendientes" y el sistema los muestra de a uno para confirmar con SÍ o NO. Jamás inventes que un pago quedó confirmado.`;
 
 const TOOLS = [
   {
@@ -770,42 +772,76 @@ async function ejecutarTool(nombre, input, remitente) {
   }
 }
 
+// Muestra el siguiente pago pendiente (uno por uno) o avisa que no quedan.
+async function mostrarSiguientePendiente() {
+  const { rows: sig } = await pool.query(
+    `SELECT * FROM pagos_pendientes WHERE esperando_confirmacion = true ORDER BY id ASC LIMIT 1`
+  );
+  const { rows: cnt } = await pool.query(
+    `SELECT COUNT(*)::int AS n FROM pagos_pendientes WHERE esperando_confirmacion = true`
+  );
+  if (sig.length > 0) {
+    await enviarWhatsApp(process.env.COSACO_WHATSAPP,
+      `💰 Pago pendiente (quedan ${cnt[0].n})\nCliente: ${sig[0].cliente_nombre}\nMonto: $${sig[0].monto}\nMétodo: ${sig[0].metodo}\n\n¿Confirmás? SÍ o NO`);
+  } else {
+    await enviarWhatsApp(process.env.COSACO_WHATSAPP, '✅ No quedan pagos pendientes de confirmar.');
+  }
+  return sig.length;
+}
+
 async function manejarConfirmacionPago(mensajeUpper, pago) {
   if (mensajeUpper === 'SIGUIENTE') {
     await enviarWhatsApp(process.env.COSACO_WHATSAPP,
       `💰 *Confirmación de pago*\nCliente: ${pago.cliente_nombre}\nMonto: $${pago.monto}\nMétodo: ${pago.metodo}\n¿Confirmás? SÍ o NO`);
     return;
   }
-  await pool.query(`DELETE FROM pagos_pendientes WHERE id = $1`, [pago.id]);
+
   if (mensajeUpper === 'SI' || mensajeUpper === 'S') {
+    // FIX pérdida de plata: registrar PRIMERO, verificar, y SOLO SI salió bien
+    // borrar el pendiente. Antes se borraba antes de registrar → si el registro
+    // fallaba (token vencido, API caída), el pago desaparecía sin guardarse.
+    if (!GYM_TOKEN) await loginConReintentos(3, 3000);
     const hdrs = { Authorization: `Bearer ${GYM_TOKEN}`, 'Content-Type': 'application/json' };
-    const rCli = await fetch(`${GYM_API}/clientes/${pago.cliente_id}`, { headers: hdrs });
-    const cliente = await rCli.json();
-    const hoy = new Date().toISOString().split('T')[0];
-    await fetch(`${GYM_API}/pagos`, {
-      method: 'POST', headers: hdrs,
-      body: JSON.stringify({
-        cliente_id: pago.cliente_id, monto: pago.monto, metodo: pago.metodo,
-        fecha_pago: hoy, fecha_inicio: calcularFechaInicio(cliente),
-        fecha_vencimiento: calcularFechaVencimiento(hoy, cliente.fecha_vencimiento),
-        plan: cliente.plan,
-      }),
-    });
+    let registrado = false;
+    try {
+      const rCli = await fetch(`${GYM_API}/clientes/${pago.cliente_id}`, { headers: hdrs });
+      if (rCli.ok) {
+        const cliente = await rCli.json();
+        const hoy = new Date().toISOString().split('T')[0];
+        const rPago = await fetch(`${GYM_API}/pagos`, {
+          method: 'POST', headers: hdrs,
+          body: JSON.stringify({
+            cliente_id: pago.cliente_id, monto: pago.monto, metodo: pago.metodo,
+            fecha_pago: hoy, fecha_inicio: calcularFechaInicio(cliente),
+            fecha_vencimiento: calcularFechaVencimiento(hoy, cliente.fecha_vencimiento),
+            plan: cliente.plan,
+          }),
+        });
+        registrado = rPago.ok;
+      }
+    } catch (e) { console.error('Error registrando pago:', e.message); }
+
+    if (!registrado) {
+      // NO se borra el pendiente: el pago sigue en cola para reintentar.
+      await enviarWhatsApp(process.env.COSACO_WHATSAPP,
+        `⚠️ NO pude registrar el pago de ${pago.cliente_nombre} ($${pago.monto}) en el sistema. Quedó pendiente para reintentar. Probá de nuevo en un minuto o cargalo desde el panel.`);
+      return; // no avanza: el mismo pago sigue siendo el primero
+    }
+
+    await pool.query(`DELETE FROM pagos_pendientes WHERE id = $1`, [pago.id]);
     await enviarWhatsApp(pago.cliente_from,
       `✅ Pago registrado: ${pago.cliente_nombre} - $${pago.monto} - ${pago.metodo} 🏑`, pago.cliente_nombre);
     console.log(`Pago confirmado: ${pago.cliente_nombre} $${pago.monto}`);
     logActividad('pago_confirmado', `${pago.cliente_nombre} (${pago.metodo})`, pago.monto, pago.cliente_from);
   } else {
+    // NO → descartar este pendiente y avisar al cliente
+    await pool.query(`DELETE FROM pagos_pendientes WHERE id = $1`, [pago.id]);
     await enviarWhatsApp(pago.cliente_from,
       `Quedá tranquilo/a, en breve un integrante del equipo se comunica con vos 🏑`, pago.cliente_nombre);
   }
-  const { rows: sig } = await pool.query(
-    `SELECT * FROM pagos_pendientes WHERE esperando_confirmacion = true ORDER BY id ASC LIMIT 1`
-  );
-  if (sig.length > 0) {
-    await enviarWhatsApp(process.env.COSACO_WHATSAPP,
-      `💰 Siguiente: ${sig[0].cliente_nombre} - $${sig[0].monto} - ${sig[0].metodo}\n¿Confirmás? SÍ o NO`);
-  }
+
+  // Avanzar al siguiente, de a uno
+  await mostrarSiguientePendiente();
 }
 
 async function procesarMensaje(mensaje, remitente, profileName = null) {
@@ -941,8 +977,12 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
         return;
       }
 
-      // "pendientes"
-      if (mensajeUpper === 'PENDIENTES' || mensajeUpper === 'PENDIENTE') {
+      // "pendientes" / "confirmar" / "confirmar pagos" → arranca el flujo
+      // determinístico de confirmación UNO POR UNO (nunca lo maneja la IA:
+      // la IA no tiene forma de registrar pagos y antes "decía" que confirmaba
+      // sin hacerlo, perdiendo la plata).
+      const esComandoConfirmar = guards.esComandoConfirmarPagos(mensaje);
+      if (esComandoConfirmar) {
         console.log('Procesando pendientes para Cosaco...');
         const { rows: pagos } = await pool.query(`SELECT * FROM pagos_pendientes WHERE esperando_confirmacion = true ORDER BY id ASC`);
         const { rows: susps } = await pool.query(`SELECT * FROM suspensiones_pendientes WHERE esperando_confirmacion = true ORDER BY timestamp ASC`);
@@ -951,16 +991,20 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
           await enviarWhatsApp(process.env.COSACO_WHATSAPP, '✅ No hay pendientes de confirmación');
           return;
         }
-        let res = '📋 Pendientes:\n';
+        // Resumen breve + arrancar la confirmación de a uno
         if (pagos.length > 0) {
-          res += `\n💰 Pagos (${pagos.length}):\n`;
-          for (const p of pagos) res += `- ${p.cliente_nombre} $${p.monto} ${p.metodo}\n`;
+          let res = `📋 Tenés ${pagos.length} pago(s) para confirmar, de a uno:\n`;
+          for (const p of pagos) res += `• ${p.cliente_nombre} — $${p.monto} ${p.metodo}\n`;
+          res += `\nEmpecemos 👇`;
+          await enviarWhatsApp(process.env.COSACO_WHATSAPP, res);
+          await mostrarSiguientePendiente();
         }
         if (susps.length > 0) {
-          res += `\n⚠️ Suspensiones (${susps.length}):\n`;
+          let res = `⚠️ Suspensiones pendientes (${susps.length}):\n`;
           for (const s of susps) res += `- ${s.cliente_nombre}\n`;
+          res += `Respondé SÍ o NO para cada una cuando termines los pagos.`;
+          await enviarWhatsApp(process.env.COSACO_WHATSAPP, res);
         }
-        await enviarWhatsApp(process.env.COSACO_WHATSAPP, res);
         return;
       }
 
