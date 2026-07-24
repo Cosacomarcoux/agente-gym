@@ -1676,9 +1676,16 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
   .bv{display:block}
   .ia{position:sticky;bottom:0;padding-bottom:max(10px,env(safe-area-inset-bottom))}
 }
+/* Aviso de error visible (nunca falla en silencio) */
+#banner{position:fixed;top:0;left:0;right:0;z-index:100;background:#c0392b;color:#fff;padding:10px 44px 10px 16px;font-size:13px;line-height:1.35;box-shadow:0 2px 8px rgba(0,0,0,.2);transform:translateY(-120%);transition:transform .25s}
+#banner.show{transform:translateY(0)}
+#banner.ok{background:#1e8449}
+#banner button{position:absolute;right:8px;top:6px;background:rgba(255,255,255,.2);border:none;color:#fff;width:28px;height:28px;border-radius:6px;font-size:14px;cursor:pointer}
+#banner .rt{margin-left:10px;text-decoration:underline;cursor:pointer;font-weight:600}
 </style>
 </head>
 <body>
+<div id="banner"><span id="banner-txt"></span><button onclick="ocultarBanner()">✕</button></div>
 <div class="app">
   <div class="sb" id="sb">
     <div class="sbh">Conversaciones</div>
@@ -1701,6 +1708,53 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 let telefonoActual = null;
 let todosLosHilos = [];
 const mob = () => window.innerWidth <= 768;
+
+// ── CAPA ANTI-FALLO-SILENCIOSO ──────────────────────────────────────────────
+// Todo error queda VISIBLE: banner rojo arriba, con opción de reintentar.
+let _bannerTimer = null;
+function ocultarBanner(){ document.getElementById('banner').classList.remove('show'); }
+function mostrarBanner(texto, opts){
+  opts = opts || {};
+  const b = document.getElementById('banner');
+  const t = document.getElementById('banner-txt');
+  t.textContent = texto;
+  b.className = opts.ok ? 'show ok' : 'show';
+  if (opts.reintentar){
+    const link = document.createElement('span');
+    link.className = 'rt';
+    link.textContent = 'Reintentar';
+    link.onclick = () => { ocultarBanner(); opts.reintentar(); };
+    t.appendChild(link);
+  }
+  clearTimeout(_bannerTimer);
+  if (opts.ok) _bannerTimer = setTimeout(ocultarBanner, 2500);
+}
+
+// Wrapper central de red: si algo falla (sin conexión, error del server,
+// respuesta no-OK), lanza un error claro en vez de devolver basura o colgarse.
+async function pedir(url, opciones){
+  let r;
+  try {
+    r = await fetch(url, opciones);
+  } catch(e){
+    throw new Error('Sin conexión con el servidor');
+  }
+  if (!r.ok){
+    let detalle = '';
+    try { const j = await r.json(); detalle = j.error || ''; } catch(_){}
+    throw new Error(detalle || ('Error del servidor (' + r.status + ')'));
+  }
+  return r.json();
+}
+
+// Red de seguridad final: cualquier error que se escape igual se muestra.
+window.addEventListener('error', ev => {
+  mostrarBanner('Ocurrió un error en el panel. Si sigue, recargá la página.');
+});
+window.addEventListener('unhandledrejection', ev => {
+  const msg = (ev.reason && ev.reason.message) ? ev.reason.message : 'Ocurrió un error inesperado';
+  mostrarBanner(msg);
+});
 
 function tiempoRel(ts) {
   const min = Math.floor((Date.now() - new Date(ts).getTime()) / 60000);
@@ -1740,8 +1794,7 @@ function renderHilos(hilos) {
 async function cargarHilos() {
   const cont = document.getElementById('hilos');
   try {
-    const r = await fetch('/panel/data');
-    const d = await r.json();
+    const d = await pedir('/panel/data');
     todosLosHilos = d.hilos || [];
     if (todosLosHilos.length === 0) {
       cont.innerHTML = '<div class="ph">Sin conversaciones</div>';
@@ -1749,7 +1802,8 @@ async function cargarHilos() {
     }
     renderHilos(todosLosHilos);
   } catch (err) {
-    cont.innerHTML = '<div class="ph">Error cargando conversaciones</div>';
+    cont.innerHTML = '<div class="ph">No se pudieron cargar las conversaciones</div>';
+    mostrarBanner('No se pudieron cargar las conversaciones: ' + err.message, { reintentar: cargarHilos });
   }
 }
 
@@ -1769,12 +1823,14 @@ document.getElementById('buscador').addEventListener('input', async function() {
   if (q.length >= 3) {
     buscarTimer = setTimeout(async () => {
       try {
-        const r = await fetch('/panel/buscar?q=' + encodeURIComponent(q));
-        const d = await r.json();
+        const d = await pedir('/panel/buscar?q=' + encodeURIComponent(q));
         if (document.getElementById('buscador').value.trim() === q) {
           renderHilos(d.hilos || []);
         }
-      } catch (e) {}
+      } catch (e) {
+        // La búsqueda en DB falló, pero el filtro local ya se mostró: aviso suave
+        mostrarBanner('La búsqueda en el servidor falló (se muestran resultados locales): ' + e.message);
+      }
     }, 400);
   }
 });
@@ -1792,8 +1848,16 @@ async function abrirHilo(telefono, nombre, divEl) {
     document.getElementById('chat').classList.add('visible');
   }
 
-  const r = await fetch('/panel/hilo?telefono=' + encodeURIComponent(telefono));
-  const d = await r.json();
+  let d;
+  try {
+    d = await pedir('/panel/hilo?telefono=' + encodeURIComponent(telefono));
+  } catch (err) {
+    // Antes esto quedaba en "Cargando..." para siempre si fallaba. Ahora avisa
+    // y ofrece reintentar en vez de dejar la pantalla colgada en silencio.
+    msgs.innerHTML = '<div class="ph">No se pudo cargar la conversación</div>';
+    mostrarBanner('No se pudo abrir la conversación: ' + err.message, { reintentar: () => abrirHilo(telefono, nombre, divEl) });
+    return;
+  }
   const wrap = document.createElement('div');
   wrap.className = 'mw';
 
@@ -1836,24 +1900,18 @@ async function enviar() {
   input.value = '';
   if (btn) { btn.disabled = true; btn.textContent = '...'; }
   try {
-    const r = await fetch('/panel/enviar', {
+    await pedir('/panel/enviar', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ telefono: telefonoActual, mensaje: texto }),
     });
-    const d = await r.json();
-    if (d.ok) {
-      abrirHilo(telefonoActual, null, null);  // refrescar el hilo abierto
-      cargarHilos();
-    } else {
-      // Antes fallaba en silencio: el mensaje desaparecía sin explicación
-      // (\\n escapado: este código viaja dentro de un template literal del server)
-      alert('No se pudo enviar:\\n\\n' + (d.error || 'Error desconocido'));
-      input.value = texto;  // devolver el texto para no perderlo
-    }
+    abrirHilo(telefonoActual, null, null);  // refrescar el hilo abierto
+    cargarHilos();
+    mostrarBanner('Mensaje enviado', { ok: true });
   } catch (e) {
-    alert('Error de conexión: ' + e.message);
+    // El texto no se pierde: se devuelve al input para reintentar
     input.value = texto;
+    mostrarBanner('No se pudo enviar: ' + e.message);
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = '➤'; }
   }
