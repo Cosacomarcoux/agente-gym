@@ -4,6 +4,7 @@ const twilio = require('twilio');
 const Anthropic = require('@anthropic-ai/sdk');
 const { Pool } = require('pg');
 const cron = require('node-cron');
+const guards = require('./guards');
 
 const app = express();
 app.use(express.urlencoded({ extended: true }));
@@ -639,9 +640,7 @@ async function ejecutarTool(nombre, input, remitente) {
       // "alucina" un pago en una charla que no lo menciona (ej: "no voy este
       // mes", "gracias"), el texto_cliente no va a contener palabras de pago y
       // se rechaza. Candado de código contra confirmaciones fantasma.
-      const txt = String(input.texto_cliente || '').toLowerCase();
-      const suenaAPago = /pag|transf|deposit|abon|envi[eé]|mand[eé]|efectivo|plata|guita|comprobante|\$|\d{4,}/.test(txt);
-      if (!txt.trim() || !suenaAPago) {
+      if (!guards.suenaAPago(input.texto_cliente)) {
         return { ok: false, rechazado: true,
           error: 'RECHAZADO: no hay evidencia de que el cliente haya pagado. El texto_cliente no menciona un pago. NO inventes pagos: si el cliente no dijo que pagó, no registres nada y seguí la conversación normal.' };
       }
@@ -1270,8 +1269,8 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
         return;
       }
 
-      const esPagoRealizado = /pagu[eé]|pago[^s]|transfer[ií]|hice el pago|acabo de transferir|ya pag/i.test(mensaje);
-      const esIntFutura = /quiero pagar|voy a pagar|puedo pagar|c[oó]mo pago|quisiera pagar|despu[eé]s (te |lo )?pago|pago (el|la|los) |esta semana pago/i.test(mensaje);
+      const esPagoRealizado = guards.esPagoRealizado(mensaje);
+      const esIntFutura = guards.esPromesaFutura(mensaje);
 
       // ── PROMESA DE PAGO FUTURO: avisar a Cosaco y nada más ──
       // No se encola NADA (nada de confirmaciones de $0). Solo un aviso
