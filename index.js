@@ -83,6 +83,12 @@ async function initDB() {
       notificado_cosaco BOOLEAN DEFAULT FALSE,
       esperando_confirmacion BOOLEAN DEFAULT FALSE
     );
+    -- "Tomar el control": conversaciones donde el bot queda en silencio mientras
+    -- Cosaco atiende personalmente. Se auto-vencen para no dejar el bot mudo por error.
+    CREATE TABLE IF NOT EXISTS conversaciones_pausadas (
+      telefono VARCHAR(50) PRIMARY KEY,
+      pausado_hasta TIMESTAMPTZ NOT NULL
+    );
   `);
   console.log('Tablas listas');
 }
@@ -135,6 +141,27 @@ function logActividad(tipo, detalle, monto = null, telefono = null) {
     'INSERT INTO actividad (tipo, detalle, monto, telefono) VALUES ($1, $2, $3, $4)',
     [tipo, detalle, monto, telefono]
   ).catch(err => console.error('Error logActividad:', err.message));
+}
+
+// ── "Tomar el control": el bot queda mudo en una conversación ────────────────
+async function botPausado(telefono) {
+  try {
+    const { rows } = await pool.query(
+      `SELECT 1 FROM conversaciones_pausadas WHERE telefono = $1 AND pausado_hasta > NOW()`,
+      [telefono]);
+    return rows.length > 0;
+  } catch (e) { return false; }
+}
+async function pausarBot(telefono, horas) {
+  const h = Number(horas) > 0 ? Number(horas) : 3;
+  await pool.query(
+    `INSERT INTO conversaciones_pausadas (telefono, pausado_hasta)
+     VALUES ($1, NOW() + ($2 || ' hours')::interval)
+     ON CONFLICT (telefono) DO UPDATE SET pausado_hasta = NOW() + ($2 || ' hours')::interval`,
+    [telefono, String(h)]);
+}
+async function reanudarBot(telefono) {
+  await pool.query(`DELETE FROM conversaciones_pausadas WHERE telefono = $1`, [telefono]);
 }
 
 // ¿Este cliente ya tiene un pago esperando confirmación? (anti-duplicados)
@@ -848,6 +875,14 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
   try {
     const esCosaco = remitente === process.env.COSACO_WHATSAPP;
     console.log('remitente:', remitente, '| esCosaco:', esCosaco);
+
+    // "Tomar el control": si Cosaco pausó esta conversación, el bot NO responde.
+    // El mensaje del cliente ya se guardó en el webhook, así que Cosaco lo ve en
+    // el panel y responde a mano. Se ignora solo para clientes, nunca para Cosaco.
+    if (!esCosaco && await botPausado(remitente)) {
+      console.log('Bot pausado para', remitente, '— no responde (Cosaco al control)');
+      return;
+    }
     const mensajeUpper = mensaje.trim().toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
     const esSiNo = ['SI', 'S', 'NO', 'N'].includes(mensajeUpper);
 
@@ -1682,6 +1717,17 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 #banner.ok{background:#1e8449}
 #banner button{position:absolute;right:8px;top:6px;background:rgba(255,255,255,.2);border:none;color:#fff;width:28px;height:28px;border-radius:6px;font-size:14px;cursor:pointer}
 #banner .rt{margin-left:10px;text-decoration:underline;cursor:pointer;font-weight:600}
+/* Pestañas Todos / Pendientes */
+.tabs{display:flex;border-bottom:1px solid #e0e0e0;flex-shrink:0}
+.tab{flex:1;padding:10px;text-align:center;font-size:13px;font-weight:600;color:#667;cursor:pointer;border-bottom:2px solid transparent}
+.tab.activo{color:#075e54;border-bottom-color:#075e54}
+.tab .badge-n{display:inline-block;background:#c0392b;color:#fff;border-radius:10px;padding:0 6px;font-size:11px;margin-left:4px;min-width:18px}
+.hilo.pend{background:#fffdf5}
+.hilo .dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#c0392b;margin-right:6px;vertical-align:middle}
+.hilo.paus-mark .hn::after{content:' 🔇';font-size:12px}
+/* Botón tomar el control */
+.ctrl-btn{background:rgba(255,255,255,.18);border:none;color:#fff;font-size:12px;font-weight:600;padding:6px 10px;border-radius:16px;cursor:pointer;white-space:nowrap}
+.ctrl-btn.on{background:#f39c12}
 </style>
 </head>
 <body>
@@ -1689,6 +1735,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 <div class="app">
   <div class="sb" id="sb">
     <div class="sbh">Conversaciones</div>
+    <div class="tabs">
+      <div class="tab activo" id="tab-todos" onclick="cambiarTab('todos')">Todos</div>
+      <div class="tab" id="tab-pend" onclick="cambiarTab('pend')">Pendientes<span class="badge-n" id="badge-pend" style="display:none">0</span></div>
+    </div>
     <div class="sbs"><input type="text" id="buscador" placeholder="Buscar por nombre o mensaje..."></div>
     <div class="hilos" id="hilos"><div class="ph">Cargando...</div></div>
   </div>
@@ -1696,6 +1746,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
     <div class="ch">
       <button class="bv" id="btn-volver">←</button>
       <span class="chn" id="chn">Seleccioná una conversación</span>
+      <button class="ctrl-btn" id="btn-control" style="display:none" onclick="toggleControl()">🤖 Bot activo</button>
     </div>
     <div class="msgs" id="msgs"><div class="ph">← Seleccioná una conversación</div></div>
     <div class="ia" id="ia" style="display:none">
@@ -1707,7 +1758,31 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 <script>
 let telefonoActual = null;
 let todosLosHilos = [];
+let tabActual = 'todos';
+let pausaActual = false;
 const mob = () => window.innerWidth <= 768;
+
+function cambiarTab(t) {
+  tabActual = t;
+  document.getElementById('tab-todos').classList.toggle('activo', t === 'todos');
+  document.getElementById('tab-pend').classList.toggle('activo', t === 'pend');
+  aplicarFiltroYRender();
+}
+
+function aplicarFiltroYRender() {
+  const q = (document.getElementById('buscador').value || '').trim().toLowerCase();
+  let lista = todosLosHilos;
+  if (tabActual === 'pend') lista = lista.filter(h => h.pendiente);
+  if (q) lista = lista.filter(h =>
+    (h.nombre || '').toLowerCase().includes(q) || (h.ultimo_texto || '').toLowerCase().includes(q));
+  renderHilos(lista);
+}
+
+function actualizarBadgePend() {
+  const n = todosLosHilos.filter(h => h.pendiente).length;
+  const b = document.getElementById('badge-pend');
+  if (b) { b.textContent = n; b.style.display = n > 0 ? 'inline-block' : 'none'; }
+}
 
 // ── CAPA ANTI-FALLO-SILENCIOSO ──────────────────────────────────────────────
 // Todo error queda VISIBLE: banner rojo arriba, con opción de reintentar.
@@ -1773,10 +1848,12 @@ function renderHilos(hilos) {
   }
   for (const h of hilos) {
     const div = document.createElement('div');
-    div.className = 'hilo';
+    div.className = 'hilo' + (h.pendiente ? ' pend' : '') + (h.pausado ? ' paus-mark' : '');
     const hn = document.createElement('div');
     hn.className = 'hn';
-    hn.textContent = h.nombre;
+    // Punto rojo si está esperando respuesta
+    if (h.pendiente) { const dot = document.createElement('span'); dot.className = 'dot'; hn.appendChild(dot); }
+    hn.appendChild(document.createTextNode(h.nombre));
     const hp = document.createElement('div');
     hp.className = 'hp';
     hp.textContent = (h.ultimo_texto || '').slice(0, 60);
@@ -1796,43 +1873,21 @@ async function cargarHilos() {
   try {
     const d = await pedir('/panel/data');
     todosLosHilos = d.hilos || [];
+    actualizarBadgePend();
     if (todosLosHilos.length === 0) {
       cont.innerHTML = '<div class="ph">Sin conversaciones</div>';
       return;
     }
-    renderHilos(todosLosHilos);
+    aplicarFiltroYRender();
   } catch (err) {
     cont.innerHTML = '<div class="ph">No se pudieron cargar las conversaciones</div>';
     mostrarBanner('No se pudieron cargar las conversaciones: ' + err.message, { reintentar: cargarHilos });
   }
 }
 
-let buscarTimer = null;
-document.getElementById('buscador').addEventListener('input', async function() {
-  const q = this.value.trim();
-  clearTimeout(buscarTimer);
-  if (!q) { renderHilos(todosLosHilos); return; }
-  // Filtro local inmediato
-  const qLow = q.toLowerCase();
-  const local = todosLosHilos.filter(h =>
-    (h.nombre || '').toLowerCase().includes(qLow) ||
-    (h.ultimo_texto || '').toLowerCase().includes(qLow)
-  );
-  renderHilos(local);
-  // Búsqueda en DB si hay 3+ caracteres
-  if (q.length >= 3) {
-    buscarTimer = setTimeout(async () => {
-      try {
-        const d = await pedir('/panel/buscar?q=' + encodeURIComponent(q));
-        if (document.getElementById('buscador').value.trim() === q) {
-          renderHilos(d.hilos || []);
-        }
-      } catch (e) {
-        // La búsqueda en DB falló, pero el filtro local ya se mostró: aviso suave
-        mostrarBanner('La búsqueda en el servidor falló (se muestran resultados locales): ' + e.message);
-      }
-    }, 400);
-  }
+document.getElementById('buscador').addEventListener('input', function() {
+  // Filtro local inmediato, respetando la pestaña activa (Todos / Pendientes)
+  aplicarFiltroYRender();
 });
 
 async function abrirHilo(telefono, nombre, divEl) {
@@ -1858,6 +1913,9 @@ async function abrirHilo(telefono, nombre, divEl) {
     mostrarBanner('No se pudo abrir la conversación: ' + err.message, { reintentar: () => abrirHilo(telefono, nombre, divEl) });
     return;
   }
+  // Estado del botón "tomar el control"
+  pausaActual = !!d.pausado;
+  pintarBotonControl();
   const wrap = document.createElement('div');
   wrap.className = 'mw';
 
@@ -1886,10 +1944,47 @@ async function abrirHilo(telefono, nombre, divEl) {
   document.getElementById('ia').style.display = 'flex';
 }
 
+// ── TOMAR EL CONTROL (pausar / reactivar el bot en esta conversación) ────────
+function pintarBotonControl() {
+  const b = document.getElementById('btn-control');
+  if (!b) return;
+  b.style.display = telefonoActual ? 'inline-block' : 'none';
+  if (pausaActual) {
+    b.textContent = '🔇 Bot pausado — reactivar';
+    b.classList.add('on');
+  } else {
+    b.textContent = '🤖 Bot activo — tomar control';
+    b.classList.remove('on');
+  }
+}
+
+async function toggleControl() {
+  if (!telefonoActual) return;
+  const b = document.getElementById('btn-control');
+  if (b) b.disabled = true;
+  try {
+    const ruta = pausaActual ? '/panel/reanudar' : '/panel/pausar';
+    await pedir(ruta, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ telefono: telefonoActual, horas: 3 }),
+    });
+    pausaActual = !pausaActual;
+    pintarBotonControl();
+    mostrarBanner(pausaActual ? 'Tomaste el control: el bot no responde por 3h en esta charla' : 'Bot reactivado en esta conversación', { ok: true });
+    cargarHilos();
+  } catch (e) {
+    mostrarBanner('No se pudo cambiar el control: ' + e.message);
+  } finally {
+    if (b) b.disabled = false;
+  }
+}
+
 function volver() {
   document.getElementById('chat').classList.remove('visible');
   document.getElementById('sb').classList.remove('oculto');
   telefonoActual = null;
+  document.getElementById('btn-control').style.display = 'none';
 }
 
 async function enviar() {
@@ -1936,13 +2031,31 @@ app.get('/panel/data', async (req, res) => {
           c.telefono
         ) AS nombre,
         c.texto AS ultimo_texto,
-        c.timestamp AS ultimo_timestamp
+        c.rol  AS ultimo_rol,
+        c.timestamp AS ultimo_timestamp,
+        EXISTS(SELECT 1 FROM conversaciones_pausadas p WHERE p.telefono = c.telefono AND p.pausado_hasta > NOW()) AS pausado
       FROM conversaciones c
       WHERE c.id = (SELECT id FROM conversaciones sub WHERE sub.telefono = c.telefono ORDER BY sub.timestamp DESC LIMIT 1)
       ORDER BY c.timestamp DESC
     `);
+    // "pendiente" = el último mensaje es del cliente (espera respuesta humana)
+    for (const h of rows) h.pendiente = (h.ultimo_rol === 'cliente');
     res.json({ hilos: rows });
   } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Pausar / reanudar el bot en una conversación ("tomar el control")
+app.post('/panel/pausar', async (req, res) => {
+  const { telefono, horas } = req.body;
+  if (!telefono) return res.status(400).json({ error: 'Falta telefono' });
+  try { await pausarBot(telefono, horas); res.json({ ok: true, pausado: true }); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.post('/panel/reanudar', async (req, res) => {
+  const { telefono } = req.body;
+  if (!telefono) return res.status(400).json({ error: 'Falta telefono' });
+  try { await reanudarBot(telefono); res.json({ ok: true, pausado: false }); }
+  catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.get('/panel/buscar', async (req, res) => {
@@ -1974,7 +2087,8 @@ app.get('/panel/hilo', async (req, res) => {
       'SELECT rol, texto, timestamp FROM conversaciones WHERE telefono = $1 ORDER BY timestamp ASC',
       [req.query.telefono]
     );
-    res.json({ mensajes: rows });
+    const pausado = await botPausado(req.query.telefono);
+    res.json({ mensajes: rows, pausado });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -1987,6 +2101,9 @@ app.post('/panel/enviar', async (req, res) => {
     else if (tel.startsWith('54')) tel = tel.slice(2);   // 54 + área
     const to = `whatsapp:+549${tel}`;                    // Argentina: siempre 549
     await twilioClient.messages.create({ from: TWILIO_FROM, to, body: mensaje });
+    // Auto-pausa: al responder a mano, el bot queda mudo 3h en esta charla para
+    // no meter un mensaje automático encima de la respuesta de Cosaco.
+    await pausarBot(telefono, 3).catch(() => {});
     guardarMensaje(telefono, null, mensaje, 'agente-cosaco'); // guardar con el MISMO
     // teléfono del hilo (antes usaba 'to' normalizado y el mensaje aparecía en
     // un hilo separado, como si fuera otra conversación)
