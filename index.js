@@ -89,6 +89,9 @@ async function initDB() {
       telefono VARCHAR(50) PRIMARY KEY,
       pausado_hasta TIMESTAMPTZ NOT NULL
     );
+    -- Comprobantes/imágenes: guardamos la URL de Twilio (se sirve luego por proxy)
+    ALTER TABLE conversaciones ADD COLUMN IF NOT EXISTS media_url TEXT;
+    ALTER TABLE conversaciones ADD COLUMN IF NOT EXISTS media_type VARCHAR(60);
   `);
   console.log('Tablas listas');
 }
@@ -173,11 +176,13 @@ async function hayPagoPendiente(clienteId) {
   return rows.length > 0;
 }
 
-function guardarMensaje(from, nombre, texto, rol, contentJson = null) {
+function guardarMensaje(from, nombre, texto, rol, contentJson = null, media = null) {
   const textoFinal = (!texto || !texto.trim() || texto.trim().startsWith('[')) ? '[sin texto]' : texto;
   pool.query(
-    'INSERT INTO conversaciones (telefono, nombre, rol, texto, content_json) VALUES ($1, $2, $3, $4, $5)',
-    [from, nombre && nombre !== from ? nombre : null, rol, textoFinal, contentJson ? JSON.stringify(contentJson) : null]
+    'INSERT INTO conversaciones (telefono, nombre, rol, texto, content_json, media_url, media_type) VALUES ($1, $2, $3, $4, $5, $6, $7)',
+    [from, nombre && nombre !== from ? nombre : null, rol, textoFinal,
+     contentJson ? JSON.stringify(contentJson) : null,
+     media?.url || null, media?.type || null]
   ).catch(err => console.error('Error guardando mensaje:', err.message));
 }
 
@@ -1651,9 +1656,14 @@ app.post('/webhook', (req, res) => {
   const mensaje = req.body.Body;
   const remitente = req.body.From;
   const profileName = req.body.ProfileName || remitente;
-  guardarMensaje(remitente, profileName, mensaje || '[imagen]', 'cliente');
+  const numMedia = parseInt(req.body.NumMedia) || 0;
+  // Si vino una imagen (comprobante), guardamos su URL para verla en el panel
+  const media = (numMedia > 0 && req.body.MediaUrl0)
+    ? { url: req.body.MediaUrl0, type: req.body.MediaContentType0 || 'image/jpeg' }
+    : null;
+  guardarMensaje(remitente, profileName, mensaje || (media ? '📎 Imagen' : '[imagen]'), 'cliente', null, media);
   res.type('text/xml').send(new twilio.twiml.MessagingResponse().toString());
-  if (parseInt(req.body.NumMedia) > 0 && (!mensaje || !mensaje.trim())) {
+  if (numMedia > 0 && (!mensaje || !mensaje.trim())) {
     comprobantePendiente.set(remitente, true);
     const resp = '¡Recibí tu comprobante de transferencia! 🏑 Para registrar tu pago necesito:\n- Tu nombre completo\n- El monto que transferiste\n\nEscribime los dos datos y listo 😊';
     twilioClient.messages.create({ from: TWILIO_FROM, to: remitente, body: resp })
@@ -1696,6 +1706,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .msg.cliente{background:#fff;align-self:flex-start;border-radius:0 8px 8px 8px}
 .msg.agente,.msg.agente-cosaco{background:#dcf8c6;align-self:flex-end;margin-left:auto;border-radius:8px 0 8px 8px}
 .msg-time{font-size:10px;color:#999;margin-top:4px;text-align:right}
+.msg-img{max-width:220px;max-height:280px;border-radius:6px;display:block;cursor:pointer;object-fit:cover}
 .ph-msg{opacity:.45}
 .ph-txt{font-size:11px;color:#888;font-style:italic}
 .ph{display:flex;align-items:center;justify-content:center;height:100%;color:#999;font-size:15px}
@@ -1760,6 +1771,7 @@ let telefonoActual = null;
 let todosLosHilos = [];
 let tabActual = 'todos';
 let pausaActual = false;
+let _ultimoConteoHilo = 0;
 const mob = () => window.innerWidth <= 768;
 
 function cambiarTab(t) {
@@ -1863,6 +1875,7 @@ function renderHilos(hilos) {
     div.appendChild(hn);
     div.appendChild(hp);
     div.appendChild(ht);
+    if (h.telefono === telefonoActual) div.classList.add('activo');
     div.addEventListener('click', () => abrirHilo(h.telefono, h.nombre, div));
     cont.appendChild(div);
   }
@@ -1916,32 +1929,47 @@ async function abrirHilo(telefono, nombre, divEl) {
   // Estado del botón "tomar el control"
   pausaActual = !!d.pausado;
   pintarBotonControl();
+
+  msgs.innerHTML = '';
+  msgs.appendChild(construirWrap(d.mensajes || []));
+  msgs.scrollTop = msgs.scrollHeight;
+  _ultimoConteoHilo = (d.mensajes || []).length;
+  document.getElementById('ia').style.display = 'flex';
+}
+
+// Arma el contenedor de mensajes (reutilizado por abrirHilo y el auto-refresco)
+function construirWrap(mensajes) {
   const wrap = document.createElement('div');
   wrap.className = 'mw';
-
-  for (const m of (d.mensajes || [])) {
+  for (const m of mensajes) {
     const tx = m.texto || '';
-    if (!tx || tx === '[sin texto]' || (tx.startsWith('[') && tx.endsWith(']'))) continue;
+    const tieneMedia = m.tiene_media;
+    if (!tieneMedia && (!tx || tx === '[sin texto]' || (tx.startsWith('[') && tx.endsWith(']')))) continue;
 
     const div = document.createElement('div');
     div.className = 'msg ' + m.rol;
 
-    const content = document.createElement('div');
-    content.textContent = tx;
-
+    if (tieneMedia) {
+      const img = document.createElement('img');
+      img.className = 'msg-img';
+      img.src = '/panel/media/' + m.id;
+      img.loading = 'lazy';
+      img.onclick = () => window.open('/panel/media/' + m.id, '_blank');
+      img.onerror = () => { img.replaceWith(document.createTextNode('📎 (no se pudo cargar la imagen)')); };
+      div.appendChild(img);
+    }
+    if (tx && tx !== '[sin texto]' && !(tx.startsWith('[') && tx.endsWith(']')) && tx !== '📎 Imagen') {
+      const content = document.createElement('div');
+      content.textContent = tx;
+      div.appendChild(content);
+    }
     const time = document.createElement('div');
     time.className = 'msg-time';
     time.textContent = new Date(m.timestamp).toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' });
-
-    div.appendChild(content);
     div.appendChild(time);
     wrap.appendChild(div);
   }
-
-  msgs.innerHTML = '';
-  msgs.appendChild(wrap);
-  msgs.scrollTop = msgs.scrollHeight;
-  document.getElementById('ia').style.display = 'flex';
+  return wrap;
 }
 
 // ── TOMAR EL CONTROL (pausar / reactivar el bot en esta conversación) ────────
@@ -2016,6 +2044,33 @@ document.getElementById('btn-volver').addEventListener('click', volver);
 document.getElementById('btn-enviar').addEventListener('click', enviar);
 document.getElementById('mi').addEventListener('keydown', e => { if (e.key === 'Enter') enviar(); });
 
+// ── AUTO-ACTUALIZACIÓN ──────────────────────────────────────────────────────
+// Refresca la lista y la conversación abierta cada 8s, sin recargar la página.
+// Respeta lo que estás haciendo: no molesta si estás leyendo mensajes viejos
+// (solo baja al fondo si ya estabas abajo) y se pausa si la pestaña está oculta.
+async function refrescarHiloAbierto() {
+  if (!telefonoActual || document.hidden) return;
+  let d;
+  try { d = await pedir('/panel/hilo?telefono=' + encodeURIComponent(telefonoActual)); }
+  catch (e) { return; }
+  pausaActual = !!d.pausado;
+  pintarBotonControl();
+  const n = (d.mensajes || []).length;
+  if (n === _ultimoConteoHilo) return;   // no hay mensajes nuevos
+  const msgs = document.getElementById('msgs');
+  const cercaDelFondo = (msgs.scrollHeight - msgs.scrollTop - msgs.clientHeight) < 140;
+  msgs.innerHTML = '';
+  msgs.appendChild(construirWrap(d.mensajes || []));
+  if (cercaDelFondo) msgs.scrollTop = msgs.scrollHeight;
+  _ultimoConteoHilo = n;
+}
+
+setInterval(() => {
+  if (document.hidden) return;
+  cargarHilos();            // actualiza lista + badge de pendientes
+  refrescarHiloAbierto();   // actualiza la conversación abierta si hay algo nuevo
+}, 8000);
+
 cargarHilos();
 </script>
 </body>
@@ -2084,12 +2139,35 @@ app.get('/panel/hilo', async (req, res) => {
   if (!req.query.telefono) return res.status(400).json({ error: 'Falta telefono' });
   try {
     const { rows } = await pool.query(
-      'SELECT rol, texto, timestamp FROM conversaciones WHERE telefono = $1 ORDER BY timestamp ASC',
+      `SELECT id, rol, texto, timestamp, (media_url IS NOT NULL) AS tiene_media
+       FROM conversaciones WHERE telefono = $1 ORDER BY timestamp ASC`,
       [req.query.telefono]
     );
     const pausado = await botPausado(req.query.telefono);
     res.json({ mensajes: rows, pausado });
   } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Proxy seguro de imágenes de Twilio: el navegador no puede acceder a la URL
+// de Twilio (requiere auth); este endpoint la trae con las credenciales del
+// servidor y la reenvía. Solo sirve URLs del dominio de Twilio (anti-SSRF).
+app.get('/panel/media/:id', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      'SELECT media_url, media_type FROM conversaciones WHERE id = $1', [req.params.id]);
+    if (!rows.length || !rows[0].media_url) return res.status(404).send('Sin imagen');
+    const url = rows[0].media_url;
+    let host;
+    try { host = new URL(url).host; } catch { return res.status(400).send('URL inválida'); }
+    if (!/(^|\.)twilio\.com$/.test(host)) return res.status(403).send('Origen no permitido');
+    const auth = Buffer.from(`${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`).toString('base64');
+    const r = await fetch(url, { headers: { Authorization: 'Basic ' + auth } });
+    if (!r.ok) return res.status(502).send('No se pudo traer la imagen');
+    const buf = Buffer.from(await r.arrayBuffer());
+    res.set('Content-Type', rows[0].media_type || 'image/jpeg');
+    res.set('Cache-Control', 'private, max-age=86400');
+    res.send(buf);
+  } catch (e) { res.status(500).send('Error: ' + e.message); }
 });
 
 app.post('/panel/enviar', async (req, res) => {
