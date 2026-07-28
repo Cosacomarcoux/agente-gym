@@ -722,10 +722,15 @@ async function ejecutarTool(nombre, input, remitente) {
     }
 
     if (nombre === 'guardar_registro_pendiente') {
-      const telefonoFinal = input.telefono || remitente;
+      // BUG CRÍTICO CORREGIDO: se guardaba bajo input.telefono (el número de la
+      // persona que se anota), pero la confirmación "Sí" se busca por `remitente`
+      // (quien escribe). Si un padre anota a su hija —o Cosaco prueba desde su
+      // celu— los números no coincidían, el registro NO se encontraba al
+      // confirmar, y la IA fabricaba un "todo listo" sin crear a nadie.
+      // Ahora se guarda SIEMPRE bajo `remitente` (quien va a confirmar).
       await pool.query(
         'INSERT INTO registros_pendientes (telefono, datos) VALUES ($1, $2) ON CONFLICT (telefono) DO UPDATE SET datos = $2, timestamp = NOW()',
-        [telefonoFinal, JSON.stringify(input)]
+        [remitente, JSON.stringify(input)]
       );
       return { ok: true };
     }
