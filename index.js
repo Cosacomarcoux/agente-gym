@@ -1680,6 +1680,45 @@ cron.schedule('5 12 * * *', async () => {
   } catch (err) { console.error('Error cron informe:', err.message); }
 });
 
+// ────────────────────────────────────────────────────────────────────────────
+//  INCENTIVO POST-CLASE DE PRUEBA
+//  Cada mañana (9:00 AR = 12:00 UTC): a quien tuvo su PRIMERA clase ayer y aún
+//  no pagó, se le manda un mensaje para sumarse. El sistema marca "enviado" para
+//  no repetir. Requiere una plantilla de WhatsApp aprobada: TEMPLATE_INCENTIVO_PRUEBA.
+// ────────────────────────────────────────────────────────────────────────────
+async function enviarIncentivosPrueba() {
+  // Usa la plantilla de seguimiento de primera clase ya aprobada
+  // (TEMPLATE_CLASE_PRUEBA). Fallback a TEMPLATE_INCENTIVO_PRUEBA por si algún
+  // día se crea una específica.
+  const SID = process.env.TEMPLATE_CLASE_PRUEBA || process.env.TEMPLATE_INCENTIVO_PRUEBA;
+  if (!SID) { console.warn('[INCENTIVO] Falta TEMPLATE_CLASE_PRUEBA — no se envía nada.'); return; }
+  if (!GYM_TOKEN) await loginConReintentos(3, 5000);
+  const hdrs = { Authorization: `Bearer ${GYM_TOKEN}` };
+  let alumnos = [];
+  try {
+    const r = await fetch(`${GYM_API}/alumnos-a-incentivar`, { headers: hdrs });
+    if (!r.ok) { console.error('[INCENTIVO] API', r.status); return; }
+    alumnos = (await r.json()).alumnos || [];
+  } catch (e) { console.error('[INCENTIVO] error consultando:', e.message); return; }
+
+  console.log(`[INCENTIVO] ${alumnos.length} alumno(s) a incentivar`);
+  for (const a of alumnos) {
+    if (!a.telefono) continue;
+    try {
+      const nombre1 = (a.nombre || '').split(' ')[0];
+      await enviarTemplate(a.telefono, SID, { "1": nombre1 }, '[Incentivo clase de prueba]');
+      // Marcar como enviado SOLO si el mensaje salió, para no perder a nadie
+      await fetch(`${GYM_API}/clientes/${a.id}/incentivo-enviado`, { method: 'POST', headers: hdrs });
+      logActividad('incentivo_prueba', a.nombre, null, a.telefono);
+      console.log(`[INCENTIVO] enviado a ${a.nombre}`);
+    } catch (e) {
+      console.error(`[INCENTIVO] falló con ${a.nombre}:`, e.message);
+    }
+  }
+}
+
+cron.schedule('0 12 * * *', () => enviarIncentivosPrueba().catch(e => console.error('cron incentivo:', e.message)));
+
 app.post('/webhook', (req, res) => {
   const mensaje = req.body.Body;
   const remitente = req.body.From;
@@ -2306,6 +2345,16 @@ app.get('/test-jobs', async (req, res) => {
         process.env.TEMPLATE_NOTIFICACION_COSACO,
         { "1": informe }, informe
       );
+      return res.json({ ok: true, job });
+    }
+    if (job === 'incentivo') {
+      // ?preview=1 → solo lista a quién le tocaría, sin enviar ni marcar
+      if (req.query.preview === '1') {
+        if (!GYM_TOKEN) await loginConReintentos(3, 5000);
+        const r = await fetch(`${GYM_API}/alumnos-a-incentivar`, { headers: { Authorization: `Bearer ${GYM_TOKEN}` } });
+        return res.json({ ok: true, preview: await r.json() });
+      }
+      await enviarIncentivosPrueba();
       return res.json({ ok: true, job });
     }
     res.status(400).json({ error: `Job desconocido: ${job}` });
