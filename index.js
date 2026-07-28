@@ -559,24 +559,31 @@ async function ejecutarTool(nombre, input, remitente) {
         }
         return { asignados, errores };
       };
-      // FIX duplicados: 1) memoria propia del bot (telefono → cliente),
-      // 2) búsqueda en el sistema (ahora también matchea por teléfono).
-      // Si el cliente existe — aunque esté Vencido o Suspendido — se REUTILIZA.
+      // FIX duplicados: deduplicar SOLO por el teléfono de la persona que se
+      // anota (input.telefono), NUNCA por el de quien escribe (remitente).
+      // Antes usaba también remitente: si un padre anotaba a su hija —o Cosaco
+      // probaba desde su celu— reutilizaba el cliente mapeado al remitente y la
+      // persona nueva NUNCA se creaba (los turnos iban a otro). Bug real.
+      const telReg = input.telefono;
       let existente = null;
       try {
-        const tels = [input.telefono, remitente].filter(Boolean);
-        for (const t of tels) {
-          const { rows } = await pool.query('SELECT cliente_id FROM telefono_cliente WHERE telefono = $1', [t]);
-          if (rows.length > 0) {
-            const rCli = await fetch(`${GYM_API}/clientes/${rows[0].cliente_id}`, { headers });
-            if (rCli.ok) { existente = await rCli.json(); break; }
-          }
+        const { rows } = await pool.query('SELECT cliente_id FROM telefono_cliente WHERE telefono = $1', [telReg]);
+        if (rows.length > 0) {
+          const rCli = await fetch(`${GYM_API}/clientes/${rows[0].cliente_id}`, { headers });
+          if (rCli.ok) existente = await rCli.json();
         }
       } catch (e) { console.warn('lookup telefono_cliente:', e.message); }
       if (!existente) {
-        const rBuscar = await fetch(`${GYM_API}/clientes?buscar=${encodeURIComponent(input.telefono)}`, { headers });
+        const rBuscar = await fetch(`${GYM_API}/clientes?buscar=${encodeURIComponent(telReg)}`, { headers });
         const existentes = await rBuscar.json();
         existente = Array.isArray(existentes) && existentes.length > 0 ? existentes[0] : null;
+      }
+      // Seguridad: si lo "encontrado" no comparte los últimos 8 dígitos del
+      // teléfono que se está registrando, NO lo reutilizamos (evita agarrar a
+      // otra persona por un match flojo del buscador).
+      if (existente) {
+        const soloNum = s => String(s || '').replace(/\D/g, '').slice(-8);
+        if (soloNum(existente.telefono) !== soloNum(telReg)) existente = null;
       }
       if (!existente) {
         const body = { nombre: nombreCompleto, telefono: input.telefono };
@@ -1722,6 +1729,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .msg.cliente{background:#fff;align-self:flex-start;border-radius:0 8px 8px 8px}
 .msg.agente,.msg.agente-cosaco{background:#dcf8c6;align-self:flex-end;margin-left:auto;border-radius:8px 0 8px 8px}
 .msg-time{font-size:10px;color:#999;margin-top:4px;text-align:right}
+.fecha-sep{text-align:center;margin:12px 0 8px}
+.fecha-sep span{display:inline-block;background:#d9e7f5;color:#4a5568;font-size:11px;font-weight:600;padding:3px 12px;border-radius:12px;text-transform:capitalize;box-shadow:0 1px 1px rgba(0,0,0,.08)}
 .msg-img{max-width:220px;max-height:280px;border-radius:6px;display:block;cursor:pointer;object-fit:cover}
 .ph-msg{opacity:.45}
 .ph-txt{font-size:11px;color:#888;font-style:italic}
@@ -1954,13 +1963,34 @@ async function abrirHilo(telefono, nombre, divEl) {
 }
 
 // Arma el contenedor de mensajes (reutilizado por abrirHilo y el auto-refresco)
+// Etiqueta de fecha estilo WhatsApp: Hoy / Ayer / dd de mes
+function _etiquetaFecha(ts) {
+  const d = new Date(ts), hoy = new Date();
+  const soloDia = x => new Date(x.getFullYear(), x.getMonth(), x.getDate());
+  const difDias = Math.round((soloDia(hoy) - soloDia(d)) / 86400000);
+  if (difDias === 0) return 'Hoy';
+  if (difDias === 1) return 'Ayer';
+  return d.toLocaleDateString('es-AR', { day: '2-digit', month: 'long', year: (d.getFullYear() !== hoy.getFullYear() ? 'numeric' : undefined) });
+}
+
 function construirWrap(mensajes) {
   const wrap = document.createElement('div');
   wrap.className = 'mw';
+  let _diaActual = null;
   for (const m of mensajes) {
     const tx = m.texto || '';
     const tieneMedia = m.tiene_media;
     if (!tieneMedia && (!tx || tx === '[sin texto]' || (tx.startsWith('[') && tx.endsWith(']')))) continue;
+
+    // Separador de fecha cuando cambia el día
+    const diaMsg = new Date(m.timestamp).toDateString();
+    if (diaMsg !== _diaActual) {
+      _diaActual = diaMsg;
+      const sep = document.createElement('div');
+      sep.className = 'fecha-sep';
+      sep.innerHTML = '<span>' + _etiquetaFecha(m.timestamp) + '</span>';
+      wrap.appendChild(sep);
+    }
 
     const div = document.createElement('div');
     div.className = 'msg ' + m.rol;
