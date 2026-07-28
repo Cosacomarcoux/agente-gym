@@ -308,14 +308,17 @@ PROHIBIDO registrar pagos en estos casos (NO son pagos):
 - "Te pago el viernes" / "esta semana paso" → promesa futura: NO llames ninguna tool, el sistema ya avisa solo. Respondé "Dale, cuando abones avisame 🏑".
 NUNCA saques el monto del precio del plan. NUNCA inventes un pago que el cliente no mencionó. Ante la duda, NO registres: preguntá "¿ya hiciste el pago?" antes de hacer nada.
 REGLA DE ORO: si estás por decirle al cliente "el equipo se va a contactar", "le aviso al equipo", "en breve te confirmamos" o cualquier variante, PRIMERO llamá notificar_cosaco con el motivo. Decirlo sin llamar la herramienta = nadie se entera y el cliente queda esperando para siempre. Esto aplica a: dudas que no podés resolver, quejas, pedidos especiales, problemas con turnos o cualquier situación que necesite a un humano.
+REGLA DE ORO 2 — NUNCA CONFIRMES ALGO QUE NO SE EJECUTÓ: solo decís "listo/confirmado/registrado/asignado" si la herramienta correspondiente devolvió ok:true. Si no llamaste ninguna herramienta, o devolvió error/ok:false, NO afirmes que se hizo. Ante la duda, "en breve te confirmamos" + notificar_cosaco. Vale para pagos, turnos, inscripciones y bajas.
 Si identificás al cliente por get_clientes, guardá el mapeo con guardar_telefono_cliente.
 
 REGISTRO DE CLIENTES:
 Cuando llega el mensaje de reserva con formato, verificá cupos con get_turnos y llamá guardar_registro_pendiente con los datos. Después preguntá: "¿Confirmás tu inscripción en Hockey Vivo?"
 
 TURNOS:
-Al confirmar cambio de turno, mostrar día y horario asignado.
-Nunca confirmar cambio sin haber llamado gestionar_turnos_cliente primero.
+Nunca confirmar un turno sin haber llamado gestionar_turnos_cliente Y recibido ok:true.
+- Si la herramienta devuelve ok:true → recién ahí confirmá, mostrando día y horario.
+- Si devuelve ok:false, error o requiere_autorizacion → NO digas que quedó asignado. Decí "lo estamos gestionando, en breve te confirmamos" y llamá notificar_cosaco con el motivo.
+- Si es una persona NUEVA (no está en el sistema) que pide turnos, usá registrar_cliente_y_asignar_turno, NO gestionar_turnos_cliente. Nunca confirmes una inscripción sin que esa herramienta haya devuelto ok:true.
 
 LÍMITE DE TURNOS:
 - Máximo 2 turnos por alumno por defecto.
@@ -461,17 +464,16 @@ const TOOLS = [
   },
   {
     name: 'enviar_mensaje_cliente',
-    description: 'Envía template de WhatsApp a un cliente. template_tipo: recordatorio, mora, suspension, pago_confirmado, general.',
+    description: 'Envía un mensaje de WhatsApp a un cliente. Para un mensaje personalizado usá template_tipo "general" (va como texto libre con lo que pongas en "mensaje"). NO existe confirmación de pagos acá: los pagos los confirma Cosaco.',
     input_schema: {
       type: 'object',
       properties: {
         cliente_id: { type: 'integer' },
         template_tipo: {
           type: 'string',
-          enum: ['recordatorio', 'mora', 'suspension', 'pago_confirmado', 'general'],
+          enum: ['recordatorio', 'mora', 'suspension', 'general'],
         },
-        mensaje: { type: 'string', description: 'Requerido para general' },
-        monto: { type: 'number', description: 'Requerido para pago_confirmado' },
+        mensaje: { type: 'string', description: 'Requerido para general (texto libre)' },
       },
       required: ['cliente_id', 'template_tipo'],
     },
@@ -642,9 +644,17 @@ async function ejecutarTool(nombre, input, remitente) {
       }
       for (const id of (input.turno_ids_agregar || [])) {
         const r = await fetch(`${GYM_API}/turnos/${id}/asignar/${input.cliente_id}`, { method: 'POST', headers });
-        resultados.push({ accion: 'agregar', turno_id: id, ok: r.ok });
+        let detalle = '';
+        if (!r.ok) { try { detalle = (await r.json()).detail || ''; } catch {} }
+        resultados.push({ accion: 'agregar', turno_id: id, ok: r.ok, detalle });
       }
-      return { ok: resultados.every(r => r.ok), resultados };
+      const todoOk = resultados.every(r => r.ok);
+      if (!todoOk) {
+        const fallidos = resultados.filter(r => !r.ok);
+        return { ok: false, resultados,
+          instruccion: `NO se asignaron todos los turnos (fallaron: ${fallidos.map(f => f.turno_id + (f.detalle ? ' — ' + f.detalle : '')).join(', ')}). NO confirmes al cliente. Decile que el equipo lo está gestionando y llamá notificar_cosaco.` };
+      }
+      return { ok: true, resultados };
     }
 
     if (nombre === 'suspender_cliente') {
@@ -753,18 +763,24 @@ async function ejecutarTool(nombre, input, remitente) {
         }
       }
 
+      // La IA NO puede confirmar pagos a clientes. Ese mensaje SOLO lo manda el
+      // flujo determinístico (manejarConfirmacionPago) cuando Cosaco responde SÍ.
+      if (input.template_tipo === 'pago_confirmado') {
+        return { ok: false, rechazado: true,
+          error: 'PROHIBIDO: no podés confirmar pagos a clientes. El pago lo confirma Cosaco con SÍ y el sistema avisa solo. Si el cliente dice que pagó, usá consultar_pago_a_cosaco.' };
+      }
       const templateMap = {
         recordatorio: process.env.TEMPLATE_RECORDATORIO,
         mora: process.env.TEMPLATE_MORA,
         suspension: process.env.TEMPLATE_SUSPENSION,
-        pago_confirmado: process.env.TEMPLATE_PAGO_REGISTRADO,
-        general: process.env.TEMPLATE_MENSAJE_HOCKEYVIVO,
       };
-      const sid = templateMap[input.template_tipo] || process.env.TEMPLATE_MENSAJE_HOCKEYVIVO;
-      let variables;
-      if (input.template_tipo === 'pago_confirmado') variables = { "1": nombre1, "2": String(input.monto || '') };
-      else if (['mora', 'suspension'].includes(input.template_tipo)) variables = { "1": nombre1 };
-      else variables = { "1": nombre1, "2": input.mensaje || '' };
+      const sid = templateMap[input.template_tipo];
+      // FIX: si falta el SID del template, NO caer al saludo genérico de Hockey
+      // Vivo (antes el cliente recibía un mensaje random). Avisar el error.
+      if (!sid) {
+        return { ok: false, error: `No hay template configurado para "${input.template_tipo}". Para un mensaje libre usá template_tipo "general".` };
+      }
+      const variables = { "1": nombre1 };
       await enviarTemplate(cliente.telefono, sid, variables, input.mensaje || null);
       return { ok: true, enviado_a: cliente.nombre };
     }
