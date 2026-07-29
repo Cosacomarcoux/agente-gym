@@ -321,15 +321,15 @@ Nunca confirmar un turno sin haber llamado gestionar_turnos_cliente Y recibido o
 - Si es una persona NUEVA (no está en el sistema) que pide turnos, usá registrar_cliente_y_asignar_turno, NO gestionar_turnos_cliente. Nunca confirmes una inscripción sin que esa herramienta haya devuelto ok:true.
 
 LÍMITE DE TURNOS:
-- Máximo 2 turnos por alumno por defecto.
-- Si un alumno quiere un 3er turno, el sistema consulta a Cosaco antes de asignarlo.
-- Si tiene 2 turnos y pide otro: "¿Querés agregar un 3er turno (requiere autorización especial) o cambiar uno de tus turnos actuales?"
+- El plan de 2 veces por semana es el máximo que se ofrece. NUNCA ofrezcas ni sugieras el plan de 3 veces por tu cuenta.
+- El plan de 3 veces por semana NO está disponible: "los cupos del plan de 3 veces por semana ya están completos". Solo se habilita con autorización especial de Cosaco (el sistema lo maneja) y cuesta $49.000.
+- Si un alumno con 2 turnos pide un 3ro: decile que los cupos de 3x están completos y que podés pedir una autorización especial a Cosaco, o que puede cambiar uno de sus turnos actuales. Si insiste en el 3ro, el sistema consulta a Cosaco automáticamente.
 - Si tiene 3 turnos y pide otro, siempre preguntarle cuál quiere cambiar, nunca agregar.
 
 INFORMACIÓN:
 - Dirección: Moreno (N) 55 entre Andes y Rivadavia, Santiago del Estero
 - Horarios: Lun/Mié/Vie 18:30-21hs | Mar/Jue 16-21hs
-- Planes: 1x $29.000 | 2x $35.000 | 3x $39.000
+- Planes que se ofrecen: 1 vez por semana $35.000 | 2 veces por semana $42.000. (El de 3 veces NO se ofrece: cupos completos.)
 - Alias: hockeyvivo | Primera clase GRATIS
 - Requisitos: palo, botines, agua
 - Cupos: https://hockeyvivo.up.railway.app/cupos
@@ -343,6 +343,8 @@ Sos su asistente administrativo. Usá las tools para:
 - Mensajes masivos: enviar_mensaje_masivo
 - Cambiar turnos: gestionar_turnos_cliente
 Respondé de forma concisa confirmando lo que hiciste.
+
+CARGA DE PAGOS POR COSACO: si Cosaco te pide registrar/cargar/anotar un pago de un alumno (sobre todo en efectivo que cobró en persona), llamá cargar_pago_cosaco con el nombre, el monto y el método. Eso lo ENCOLA y le pedís que confirme con SÍ o NO. No lo des por registrado hasta que Cosaco confirme.
 
 CONFIRMACIÓN DE PAGOS (CRÍTICO): vos NO confirmás ni registrás pagos, y NUNCA digas que confirmaste, registraste o notificaste un pago. Ese proceso es automático y va de a uno. Si Cosaco dice "confirmar", "confirmar pagos", "pendientes" o similar, el sistema ya lo maneja solo (no tenés que hacer nada). Si te pregunta por pagos pendientes, decile que escriba "pendientes" y el sistema los muestra de a uno para confirmar con SÍ o NO. Jamás inventes que un pago quedó confirmado.`;
 
@@ -430,6 +432,19 @@ const TOOLS = [
         texto_cliente: { type: 'string', description: 'La frase TEXTUAL del cliente donde dice que pagó (ej: "ya transferí 35000"). Obligatoria: si el cliente no dijo que pagó, no llames esta herramienta.' },
       },
       required: ['cliente_id', 'cliente_nombre', 'monto', 'metodo', 'texto_cliente'],
+    },
+  },
+  {
+    name: 'cargar_pago_cosaco',
+    description: 'SOLO para Cosaco (el dueño): carga un pago que Cosaco indica —sobre todo pagos en efectivo que recibió en persona— y lo deja para que él lo reconfirme con SÍ. Usala cuando Cosaco dice cosas como "registrá/cargá/anotá un pago en efectivo a Juan de 35000", "Juan me pagó 42000 en efectivo", "cobré 35000 a María". Encola el pago; NO lo des por registrado hasta que Cosaco confirme con SÍ.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        cliente_nombre: { type: 'string', description: 'Nombre del alumno que pagó' },
+        monto: { type: 'number', description: 'Monto que indicó Cosaco' },
+        metodo: { type: 'string', description: 'Efectivo o Transferencia (por defecto Efectivo si Cosaco no aclara)' },
+      },
+      required: ['cliente_nombre', 'monto'],
     },
   },
   {
@@ -719,6 +734,34 @@ async function ejecutarTool(nombre, input, remitente) {
         console.error('Error notificando pago a Cosaco:', err.message);
       }
       return { ok: true, enviado_a_cosaco: true };
+    }
+
+    if (nombre === 'cargar_pago_cosaco') {
+      // Exclusivo de Cosaco: carga un pago (típicamente efectivo) para que él lo
+      // reconfirme con SÍ. Seguro: solo encola, la confirmación real es de Cosaco.
+      if (remitente !== process.env.COSACO_WHATSAPP) {
+        return { ok: false, error: 'Solo Cosaco puede cargar pagos de esta forma.' };
+      }
+      const monto = Number(input.monto);
+      if (!guards.montoValido(monto)) {
+        return { ok: false, error: 'Falta el monto o es inválido. Preguntale a Cosaco cuánto pagó.' };
+      }
+      const metodo = /efectivo/i.test(input.metodo || '') ? 'Efectivo'
+                   : /transfer/i.test(input.metodo || '') ? 'Transferencia' : 'Efectivo';
+      if (!GYM_TOKEN) await loginConReintentos(3, 3000);
+      const clientes = await ejecutarTool('get_clientes', { buscar: input.cliente_nombre }, remitente);
+      if (!Array.isArray(clientes) || clientes.length === 0) {
+        return { ok: false, error: `No encontré a "${input.cliente_nombre}" en el sistema. Verificá el nombre.` };
+      }
+      const cli = clientes[0];
+      // Reemplazar cualquier pendiente previo de ese cliente y encolar el nuevo
+      await pool.query(`DELETE FROM pagos_pendientes WHERE esperando_confirmacion = true AND cliente_id = $1`, [cli.id]);
+      await pool.query(
+        `INSERT INTO pagos_pendientes (cliente_id, cliente_nombre, cliente_from, monto, metodo) VALUES ($1, $2, $3, $4, $5)`,
+        [cli.id, cli.nombre, remitente, monto, metodo]
+      );
+      return { ok: true, encolado: true, cliente: cli.nombre, monto, metodo,
+        instruccion: `Pago encolado. Pedile a Cosaco que confirme con SÍ o NO, mostrando: ${cli.nombre} - $${monto} - ${metodo}. NO digas que ya quedó registrado.` };
     }
 
     if (nombre === 'guardar_registro_pendiente') {
