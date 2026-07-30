@@ -55,6 +55,38 @@ function parsearMonto(texto) {
   return Number.isFinite(n) ? n : null;
 }
 
+// ── RESOLUCIÓN DE NOMBRES (evitar registrar pagos al cliente equivocado) ─────
+// Bug histórico: el bot buscaba "Martina Munar", la API devolvía también a
+// "Martina Chaparro" (match por el nombre de pila) y el código agarraba el
+// PRIMER resultado → registraba el pago a la persona equivocada. Estas funciones
+// exigen que TODOS los tokens del nombre buscado estén en el candidato.
+
+function normalizarTexto(s) {
+  return String(s || '')
+    .toLowerCase()
+    .normalize('NFD').replace(/[̀-ͯ]/g, '') // sacar acentos
+    .replace(/[^a-z0-9\s]/g, ' ')                      // signos → espacio
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// ¿El nombre buscado calza FUERTE con el candidato? Todos los tokens del buscado
+// (nombre y apellido) deben aparecer como comienzo de palabra en el candidato.
+// "martina munar" vs "martina chaparro" → false (falta "munar").
+function nombreCoincide(buscado, candidato) {
+  const toks = normalizarTexto(buscado).split(' ').filter(Boolean);
+  if (!toks.length) return false;
+  const c = ' ' + normalizarTexto(candidato) + ' ';
+  return toks.every(tok => c.includes(' ' + tok));
+}
+
+// De una lista de clientes ({nombre,...}), devolver SOLO los que calzan fuerte.
+// Si el buscado trae apellido, esto descarta homónimos de otro apellido.
+function filtrarClientesPorNombre(buscado, clientes) {
+  const arr = Array.isArray(clientes) ? clientes : [];
+  return arr.filter(c => nombreCoincide(buscado, c && c.nombre));
+}
+
 // Un monto es válido para registrar un pago solo si es un número > 0.
 function montoValido(n) {
   const x = Number(n);
@@ -101,4 +133,7 @@ module.exports = {
   montoValido,
   normalizarWhatsApp,
   telefonoNacional,
+  normalizarTexto,
+  nombreCoincide,
+  filtrarClientesPorNombre,
 };

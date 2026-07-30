@@ -28,6 +28,10 @@ const cobrosPendientesDatos = new Map(); // telefonoCosaco → { nombreCliente, 
 const tercerTurnoPendiente = new Map(); // telefonoCosaco → { clienteId, clienteNombre, turnoIds, clienteFrom }
 const montoPendiente = new Map();       // remitente → { clienteId, clienteNombre, metodo } esperando que diga el monto
 const promesaAvisada = new Map();       // remitente → timestamp del último aviso de "paga después" (throttle 1h)
+const seleccionPagoPendiente = new Map(); // telefonoCosaco → { candidatos:[{id,nombre,...}], monto, metodo } esperando que elija número de ficha
+
+// Link del grupo de WhatsApp que se envía al registrar/reactivar un cliente.
+const GRUPO_WHATSAPP = process.env.GRUPO_WHATSAPP_LINK || 'https://chat.whatsapp.com/GHHchA75hHn7BSbLJl0upd';
 
 async function initDB() {
   await pool.query(`
@@ -300,6 +304,7 @@ const SYSTEM_PROMPT = `Sos el asistente de Hockey Vivo. Respondés en español a
 
 PAGOS (LEER CON ATENCIÓN):
 Solo registrás un pago si el cliente DICE, con sus propias palabras, que YA pagó/transfirió/depositó/abonó. Ahí sí: si no dio el monto, preguntáselo; con nombre y monto, llamá consultar_pago_a_cosaco (poniendo en texto_cliente la frase textual donde dijo que pagó). Después: "Gracias! Ya le avisé al equipo, en breve te confirmamos 🏑".
+NOMBRE DE LA JUGADORA: cuando pidas el nombre para un pago, aclarále SIEMPRE que necesitás el nombre y apellido de la JUGADORA tal como está registrada — muchos que escriben son el papá o la mamá y mandan su propio nombre. Decilo así: "Pasame el nombre y apellido de la jugadora tal como está registrada (si escribís por tu hija, es el nombre de ella, no el tuyo) 🏑". El mismo mensaje sirve aunque escriba la jugadora directamente.
 
 PROHIBIDO registrar pagos en estos casos (NO son pagos):
 - "Este mes no voy" / "no voy a ir" → es una baja/pausa, NO un pago.
@@ -769,18 +774,25 @@ async function ejecutarTool(nombre, input, remitente) {
                    : /transfer/i.test(input.metodo || '') ? 'Transferencia' : 'Efectivo';
       if (!GYM_TOKEN) await loginConReintentos(3, 3000);
       const clientes = await ejecutarTool('get_clientes', { buscar: input.cliente_nombre }, remitente);
-      if (!Array.isArray(clientes) || clientes.length === 0) {
-        return { ok: false, error: `No encontré a "${input.cliente_nombre}" en el sistema. Verificá el nombre.` };
+      const fuertes = guards.filtrarClientesPorNombre(input.cliente_nombre, clientes);
+
+      // Varias fichas con ese nombre (duplicados) → NO adivinar. Guardar selección
+      // y pedirle a Cosaco el número; el handler determinístico toma la respuesta.
+      if (fuertes.length > 1) {
+        seleccionPagoPendiente.set(remitente, { candidatos: fuertes, monto, metodo });
+        let msg = `Hay ${fuertes.length} fichas de "${input.cliente_nombre}". ¿Cuál? Respondé el número:\n`;
+        fuertes.forEach((c, i) => { msg += `${i + 1}. ${c.nombre}${c.estado ? ' — ' + c.estado : ''}\n`; });
+        await enviarWhatsApp(remitente, msg.trim());
+        return { ok: true, requiere_seleccion: true,
+          instruccion: 'Ya le mostré a Cosaco las fichas duplicadas y le pedí que elija el número. NO agregues nada, NO encolaste ningún pago todavía.' };
       }
-      const cli = clientes[0];
-      // Reemplazar cualquier pendiente previo de ese cliente y encolar el nuevo
-      await pool.query(`DELETE FROM pagos_pendientes WHERE esperando_confirmacion = true AND cliente_id = $1`, [cli.id]);
-      await pool.query(
-        `INSERT INTO pagos_pendientes (cliente_id, cliente_nombre, cliente_from, monto, metodo) VALUES ($1, $2, $3, $4, $5)`,
-        [cli.id, cli.nombre, remitente, monto, metodo]
-      );
+      if (fuertes.length === 0) {
+        return { ok: false, error: `No encontré una ficha que coincida con "${input.cliente_nombre}" (nombre y apellido). Verificá el nombre completo.` };
+      }
+      const cli = fuertes[0];
+      await encolarPagoConfirmable(remitente, cli, monto, metodo);
       return { ok: true, encolado: true, cliente: cli.nombre, monto, metodo,
-        instruccion: `Pago encolado. Pedile a Cosaco que confirme con SÍ o NO, mostrando: ${cli.nombre} - $${monto} - ${metodo}. NO digas que ya quedó registrado.` };
+        instruccion: `Pago encolado y ya le pedí a Cosaco que confirme con SÍ o NO. NO agregues otra confirmación ni digas que quedó registrado.` };
     }
 
     if (nombre === 'agregar_a_seguimiento') {
@@ -910,6 +922,59 @@ async function ejecutarTool(nombre, input, remitente) {
   } catch (err) {
     return { error: err.message };
   }
+}
+
+// Encola un pago YA RESUELTO (cliente identificado) y le pide a Cosaco que
+// confirme con SÍ/NO. Reemplaza cualquier pendiente previo del mismo cliente.
+async function encolarPagoConfirmable(remitente, cliente, monto, metodo) {
+  await pool.query(`DELETE FROM pagos_pendientes WHERE esperando_confirmacion = true AND cliente_id = $1`, [cliente.id]);
+  await pool.query(
+    `INSERT INTO pagos_pendientes (cliente_id, cliente_nombre, cliente_from, monto, metodo) VALUES ($1, $2, $3, $4, $5)`,
+    [cliente.id, cliente.nombre, remitente, monto, metodo]
+  );
+  const { rows: existing } = await pool.query(`SELECT COUNT(*) AS count FROM pagos_pendientes WHERE esperando_confirmacion = true`);
+  if (parseInt(existing[0].count) > 1) {
+    await enviarWhatsApp(remitente, `✅ Pago de ${cliente.nombre} $${monto} encolado`);
+  } else {
+    await enviarWhatsApp(remitente, `💰 ${cliente.nombre} - $${monto} - ${metodo}\n¿Confirmás? SÍ o NO`);
+  }
+}
+
+// Resuelve un nombre a UN cliente y encola el pago. Blindaje contra "registrar
+// al cliente equivocado": exige coincidencia fuerte (nombre + apellido).
+//  - 1 match fuerte → encola directo.
+//  - varios (fichas duplicadas) → guarda selección y pide el número de ficha.
+//  - ninguno fuerte → avisa, NO adivina.
+// Devuelve true si dejó algo resuelto/preguntado (para cortar el flujo).
+async function resolverYEncolarPago(remitente, nombreBuscar, monto, metodo) {
+  const clientes = await ejecutarTool('get_clientes', { buscar: nombreBuscar }, remitente);
+  const fuertes = guards.filtrarClientesPorNombre(nombreBuscar, clientes);
+
+  if (fuertes.length === 1) {
+    await encolarPagoConfirmable(remitente, fuertes[0], monto, metodo);
+    return true;
+  }
+  if (fuertes.length > 1) {
+    // Fichas duplicadas del mismo nombre → que Cosaco elija por número.
+    seleccionPagoPendiente.set(remitente, { candidatos: fuertes, monto, metodo });
+    let msg = `Hay ${fuertes.length} fichas de "${nombreBuscar}". ¿Cuál? Respondé el número:\n`;
+    fuertes.forEach((c, i) => {
+      msg += `${i + 1}. ${c.nombre}${c.estado ? ' — ' + c.estado : ''}${c.nivel ? ', ' + c.nivel : ''}\n`;
+    });
+    await enviarWhatsApp(remitente, msg.trim());
+    return true;
+  }
+  // Ninguna coincidencia fuerte: mostrar lo más parecido, sin adivinar.
+  const arr = Array.isArray(clientes) ? clientes : [];
+  if (arr.length > 0) {
+    let msg = `No encontré una ficha que coincida con "${nombreBuscar}". Lo más parecido:\n`;
+    arr.slice(0, 5).forEach(c => { msg += `• ${c.nombre}\n`; });
+    msg += `Escribime el nombre completo tal como figura, o "pagó [nombre] [monto]".`;
+    await enviarWhatsApp(remitente, msg.trim());
+  } else {
+    await enviarWhatsApp(remitente, `No encontré a nadie con el nombre "${nombreBuscar}". Verificá cómo está registrado.`);
+  }
+  return true;
 }
 
 // Muestra el siguiente pago pendiente (uno por uno) o avisa que no quedan.
@@ -1058,11 +1123,11 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
         } else {
           // No encontró cliente → pedir nombre de nuevo
           comprobantePendiente.set(remitente, true);
-          await enviarWhatsApp(remitente, `No encontré a "${nombre}" en el sistema. ¿Podés decirme tu nombre completo tal como está registrado?`);
+          await enviarWhatsApp(remitente, `No encontré a "${nombre}" en el sistema 🤔 Pasame el nombre y apellido de la jugadora tal como está registrada. Si escribís por tu hija, es el nombre de ella (no el tuyo) 🏑`);
         }
       } else if (!nombre) {
         comprobantePendiente.set(remitente, true);
-        await enviarWhatsApp(remitente, `Necesito tu nombre completo para identificarte. ¿Cómo te llamás?`);
+        await enviarWhatsApp(remitente, `Para registrar el pago necesito el nombre y apellido de la jugadora, tal como está registrada. Si escribís por tu hija, pasame el nombre de ella (no el tuyo) 🏑`);
       } else {
         // Tiene nombre pero falta monto
         comprobantePendiente.set(remitente, true);
@@ -1074,6 +1139,40 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
 
     // ── 1. MODO SECRETARIO (solo Cosaco) ──────────────────────────────────
     if (esCosaco) {
+      // ── SELECCIÓN DE FICHA (fichas duplicadas): Cosaco responde el número ──
+      // Va PRIMERO para que ese "1"/"2" elija la ficha y NUNCA se interprete como
+      // monto ($1). Solo se activa si hay una selección pendiente.
+      if (seleccionPagoPendiente.has(remitente)) {
+        const sel = seleccionPagoPendiente.get(remitente);
+        const mLimpio = mensaje.trim().toLowerCase();
+        if (/^(no|cancelar|nada|dejalo|olvidalo)$/.test(mLimpio)) {
+          seleccionPagoPendiente.delete(remitente);
+          await enviarWhatsApp(remitente, 'Ok, cancelo esa carga. Decime de nuevo cuando quieras 🏑');
+          return;
+        }
+        const mNum = mensaje.trim().match(/^#?\s*(\d{1,2})$/);
+        if (mNum) {
+          const idx = parseInt(mNum[1], 10) - 1;
+          if (idx >= 0 && idx < sel.candidatos.length) {
+            const cliente = sel.candidatos[idx];
+            seleccionPagoPendiente.delete(remitente);
+            if (sel.monto && sel.monto > 0) {
+              await encolarPagoConfirmable(remitente, cliente, sel.monto, sel.metodo || 'Transferencia');
+            } else {
+              // Faltaba el monto: ahora que sabemos la ficha, lo pedimos.
+              cobrosPendientesDatos.set(remitente, { nombreCliente: cliente.nombre, metodo: sel.metodo || 'Transferencia', clienteId: cliente.id, clienteNombre: cliente.nombre });
+              await enviarWhatsApp(remitente, `Elegiste a ${cliente.nombre}. ¿Cuál fue el monto?`);
+            }
+            return;
+          }
+          await enviarWhatsApp(remitente, `Ese número no está en la lista. Elegí entre 1 y ${sel.candidatos.length}, o escribí "no" para cancelar.`);
+          return;
+        }
+        // No fue número ni cancelación → recordar que estamos esperando la elección.
+        await enviarWhatsApp(remitente, `Necesito que elijas con un número (1 a ${sel.candidatos.length}) cuál ficha es, o "no" para cancelar.`);
+        return;
+      }
+
       // Lista de pagos múltiples: 2+ líneas con "Nombre $monto"
       const lineas = mensaje.split('\n').map(l => l.trim()).filter(l => l);
       const esPagoMultiple = lineas.length >= 2 && lineas.every(l => /\w+.*\$?[\d.,]+/.test(l));
@@ -1095,8 +1194,9 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
           if (!nombre) continue;
           if (!(monto > 0)) { procesados.push({ nombre, monto, beca, montoInvalido: true }); continue; }
           const clientes = await ejecutarTool('get_clientes', { buscar: nombre }, remitente);
-          if (Array.isArray(clientes) && clientes.length > 0) {
-            const cliente = clientes[0];
+          const fuertes = guards.filtrarClientesPorNombre(nombre, clientes);
+          if (fuertes.length === 1) {
+            const cliente = fuertes[0];
             const metodo = beca ? `Transferencia (Beca ${beca}%)` : 'Transferencia';
             await pool.query(`DELETE FROM pagos_pendientes WHERE esperando_confirmacion = true AND cliente_id = $1`, [cliente.id]);
             await pool.query(
@@ -1104,6 +1204,8 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
               [cliente.id, cliente.nombre, remitente, monto, metodo]
             );
             procesados.push({ nombre: cliente.nombre, monto, beca });
+          } else if (fuertes.length > 1) {
+            procesados.push({ nombre, monto, beca, ambiguo: true });
           } else {
             procesados.push({ nombre, monto, beca, noEncontrado: true });
           }
@@ -1114,6 +1216,7 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
         let resumen = `Procesé ${procesados.filter(p => !p.noEncontrado).length} pagos:\n\n`;
         for (const p of procesados) {
           if (p.montoInvalido) resumen += `⚠️ Monto inválido (no encolé): ${p.nombre}\n`;
+          else if (p.ambiguo) resumen += `⚠️ Hay varias fichas de "${p.nombre}" — cargalo aparte para elegir cuál\n`;
           else if (p.noEncontrado) resumen += `⚠️ No encontré: ${p.nombre}\n`;
           else resumen += `💰 ${p.nombre} - $${formatMonto(p.monto)}${p.beca ? ` - Beca ${p.beca}%` : ''}\n`;
         }
@@ -1202,6 +1305,31 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
         return;
       }
 
+      // ── CORRECCIÓN DE NOMBRE sobre un pago pendiente ──────────────────────
+      // "No, Martina Munar" / "no es Delfina Coronel" / "era Juan Perez":
+      // descarta el pendiente actual y re-resuelve el nombre corregido,
+      // CONSERVANDO el monto/método. Antes esto lo tomaba la IA, que solo
+      // reescribía el texto sin cambiar el registro → confirmaba a la persona
+      // equivocada. Ahora es determinístico.
+      if (pagosPend.length > 0 && !esSiNo) {
+        const mCorr = mensaje.trim().match(/^no[,.\-!\s]+(?:es\s+|era\s+|es la\s+|es el\s+)?([a-záéíóúüñ][a-záéíóúüñ\s.]+)$/i);
+        if (mCorr) {
+          const nombreCorregido = mCorr[1].replace(/[.!]+$/, '').trim();
+          // Evitar falsos positivos tipo "no gracias", "no se", "no todavia"
+          const descartes = /^(gracias|se|s[eé]|todav[ií]a|todavia|ahora|por ahora|aun|a[uú]n|nada|ninguno|ninguna|es correcto|est[aá] bien|esta bien)$/i;
+          if (nombreCorregido.length >= 3 && !descartes.test(nombreCorregido)) {
+            const pendiente = pagosPend[0];
+            const monto = pendiente.monto;
+            const metodo = pendiente.metodo || 'Transferencia';
+            // Descartar el pendiente equivocado
+            await pool.query(`DELETE FROM pagos_pendientes WHERE id = $1`, [pendiente.id]);
+            if (!GYM_TOKEN) await loginConReintentos(3, 3000);
+            await resolverYEncolarPago(remitente, nombreCorregido, monto, metodo);
+            return;
+          }
+        }
+      }
+
       // Si/No → suspensión pendiente
       const { rows: suspsPend } = await pool.query(
         `SELECT * FROM suspensiones_pendientes WHERE esperando_confirmacion = true ORDER BY timestamp ASC LIMIT 1`
@@ -1258,49 +1386,45 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
         return;
       }
 
-      // "confirmar/registrar el pago de [Nombre] [$monto] [metodo]"
-      const matchConfirmar = mensaje.match(/(?:confirmar?|registrar?)\s+el\s+pago\s+de\s+(.+?)(?:\s+\$?([\d.,]+))?(?:\s+(transferencia|efectivo))?$/i);
+      // "confirmar/registrar el pago de [Nombre] [$monto] [en/por metodo]"
+      // Tolera "en/por" antes del método y signos finales ("...29000 en transferencia?").
+      const matchConfirmar = mensaje.match(/(?:confirm[aá]r?|registr[aá]r?|carg[aá]r?)\s+el\s+pago\s+de\s+(.+?)(?:\s+\$?(\d[\d.,]*))?(?:\s+(?:en\s+|por\s+)?(transferencia|efectivo|transf|efvo))?\s*[?.!¿¡]*$/i);
       // "[Nombre] pagó/pago [$monto] [metodo]" — solo cuando empieza con nombre
-      const matchPagoNombre = !matchConfirmar && mensaje.match(/^([A-Za-záéíóúüñÁÉÍÓÚÜÑ\s]+?)\s+pag[oó]\s*\$?([\d.,]+)?[\s,]*(efectivo|transferencia)?$/i);
+      const matchPagoNombre = !matchConfirmar && mensaje.match(/^([A-Za-záéíóúüñÁÉÍÓÚÜÑ\s]+?)\s+pag[oó]\s*\$?(\d[\d.,]*)?[\s,]*(?:en\s+|por\s+)?(efectivo|transferencia|transf|efvo)?\s*[?.!¿¡]*$/i);
 
       const matchPago = matchConfirmar || matchPagoNombre;
       if (matchPago) {
-        const nombreBuscar = (matchConfirmar ? matchConfirmar[1] : matchPagoNombre[1]).trim();
+        const nombreBuscar = (matchConfirmar ? matchConfirmar[1] : matchPagoNombre[1]).replace(/[?.!¿¡]+$/, '').trim();
         const montoRaw = matchConfirmar ? matchConfirmar[2] : matchPagoNombre[2];
         const metodoRaw = matchConfirmar ? matchConfirmar[3] : matchPagoNombre[3];
         const monto = montoRaw ? parseFloat(montoRaw.replace(/\./g, '').replace(',', '.')) : null;
-        const metodo = metodoRaw
-          ? (metodoRaw.charAt(0).toUpperCase() + metodoRaw.slice(1).toLowerCase())
-          : 'Transferencia';
+        const metodo = /efec|efvo/i.test(metodoRaw || '') ? 'Efectivo' : 'Transferencia';
 
         if (!GYM_TOKEN) await loginConReintentos(3, 3000);
         const clientes = await ejecutarTool('get_clientes', { buscar: nombreBuscar }, remitente);
-        if (!Array.isArray(clientes) || clientes.length === 0) {
-          await enviarWhatsApp(process.env.COSACO_WHATSAPP, `⚠️ No encontré cliente con el nombre "${nombreBuscar}"`);
-          return;
-        }
-        const cliente = clientes[0];
+        const fuertes = guards.filtrarClientesPorNombre(nombreBuscar, clientes);
 
-        // Sin monto → guardar en Map y preguntar
+        // Sin monto → primero resolver a UN cliente, después pedir el monto.
         if (!monto) {
-          cobrosPendientesDatos.set(remitente, { nombreCliente: nombreBuscar, metodo, clienteId: cliente.id, clienteNombre: cliente.nombre });
-          await enviarWhatsApp(process.env.COSACO_WHATSAPP, `Encontré a ${cliente.nombre}. ¿Cuál fue el monto transferido?`);
+          if (fuertes.length === 1) {
+            const cliente = fuertes[0];
+            cobrosPendientesDatos.set(remitente, { nombreCliente: nombreBuscar, metodo, clienteId: cliente.id, clienteNombre: cliente.nombre });
+            await enviarWhatsApp(process.env.COSACO_WHATSAPP, `Encontré a ${cliente.nombre}. ¿Cuál fue el monto?`);
+            return;
+          }
+          if (fuertes.length > 1) {
+            seleccionPagoPendiente.set(remitente, { candidatos: fuertes, monto: null, metodo });
+            let msg = `Hay ${fuertes.length} fichas de "${nombreBuscar}". ¿Cuál? Respondé el número:\n`;
+            fuertes.forEach((c, i) => { msg += `${i + 1}. ${c.nombre}${c.estado ? ' — ' + c.estado : ''}\n`; });
+            await enviarWhatsApp(process.env.COSACO_WHATSAPP, msg.trim());
+            return;
+          }
+          await enviarWhatsApp(process.env.COSACO_WHATSAPP, `⚠️ No encontré una ficha que coincida con "${nombreBuscar}". Verificá el nombre completo.`);
           return;
         }
 
-        // Con nombre y monto → encolar
-        await pool.query(`DELETE FROM pagos_pendientes WHERE esperando_confirmacion = true AND cliente_id = $1`, [cliente.id]);
-        await pool.query(
-          `INSERT INTO pagos_pendientes (cliente_id, cliente_nombre, cliente_from, monto, metodo) VALUES ($1, $2, $3, $4, $5)`,
-          [cliente.id, cliente.nombre, remitente, monto, metodo]
-        );
-        const { rows: existing } = await pool.query(`SELECT COUNT(*) AS count FROM pagos_pendientes WHERE esperando_confirmacion = true`);
-        if (parseInt(existing[0].count) > 1) {
-          await enviarWhatsApp(process.env.COSACO_WHATSAPP, `✅ Pago de ${cliente.nombre} $${monto} encolado`);
-        } else {
-          await enviarWhatsApp(process.env.COSACO_WHATSAPP,
-            `💰 ${cliente.nombre} - $${monto} - ${metodo}\n¿Confirmás? SÍ o NO`);
-        }
+        // Con nombre y monto → resolver (nombre+apellido) y encolar / preguntar cuál.
+        await resolverYEncolarPago(remitente, nombreBuscar, monto, metodo);
         return;
       }
 
@@ -1411,7 +1535,7 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
             const t = Array.isArray(turnosData) ? turnosData.find(t => t.id === id) : null;
             return t ? `📅 ${t.dia_semana} ${t.hora_inicio}` : `📅 Turno ${id}`;
           }).join('\n');
-          const texto = `¡Todo listo ${datos.nombre}! Ya quedaste registrado/a en Hockey Vivo 🎉\n\nTus turnos:\n${turnosStr}\n\nNo olvidés traer: 🏑 Palo | 👟 Botines | 💧 Agua\n¡Te esperamos! 💪`;
+          const texto = `¡Todo listo ${datos.nombre}! Ya quedaste registrado/a en Hockey Vivo 🎉\n\nTus turnos:\n${turnosStr}\n\nSumate al grupo de WhatsApp del gimnasio para enterarte de todo 👇\n${GRUPO_WHATSAPP}\n\nNo olvidés traer: 🏑 Palo | 👟 Botines | 💧 Agua\n¡Te esperamos! 💪`;
           await enviarWhatsApp(remitente, texto, datos.nombre);
           guardarMensaje(remitente, datos.nombre, texto, 'agente');
         } else {
@@ -1455,7 +1579,7 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
           }
           await enviarWhatsApp(remitente, `Gracias! Ya le avisé al equipo, en breve te confirmamos 🏑`, cliente.nombre);
         } else {
-          await enviarWhatsApp(remitente, `No encontré ese nombre. ¿Podés decirme tu nombre completo?`);
+          await enviarWhatsApp(remitente, `No encontré ese nombre 🤔 Pasame el nombre y apellido de la jugadora tal como está registrada. Si escribís por tu hija, es el nombre de ella (no el tuyo) 🏑`);
           pagosEsperandoNombre.set(remitente, datosPago); // seguir esperando
         }
         return;
@@ -1520,7 +1644,7 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
           const montoDetectado = matchMonto ? parseFloat(matchMonto[1].replace(/\./g, '').replace(',', '.')) : 0;
           const metodoDetectado = matchMonto?.[2] ? (matchMonto[2].charAt(0).toUpperCase() + matchMonto[2].slice(1).toLowerCase()) : 'Transferencia';
           pagosEsperandoNombre.set(remitente, { monto: montoDetectado, metodo: metodoDetectado });
-          await enviarWhatsApp(remitente, `¡Gracias por avisarnos! ¿Podés decirme tu nombre completo para identificarte?`);
+          await enviarWhatsApp(remitente, `¡Gracias por avisarnos! Para identificar el pago, pasame el nombre y apellido de la jugadora tal como está registrada. Si escribís por tu hija, es el nombre de ella (no el tuyo) 🏑`);
         }
         return;
       }
@@ -1822,7 +1946,7 @@ app.post('/webhook', (req, res) => {
   res.type('text/xml').send(new twilio.twiml.MessagingResponse().toString());
   if (numMedia > 0 && (!mensaje || !mensaje.trim())) {
     comprobantePendiente.set(remitente, true);
-    const resp = '¡Recibí tu comprobante de transferencia! 🏑 Para registrar tu pago necesito:\n- Tu nombre completo\n- El monto que transferiste\n\nEscribime los dos datos y listo 😊';
+    const resp = '¡Recibí el comprobante de transferencia! 🏑 Para registrar el pago necesito:\n- Nombre y apellido de la jugadora (tal como está registrada — si sos el papá o la mamá, es el nombre de tu hija, no el tuyo)\n- El monto que transferiste\n\nEscribime los dos datos y listo 😊';
     twilioClient.messages.create({ from: TWILIO_FROM, to: remitente, body: resp })
       .then(() => guardarMensaje(remitente, null, resp, 'agente'))
       .catch(err => console.error('Error respondiendo comprobante:', err.message));

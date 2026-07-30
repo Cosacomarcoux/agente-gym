@@ -93,6 +93,36 @@ test('pagos ya hechos se detectan como realizados (y no promesa)', () => {
   }
 });
 
+// ── Resolución de nombres: no registrar al cliente equivocado ───────────────
+test('nombreCoincide exige nombre Y apellido (no confunde homónimos)', () => {
+  assert.strictEqual(g.nombreCoincide('Martina Munar', 'Martina Chaparro'), false);
+  assert.strictEqual(g.nombreCoincide('Delfina Coronel', 'Delfina Chavez'), false);
+  assert.ok(g.nombreCoincide('Martina Munar', 'Martina Munar'));
+  assert.ok(g.nombreCoincide('martina munar', 'Martina Belén Munar')); // apellido presente
+  assert.ok(g.nombreCoincide('Martina', 'Martina Chaparro'));          // solo pila → calza
+  assert.ok(g.nombreCoincide('Muñoz', 'Ana Munoz'));                    // acentos/ñ
+});
+
+test('filtrarClientesPorNombre descarta el homónimo de otro apellido', () => {
+  const clientes = [
+    { id: 1, nombre: 'Martina Chaparro' },
+    { id: 2, nombre: 'Martina Munar' },
+  ];
+  const r = g.filtrarClientesPorNombre('Martina Munar', clientes);
+  assert.strictEqual(r.length, 1);
+  assert.strictEqual(r[0].id, 2);
+});
+
+test('filtrarClientesPorNombre detecta fichas duplicadas del mismo nombre', () => {
+  const clientes = [
+    { id: 324, nombre: 'Delfina Coronel' },
+    { id: 65, nombre: 'Delfina Coronel' },
+    { id: 9, nombre: 'Delfina Chavez' },
+  ];
+  const r = g.filtrarClientesPorNombre('Delfina Coronel', clientes);
+  assert.strictEqual(r.length, 2); // las dos Coronel, NO la Chavez
+});
+
 // ── parsearMonto: leer el monto del mensaje ─────────────────────────────────
 test('parsearMonto lee montos en formatos comunes', () => {
   assert.strictEqual(g.parsearMonto('transferí 35000'), 35000);
