@@ -56,6 +56,43 @@ test('"voy a pagar" es promesa y NO realizado', () => {
   assert.ok(g.esPromesaFutura(txt) && !g.esPagoRealizado(txt));
 });
 
+// Regresión: frases de pago FUTURO que antes el bot confundía con "ya pagó" y
+// respondía "¿cuánto transferiste?". Todas deben ser promesa y NO realizado.
+test('promesas futuras NUNCA se toman como pago realizado', () => {
+  for (const txt of [
+    'mañana te pago',
+    'te pago el viernes',
+    'te pago cuando cobre',
+    'el jueves te transfiero',
+    'la semana que viene pago',
+    'el lunes te deposito',
+    'ahora no puedo, la semana que viene te transfiero',
+    'a fin de mes te abono',
+    'apenas cobre te pago',
+    'el finde te paso la plata',
+    'necesito pagar pero puedo el lunes',
+  ]) {
+    assert.ok(g.esPromesaFutura(txt), `debería ser promesa: "${txt}"`);
+    assert.strictEqual(g.esPagoRealizado(txt), false, `NO debería ser pago hecho: "${txt}"`);
+  }
+});
+
+// Pagos ya hechos que deben seguir clasificándose como realizados.
+test('pagos ya hechos se detectan como realizados (y no promesa)', () => {
+  for (const txt of [
+    'ya pagué',
+    'ya te transferí',
+    'recién deposité',
+    'acabo de transferir 35000',
+    'te pasé el comprobante',
+    'listo, aboné en efectivo',
+    'hice la transferencia',
+  ]) {
+    assert.ok(g.esPagoRealizado(txt), `debería ser pago hecho: "${txt}"`);
+    assert.strictEqual(g.esPromesaFutura(txt), false, `NO debería ser promesa: "${txt}"`);
+  }
+});
+
 // ── parsearMonto: leer el monto del mensaje ─────────────────────────────────
 test('parsearMonto lee montos en formatos comunes', () => {
   assert.strictEqual(g.parsearMonto('transferí 35000'), 35000);

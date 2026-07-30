@@ -1468,16 +1468,23 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
       // No se encola NADA (nada de confirmaciones de $0). Solo un aviso
       // informativo, con throttle de 1 h por cliente para no spamear.
       if (esIntFutura && !esPagoRealizado) {
+        const cliP = await buscarClientePorTelefono(remitente).catch(() => null);
+        const quien = cliP ? cliP.nombre : remitente.replace('whatsapp:', '');
         const ultimo = promesaAvisada.get(remitente) || 0;
         if (Date.now() - ultimo > 3600000) {
           promesaAvisada.set(remitente, Date.now());
-          const cliP = await buscarClientePorTelefono(remitente).catch(() => null);
-          const quien = cliP ? cliP.nombre : remitente.replace('whatsapp:', '');
           enviarWhatsApp(process.env.COSACO_WHATSAPP,
             `📣 ${quien} avisó que va a pagar más adelante: "${mensaje.slice(0, 120)}"\n(Solo aviso — no hay nada que confirmar)`).catch(() => {});
           logActividad('promesa_pago', quien, null, remitente);
         }
-        // sin return: Claude le responde amablemente al cliente
+        // CLAVE: es una PROMESA de pago futuro → responder amable y CORTAR acá.
+        // Nunca preguntarle el monto ni pasarlo a la IA (evita el "¿cuánto
+        // transferiste?" cuando el cliente solo dijo que paga más adelante).
+        const nombre1 = cliP && cliP.nombre ? cliP.nombre.split(' ')[0] : '';
+        await enviarWhatsApp(remitente,
+          `¡Perfecto${nombre1 ? ', ' + nombre1 : ''}! No hay problema, quedamos a la espera. Cuando lo abones avisanos por acá y listo 🏑`,
+          cliP ? cliP.nombre : null);
+        return;
       }
 
       if (esPagoRealizado && !esIntFutura) {

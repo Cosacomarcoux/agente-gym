@@ -16,14 +16,28 @@ function suenaAPago(texto) {
   return /pag|transf|deposit|abon|envi[eé]|mand[eé]|efectivo|plata|guita|comprobante|\$|\d{4,}/.test(t);
 }
 
-// ¿El cliente dice que YA pagó? (pago realizado, pretérito)
+// ¿El cliente dice que YA pagó? (pago realizado — SOLO pretérito / acción hecha).
+// OJO: NO debe matchear presente/futuro como "te pago", "voy a pagar" o
+// "el viernes transfiero": eso es promesa, no pago hecho. Fue la causa de que el
+// bot preguntara "¿cuánto transferiste?" ante un simple "mañana te pago".
 function esPagoRealizado(texto) {
-  return /pagu[eé]|pago[^s]|transfer[ií]|hice el pago|acabo de transferir|ya pag/i.test(String(texto || ''));
+  const t = String(texto || '').toLowerCase();
+  // Una promesa futura NUNCA es un pago realizado (desempate a favor de la promesa).
+  if (esPromesaFutura(t)) return false;
+  return /pagu[eé]|ya pag|transfer[ií](?!r)|ya transferid|deposit[eé]|dep[oó]sit[eé]|abon[eé]|se[ñn][eé]|hice (el|la|un|una) (pago|dep[oó]sito|transferencia)|acabo de (pagar|transferir|depositar|abonar)|reci[eé]n (pagu[eé]|transfer[ií]|deposit[eé]|abon[eé])|ya (te )?(pagu[eé]|transfer[ií]|deposit[eé]|abon[eé])|te (pagu[eé]|transfer[ií]|deposit[eé]|abon[eé]|se[ñn][eé])|ya est[aá] (hecho )?el (pago|dep[oó]sito)|mand[eé] el comprobante|pas[eé] el comprobante|adjunto el comprobante|ac[aá] (est[aá]|te dejo|te mando) el comprobante/i.test(t);
 }
 
-// ¿El cliente dice que va a pagar MÁS ADELANTE? (promesa futura → solo aviso)
+// ¿El cliente dice que va a pagar MÁS ADELANTE? (promesa futura → solo aviso,
+// nunca se le pregunta el monto). Cubre intención explícita ("voy a pagar",
+// "cómo pago") y cualquier mención de pago junto a un marcador temporal futuro
+// ("mañana", "el viernes", "cuando cobre", "la semana que viene", etc.).
 function esPromesaFutura(texto) {
-  return /quiero pagar|voy a pagar|puedo pagar|c[oó]mo pago|quisiera pagar|despu[eé]s (te |lo )?pago|pago (el|la|los) |esta semana pago/i.test(String(texto || ''));
+  const t = String(texto || '').toLowerCase();
+  const intencionExplicita = /(quiero|voy a|puedo|quisiera|querr[ií]a|necesito|pienso|tengo que|deber[ií]a) (pagar|transferir|depositar|abonar|se[ñn]ar)|c[oó]mo (te )?(pago|hago el pago|abono|transfiero|deposito)|te (pago|transfiero|deposito|mando|paso|abono|se[ñn]o) (despu[eé]s|luego|m[aá]s tarde|m[aá]s adelante|ma[ñn]ana|el |la |los |cuando |apenas |en cuanto |ni bien |a fin|esta semana|la semana|el finde|el fin)|pago (el|la|los) (lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado|domingo|finde|fin|semana|mes|d[ií]a|pr[oó]ximo)|esta semana (pago|te pago|abono|transfiero)|ma[ñn]ana (te )?(pago|abono|transfiero|deposito)/;
+  if (intencionExplicita.test(t)) return true;
+  const futuro = /despu[eé]s|luego|m[aá]s tarde|m[aá]s adelante|ma[ñn]ana|pasado ma[ñn]ana|el (lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado|domingo|finde|fin de semana|mes|d[ií]a|pr[oó]ximo)|la semana que viene|semana que viene|el mes que viene|a fin de mes|fin de mes|cuando (pueda|cobre|tenga|junte|me paguen)|apenas (pueda|cobre|tenga)|en cuanto (pueda|cobre|tenga)|ni bien (pueda|cobre)|ahora no (puedo|tengo)|no puedo (pagar )?ahora|no tengo (ahora|la plata)/;
+  const mencionPago = /pag|transf|dep[oó]sit|abon|se[ñn]a|cuota|plata/;
+  return futuro.test(t) && mencionPago.test(t);
 }
 
 // Extrae un monto del texto ("transferí 35.000" → 35000, "$29.000" → 29000).
