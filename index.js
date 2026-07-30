@@ -346,6 +346,8 @@ Respondé de forma concisa confirmando lo que hiciste.
 
 CARGA DE PAGOS POR COSACO: si Cosaco te pide registrar/cargar/anotar un pago de un alumno (sobre todo en efectivo que cobró en persona), llamá cargar_pago_cosaco con el nombre, el monto y el método. Eso lo ENCOLA y le pedís que confirme con SÍ o NO. No lo des por registrado hasta que Cosaco confirme.
 
+LISTA DE SEGUIMIENTO: los alumnos NUEVOS y los que REACTIVAN (ex-alumnos que vuelven) entran solos a la lista de seguimiento. Si Cosaco pide "anotá a Fulana en seguimiento", "poné a Juan en la lista" o similar, llamá agregar_a_seguimiento con el nombre. Cada mañana, a quien esté en la lista y haya sumado una asistencia nueva sin pagar, el sistema le manda el mensaje de seguimiento. El alumno sale de la lista SOLO cuando se registra su pago (es automático). Esto es exclusivo de Cosaco.
+
 CONFIRMACIÓN DE PAGOS (CRÍTICO): vos NO confirmás ni registrás pagos, y NUNCA digas que confirmaste, registraste o notificaste un pago. Ese proceso es automático y va de a uno. Si Cosaco dice "confirmar", "confirmar pagos", "pendientes" o similar, el sistema ya lo maneja solo (no tenés que hacer nada). Si te pregunta por pagos pendientes, decile que escriba "pendientes" y el sistema los muestra de a uno para confirmar con SÍ o NO. Jamás inventes que un pago quedó confirmado.`;
 
 const TOOLS = [
@@ -445,6 +447,17 @@ const TOOLS = [
         metodo: { type: 'string', description: 'Efectivo o Transferencia (por defecto Efectivo si Cosaco no aclara)' },
       },
       required: ['cliente_nombre', 'monto'],
+    },
+  },
+  {
+    name: 'agregar_a_seguimiento',
+    description: 'SOLO para Cosaco (el dueño): agrega un alumno a la LISTA DE SEGUIMIENTO de conversión. Usala cuando Cosaco dice cosas como "anotá a Fulana en seguimiento", "poné a Juan en la lista", "agregá a María para hacerle seguimiento", o cuando indica que un ex-alumno volvió y hay que seguirlo. Mientras el alumno esté en la lista y sume una asistencia nueva sin pagar, el bot le manda el mensaje de seguimiento cada mañana. Sale de la lista SOLO cuando se registra su pago.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        cliente_nombre: { type: 'string', description: 'Nombre del alumno a agregar a seguimiento' },
+      },
+      required: ['cliente_nombre'],
     },
   },
   {
@@ -611,6 +624,9 @@ async function ejecutarTool(nombre, input, remitente) {
         if (errores.length) return { ok: false, error: errores.join(', ') };
         logActividad('cliente_nuevo', nombreCompleto, null, input.telefono);
         if (asignados.length) logActividad('turnos_asignados', `${nombreCompleto}: ${asignados.length} turno(s)`, asignados.length, input.telefono);
+        // Cliente NUEVO → entra a la lista de seguimiento (conversión). Sale sólo al pagar.
+        try { await fetch(`${GYM_API}/clientes/${nuevo.id}/seguimiento`, { method: 'POST', headers }); }
+        catch (e) { console.warn('alta seguimiento (nuevo):', e.message); }
         return { ok: true, nuevo: true, cliente_id: nuevo.id, nombre: nombreCompleto, turnos_asignados: asignados };
       }
       const { asignados, errores } = await asignarTurnos(existente.id, input.turno_ids);
@@ -619,6 +635,9 @@ async function ejecutarTool(nombre, input, remitente) {
       const eraInactivo = existente.estado === 'Suspendido' || existente.estado === 'Vencido';
       if (eraInactivo) logActividad('cliente_volvio', `${existente.nombre} (estaba ${existente.estado})`, null, input.telefono);
       if (eraInactivo) {
+        // Reactivación (suspendido/vencido que vuelve) → entra a seguimiento. Sale sólo al pagar.
+        try { await fetch(`${GYM_API}/clientes/${existente.id}/seguimiento`, { method: 'POST', headers }); }
+        catch (e) { console.warn('alta seguimiento (reactivado):', e.message); }
         // Avisar a Cosaco que volvió un cliente inactivo (no se creó duplicado)
         try {
           await enviarWhatsApp(process.env.COSACO_WHATSAPP,
@@ -762,6 +781,24 @@ async function ejecutarTool(nombre, input, remitente) {
       );
       return { ok: true, encolado: true, cliente: cli.nombre, monto, metodo,
         instruccion: `Pago encolado. Pedile a Cosaco que confirme con SÍ o NO, mostrando: ${cli.nombre} - $${monto} - ${metodo}. NO digas que ya quedó registrado.` };
+    }
+
+    if (nombre === 'agregar_a_seguimiento') {
+      // Exclusivo de Cosaco: agrega un alumno a la lista de seguimiento de conversión.
+      if (remitente !== process.env.COSACO_WHATSAPP) {
+        return { ok: false, error: 'Solo Cosaco puede anotar alumnos en seguimiento.' };
+      }
+      if (!GYM_TOKEN) await loginConReintentos(3, 3000);
+      const clientes = await ejecutarTool('get_clientes', { buscar: input.cliente_nombre }, remitente);
+      if (!Array.isArray(clientes) || clientes.length === 0) {
+        return { ok: false, error: `No encontré a "${input.cliente_nombre}" en el sistema. Verificá el nombre.` };
+      }
+      const cli = clientes[0];
+      const r = await fetch(`${GYM_API}/clientes/${cli.id}/seguimiento`, { method: 'POST', headers });
+      if (!r.ok) return { ok: false, error: `No se pudo agregar: ${await r.text()}` };
+      logActividad('seguimiento_alta', cli.nombre, null, cli.telefono);
+      return { ok: true, cliente: cli.nombre,
+        instruccion: `${cli.nombre} quedó en la lista de seguimiento. Cada mañana, si suma una asistencia nueva sin pagar, se le manda el mensaje. Sale de la lista al registrarse su pago.` };
     }
 
     if (nombre === 'guardar_registro_pendiente') {
@@ -1724,43 +1761,46 @@ cron.schedule('5 12 * * *', async () => {
 });
 
 // ────────────────────────────────────────────────────────────────────────────
-//  INCENTIVO POST-CLASE DE PRUEBA
-//  Cada mañana (9:00 AR = 12:00 UTC): a quien tuvo su PRIMERA clase ayer y aún
-//  no pagó, se le manda un mensaje para sumarse. El sistema marca "enviado" para
-//  no repetir. Requiere una plantilla de WhatsApp aprobada: TEMPLATE_INCENTIVO_PRUEBA.
+//  LISTA DE SEGUIMIENTO (conversión de nuevos / reactivados)
+//  Cada mañana (9:00 AR = 12:00 UTC): el sistema revisa SOLO a los alumnos que
+//  están en la lista de seguimiento y sumaron una asistencia nueva sin pagar
+//  todavía. A cada uno se le manda el mensaje de seguimiento. Opción B: se envía
+//  CADA VEZ que suma una asistencia nueva (persistente), no una sola vez. El
+//  alumno sale de la lista SOLO cuando se registra su pago (auto en el sistema).
+//  Requiere una plantilla de WhatsApp aprobada: TEMPLATE_CLASE_PRUEBA.
 // ────────────────────────────────────────────────────────────────────────────
-async function enviarIncentivosPrueba() {
-  // Usa la plantilla de seguimiento de primera clase ya aprobada
-  // (TEMPLATE_CLASE_PRUEBA). Fallback a TEMPLATE_INCENTIVO_PRUEBA por si algún
-  // día se crea una específica.
+async function enviarSeguimiento() {
   const SID = process.env.TEMPLATE_CLASE_PRUEBA || process.env.TEMPLATE_INCENTIVO_PRUEBA;
-  if (!SID) { console.warn('[INCENTIVO] Falta TEMPLATE_CLASE_PRUEBA — no se envía nada.'); return; }
+  if (!SID) { console.warn('[SEGUIMIENTO] Falta TEMPLATE_CLASE_PRUEBA — no se envía nada.'); return; }
   if (!GYM_TOKEN) await loginConReintentos(3, 5000);
   const hdrs = { Authorization: `Bearer ${GYM_TOKEN}` };
   let alumnos = [];
   try {
-    const r = await fetch(`${GYM_API}/alumnos-a-incentivar`, { headers: hdrs });
-    if (!r.ok) { console.error('[INCENTIVO] API', r.status); return; }
+    const r = await fetch(`${GYM_API}/seguimiento/a-notificar`, { headers: hdrs });
+    if (!r.ok) { console.error('[SEGUIMIENTO] API', r.status); return; }
     alumnos = (await r.json()).alumnos || [];
-  } catch (e) { console.error('[INCENTIVO] error consultando:', e.message); return; }
+  } catch (e) { console.error('[SEGUIMIENTO] error consultando:', e.message); return; }
 
-  console.log(`[INCENTIVO] ${alumnos.length} alumno(s) a incentivar`);
+  console.log(`[SEGUIMIENTO] ${alumnos.length} alumno(s) a notificar`);
   for (const a of alumnos) {
     if (!a.telefono) continue;
     try {
       const nombre1 = (a.nombre || '').split(' ')[0];
-      await enviarTemplate(a.telefono, SID, { "1": nombre1 }, '[Incentivo clase de prueba]');
-      // Marcar como enviado SOLO si el mensaje salió, para no perder a nadie
-      await fetch(`${GYM_API}/clientes/${a.id}/incentivo-enviado`, { method: 'POST', headers: hdrs });
-      logActividad('incentivo_prueba', a.nombre, null, a.telefono);
-      console.log(`[INCENTIVO] enviado a ${a.nombre}`);
+      await enviarTemplate(a.telefono, SID, { "1": nombre1 }, '[Seguimiento]');
+      // Marcar el envío de HOY SOLO si el mensaje salió (Opción B: al próximo
+      // presente nuevo se vuelve a enviar; sale de la lista sólo al pagar).
+      await fetch(`${GYM_API}/clientes/${a.id}/seguimiento-enviado`, { method: 'POST', headers: hdrs });
+      logActividad('seguimiento', a.nombre, null, a.telefono);
+      console.log(`[SEGUIMIENTO] enviado a ${a.nombre}`);
     } catch (e) {
-      console.error(`[INCENTIVO] falló con ${a.nombre}:`, e.message);
+      console.error(`[SEGUIMIENTO] falló con ${a.nombre}:`, e.message);
     }
   }
 }
+// Alias por compatibilidad con llamadas existentes (comando manual de Cosaco).
+const enviarIncentivosPrueba = enviarSeguimiento;
 
-cron.schedule('0 12 * * *', () => enviarIncentivosPrueba().catch(e => console.error('cron incentivo:', e.message)));
+cron.schedule('0 12 * * *', () => enviarSeguimiento().catch(e => console.error('cron seguimiento:', e.message)));
 
 app.post('/webhook', (req, res) => {
   const mensaje = req.body.Body;
@@ -2390,14 +2430,14 @@ app.get('/test-jobs', async (req, res) => {
       );
       return res.json({ ok: true, job });
     }
-    if (job === 'incentivo') {
+    if (job === 'incentivo' || job === 'seguimiento') {
       // ?preview=1 → solo lista a quién le tocaría, sin enviar ni marcar
       if (req.query.preview === '1') {
         if (!GYM_TOKEN) await loginConReintentos(3, 5000);
-        const r = await fetch(`${GYM_API}/alumnos-a-incentivar`, { headers: { Authorization: `Bearer ${GYM_TOKEN}` } });
+        const r = await fetch(`${GYM_API}/seguimiento/a-notificar`, { headers: { Authorization: `Bearer ${GYM_TOKEN}` } });
         return res.json({ ok: true, preview: await r.json() });
       }
-      await enviarIncentivosPrueba();
+      await enviarSeguimiento();
       return res.json({ ok: true, job });
     }
     res.status(400).json({ error: `Job desconocido: ${job}` });
