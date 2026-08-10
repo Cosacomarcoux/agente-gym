@@ -773,8 +773,9 @@ async function ejecutarTool(nombre, input, remitente) {
       const metodo = /efectivo/i.test(input.metodo || '') ? 'Efectivo'
                    : /transfer/i.test(input.metodo || '') ? 'Transferencia' : 'Efectivo';
       if (!GYM_TOKEN) await loginConReintentos(3, 3000);
-      const clientes = await ejecutarTool('get_clientes', { buscar: input.cliente_nombre }, remitente);
-      const fuertes = guards.filtrarClientesPorNombre(input.cliente_nombre, clientes);
+      const nombreLimpio = guards.limpiarNombreBuscado(input.cliente_nombre) || input.cliente_nombre;
+      const clientes = await ejecutarTool('get_clientes', { buscar: nombreLimpio }, remitente);
+      const fuertes = guards.filtrarClientesPorNombre(nombreLimpio, clientes);
 
       // Varias fichas con ese nombre (duplicados) → NO adivinar. Guardar selección
       // y pedirle a Cosaco el número; el handler determinístico toma la respuesta.
@@ -947,6 +948,7 @@ async function encolarPagoConfirmable(remitente, cliente, monto, metodo) {
 //  - ninguno fuerte → avisa, NO adivina.
 // Devuelve true si dejó algo resuelto/preguntado (para cortar el flujo).
 async function resolverYEncolarPago(remitente, nombreBuscar, monto, metodo) {
+  nombreBuscar = guards.limpiarNombreBuscado(nombreBuscar) || nombreBuscar;
   const clientes = await ejecutarTool('get_clientes', { buscar: nombreBuscar }, remitente);
   const fuertes = guards.filtrarClientesPorNombre(nombreBuscar, clientes);
 
@@ -1067,6 +1069,12 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
     // ── 0-bis. ESPERANDO EL MONTO (le preguntamos "¿cuánto pagaste?") ─────
     if (!esCosaco && montoPendiente.has(remitente)) {
       const datos = montoPendiente.get(remitente);
+      // Cortesía mientras esperamos el monto → limpiar y cortar (no insistir).
+      if (guards.esCortesia(mensaje)) {
+        montoPendiente.delete(remitente);
+        await enviarWhatsApp(remitente, `¡De nada! Cuando tengas el monto me lo pasás y lo registramos 🏑`, datos.clienteNombre);
+        return;
+      }
       const mM = mensaje.match(/\$?\s*([\d]{3,}[\d.,]*)/);
       const monto = mM ? parseFloat(mM[1].replace(/\./g, '').replace(',', '.')) : 0;
       if (monto > 0) {
@@ -1092,19 +1100,28 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
 
     // ── 0. COMPROBANTE PENDIENTE ───────────────────────────────────────────
     if (!esCosaco && comprobantePendiente.has(remitente)) {
+      // Cortesía ("gracias", "ok"...) → no es nombre: limpiar estado y cortar.
+      if (guards.esCortesia(mensaje)) {
+        comprobantePendiente.delete(remitente);
+        pagosEsperandoNombre.delete(remitente);
+        await enviarWhatsApp(remitente, `¡De nada! Cualquier cosa escribinos 🏑`);
+        return;
+      }
       comprobantePendiente.delete(remitente);
       // Intentar extraer nombre y monto del mensaje
       const matchMonto = mensaje.match(/\$?([\d.,]+)/);
       const monto = matchMonto ? parseFloat(matchMonto[1].replace(/\./g, '').replace(',', '.')) : null;
-      // Nombre: todo lo que no sea números ni símbolos de monto, tomando las primeras palabras
-      const sinMonto = mensaje.replace(/\$?[\d.,]+/g, '').replace(/transferencia|efectivo/gi, '').trim();
-      const nombre = sinMonto.length > 2 ? sinMonto : null;
+      // Nombre: sacar montos y muletillas de pago, quedarnos con el nombre real.
+      const nombreRaw = guards.limpiarNombreBuscado(mensaje.replace(/\$?[\d.,]+/g, ' '));
+      const nombre = nombreRaw && nombreRaw.length > 2 ? nombreRaw : null;
 
       if (nombre && monto) {
         if (!GYM_TOKEN) await loginConReintentos(3, 3000);
         const clientes = await ejecutarTool('get_clientes', { buscar: nombre }, remitente);
-        if (Array.isArray(clientes) && clientes.length > 0) {
-          const cliente = clientes[0];
+        const fuertes = guards.filtrarClientesPorNombre(nombre, clientes);
+        if (fuertes.length >= 1) {
+          const cliente = fuertes[0];
+          pagosEsperandoNombre.delete(remitente); // limpiar estado residual
           if (await hayPagoPendiente(cliente.id)) {
             await enviarWhatsApp(remitente, `¡Ya lo tengo registrado! En breve te confirmamos 🏑`, cliente.nombre);
             return;
@@ -1394,7 +1411,9 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
 
       const matchPago = matchConfirmar || matchPagoNombre;
       if (matchPago) {
-        const nombreBuscar = (matchConfirmar ? matchConfirmar[1] : matchPagoNombre[1]).replace(/[?.!¿¡]+$/, '').trim();
+        const nombreCrudo = (matchConfirmar ? matchConfirmar[1] : matchPagoNombre[1]).replace(/[?.!¿¡]+$/, '').trim();
+        // Sacar muletillas ("por favor", "pago", "?"...) para que el match no falle.
+        const nombreBuscar = guards.limpiarNombreBuscado(nombreCrudo) || nombreCrudo;
         const montoRaw = matchConfirmar ? matchConfirmar[2] : matchPagoNombre[2];
         const metodoRaw = matchConfirmar ? matchConfirmar[3] : matchPagoNombre[3];
         const monto = montoRaw ? parseFloat(montoRaw.replace(/\./g, '').replace(',', '.')) : null;
@@ -1551,11 +1570,21 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
       // Si el cliente ya avisó que pagó y estamos esperando su nombre
       if (pagosEsperandoNombre.has(remitente)) {
         const datosPago = pagosEsperandoNombre.get(remitente);
+        // Si mandó una cortesía ("gracias", "ok", "dale"...) NO es un nombre:
+        // limpiamos el estado y respondemos amable, sin buscar clientes.
+        if (guards.esCortesia(mensaje)) {
+          pagosEsperandoNombre.delete(remitente);
+          comprobantePendiente.delete(remitente);
+          await enviarWhatsApp(remitente, `¡De nada! Cualquier cosa escribinos 🏑`);
+          return;
+        }
         pagosEsperandoNombre.delete(remitente);
         if (!GYM_TOKEN) await loginConReintentos(3, 3000);
-        const clientes = await ejecutarTool('get_clientes', { buscar: mensaje.trim() }, remitente);
-        if (Array.isArray(clientes) && clientes.length > 0) {
-          const cliente = clientes[0];
+        const nombreDado = guards.limpiarNombreBuscado(mensaje) || mensaje.trim();
+        const clientes = await ejecutarTool('get_clientes', { buscar: nombreDado }, remitente);
+        const fuertes = guards.filtrarClientesPorNombre(nombreDado, clientes);
+        if (fuertes.length >= 1) {
+          const cliente = fuertes[0];
           const montoDP = Number(datosPago.monto) || 0;
           // FIX $0: si no sabemos el monto, preguntarlo en vez de encolar $0
           if (!(montoDP > 0)) {
@@ -2536,6 +2565,20 @@ app.get('/test-jobs', async (req, res) => {
       await runJob(grupo, job);
       return res.json({ ok: true, job, grupo });
     }
+    // PRUEBA: manda la plantilla SOLO a Cosaco, sin tocar a ningún cliente.
+    // Ej: /test-jobs?secret=hockeyvivo&job=test-recordatorio  (o &nombre=Sofía)
+    if (['test-recordatorio', 'test-mora', 'test-suspension'].includes(job)) {
+      const mapaSid = {
+        'test-recordatorio': process.env.TEMPLATE_RECORDATORIO,
+        'test-mora': process.env.TEMPLATE_MORA,
+        'test-suspension': process.env.TEMPLATE_SUSPENSION,
+      };
+      const sid = mapaSid[job];
+      if (!sid) return res.status(400).json({ error: `Falta la variable de entorno para ${job}` });
+      const nombre = req.query.nombre || 'Cosaco';
+      await enviarTemplate(process.env.COSACO_WHATSAPP, sid, { "1": nombre }, `[Prueba ${job}]`);
+      return res.json({ ok: true, job, enviado_a: 'Cosaco (solo prueba)', sid });
+    }
     if (job === 'cumpleanos') {
       const r = await fetch(`${GYM_API}/cumpleanos`, { headers: { Authorization: `Bearer ${GYM_TOKEN}` } });
       const data = await r.json();
@@ -2562,11 +2605,28 @@ app.get('/test-jobs', async (req, res) => {
       return res.json({ ok: true, job });
     }
     if (job === 'incentivo' || job === 'seguimiento') {
-      // ?preview=1 → solo lista a quién le tocaría, sin enviar ni marcar
+      // ?preview=1 → diagnóstico: quién califica + si el template está configurado,
+      // sin enviar ni marcar nada. Sirve para ver por qué "dejó de mandar".
       if (req.query.preview === '1') {
         if (!GYM_TOKEN) await loginConReintentos(3, 5000);
-        const r = await fetch(`${GYM_API}/seguimiento/a-notificar`, { headers: { Authorization: `Bearer ${GYM_TOKEN}` } });
-        return res.json({ ok: true, preview: await r.json() });
+        let aNotificar = null, enLista = null, errorApi = null;
+        try {
+          const r1 = await fetch(`${GYM_API}/seguimiento/a-notificar`, { headers: { Authorization: `Bearer ${GYM_TOKEN}` } });
+          aNotificar = r1.ok ? await r1.json() : `HTTP ${r1.status}`;
+          const r2 = await fetch(`${GYM_API}/seguimiento`, { headers: { Authorization: `Bearer ${GYM_TOKEN}` } });
+          enLista = r2.ok ? await r2.json() : `HTTP ${r2.status}`;
+        } catch (e) { errorApi = e.message; }
+        return res.json({
+          ok: true,
+          diagnostico: {
+            template_configurado: !!(process.env.TEMPLATE_CLASE_PRUEBA || process.env.TEMPLATE_INCENTIVO_PRUEBA),
+            template_sid: process.env.TEMPLATE_CLASE_PRUEBA || process.env.TEMPLATE_INCENTIVO_PRUEBA || null,
+            en_la_lista_de_seguimiento: Array.isArray(enLista) ? enLista.length : enLista,
+            a_notificar_hoy: aNotificar,
+            error_api: errorApi,
+            hora_servidor_utc: new Date().toISOString(),
+          },
+        });
       }
       await enviarSeguimiento();
       return res.json({ ok: true, job });

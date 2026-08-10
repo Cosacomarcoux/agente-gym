@@ -123,6 +123,29 @@ test('filtrarClientesPorNombre detecta fichas duplicadas del mismo nombre', () =
   assert.strictEqual(r.length, 2); // las dos Coronel, NO la Chavez
 });
 
+// ── Limpieza de muletillas y cortesías (casos reales que fallaron) ──────────
+test('limpiarNombreBuscado saca muletillas de pago del nombre', () => {
+  assert.strictEqual(g.limpiarNombreBuscado('mercedes Rimini? Pago'), 'mercedes rimini');
+  assert.strictEqual(g.limpiarNombreBuscado('Lola Godoy por favor'), 'lola godoy');
+  assert.strictEqual(g.limpiarNombreBuscado('Gómez Olga Monto'), 'gomez olga');
+  assert.strictEqual(g.limpiarNombreBuscado('Delfina Coronel pago 29000 transferencia'), 'delfina coronel');
+});
+
+test('el nombre limpio ahora sí matchea a la ficha', () => {
+  const clientes = [{ id: 1, nombre: 'Mercedes Rimini' }, { id: 2, nombre: 'Lola Godoy' }];
+  assert.ok(g.nombreCoincide(g.limpiarNombreBuscado('mercedes Rimini? Pago'), 'Mercedes Rimini'));
+  assert.ok(g.nombreCoincide(g.limpiarNombreBuscado('Lola Godoy por favor'), 'Lola Godoy'));
+});
+
+test('esCortesia detecta agradecimientos/OK, no nombres reales', () => {
+  for (const t of ['gracias', 'Gracias!', 'ok', 'dale', 'listo', 'perfecto', 'muchas gracias', '👍']) {
+    assert.ok(g.esCortesia(t), `debería ser cortesía: "${t}"`);
+  }
+  for (const t of ['Mercedes Rimini', 'Lola Godoy', 'Olga Gomez']) {
+    assert.strictEqual(g.esCortesia(t), false, `NO debería ser cortesía: "${t}"`);
+  }
+});
+
 // ── parsearMonto: leer el monto del mensaje ─────────────────────────────────
 test('parsearMonto lee montos en formatos comunes', () => {
   assert.strictEqual(g.parsearMonto('transferí 35000'), 35000);

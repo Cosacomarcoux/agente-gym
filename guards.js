@@ -87,6 +87,31 @@ function filtrarClientesPorNombre(buscado, clientes) {
   return arr.filter(c => nombreCoincide(buscado, c && c.nombre));
 }
 
+// Saca muletillas de pago del nombre buscado para que el match no falle por
+// ellas: "mercedes Rimini? Pago" → "mercedes rimini"; "Lola Godoy por favor" →
+// "lola godoy". También descarta números (montos) y saludos.
+function limpiarNombreBuscado(texto) {
+  let t = normalizarTexto(texto);
+  t = t.replace(/\bpor favor\b/g, ' ');
+  const stop = new Set([
+    'pago', 'pagó', 'pagar', 'paga', 'pague', 'abono', 'abonar', 'abone', 'abonó',
+    'transferencia', 'transfer', 'transf', 'transferi', 'transferir', 'efectivo', 'efvo',
+    'monto', 'porfa', 'porfis', 'porfavor', 'por', 'favor',
+    'gracias', 'hola', 'buenas', 'buenos', 'buen', 'dia', 'dias', 'tardes', 'noches',
+    'registra', 'registrar', 'registrame', 'confirma', 'confirmar', 'puedes', 'podes', 'podrias',
+  ]);
+  t = t.split(/\s+/).filter(w => w && !stop.has(w) && !/^\d/.test(w)).join(' ');
+  return t.trim();
+}
+
+// ¿El mensaje es una cortesía / no-nombre? (para no tratar "gracias", "ok", "dale"
+// como si fueran el nombre de la jugadora cuando el bot está esperando un nombre.)
+function esCortesia(texto) {
+  const t = normalizarTexto(texto);
+  if (!t) return true;
+  return /^(gracias+|muchas gracias|mil gracias|graciasss*|ok|oka|okey|okay|dale|listo|lista|perfecto|barbaro|buenisimo|genial|de nada|joya|copado|copada|si|sii+|no|nop|hola+|buenas|buen dia|buenos dias|buenas tardes|buenas noches|chau|saludos|excelente|va|vale|👍|🙏|❤️)$/.test(t);
+}
+
 // Un monto es válido para registrar un pago solo si es un número > 0.
 function montoValido(n) {
   const x = Number(n);
@@ -136,4 +161,6 @@ module.exports = {
   normalizarTexto,
   nombreCoincide,
   filtrarClientesPorNombre,
+  limpiarNombreBuscado,
+  esCortesia,
 };
