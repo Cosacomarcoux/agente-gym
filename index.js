@@ -28,6 +28,7 @@ const cobrosPendientesDatos = new Map(); // telefonoCosaco → { nombreCliente, 
 const tercerTurnoPendiente = new Map(); // telefonoCosaco → { clienteId, clienteNombre, turnoIds, clienteFrom }
 const montoPendiente = new Map();       // remitente → { clienteId, clienteNombre, metodo } esperando que diga el monto
 const promesaAvisada = new Map();       // remitente → timestamp del último aviso de "paga después" (throttle 1h)
+const ausenciaAvisada = new Map();      // remitente → timestamp del último aviso de "deja de venir" (throttle 6h)
 const seleccionPagoPendiente = new Map(); // telefonoCosaco → { candidatos:[{id,nombre,...}], monto, metodo } esperando que elija número de ficha
 
 // Link del grupo de WhatsApp que se envía al registrar/reactivar un cliente.
@@ -1611,6 +1612,28 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
           await enviarWhatsApp(remitente, `No encontré ese nombre 🤔 Pasame el nombre y apellido de la jugadora tal como está registrada. Si escribís por tu hija, es el nombre de ella (no el tuyo) 🏑`);
           pagosEsperandoNombre.set(remitente, datosPago); // seguir esperando
         }
+        return;
+      }
+
+      // ── AVISO DE AUSENCIA / BAJA: el cliente dice que deja de venir, que este
+      // mes no va, o que vuelve más adelante → avisar a Cosaco para que vea la
+      // conversación y evalúe una suspensión. NO toma ninguna acción automática.
+      // Throttle de 6 h por cliente para no spamear. Responde amable y corta acá.
+      if (guards.esAvisoDeAusencia(mensaje)) {
+        const cliA = await buscarClientePorTelefono(remitente).catch(() => null);
+        const quien = cliA ? cliA.nombre : (profileName || remitente.replace('whatsapp:', ''));
+        const ultimo = ausenciaAvisada.get(remitente) || 0;
+        if (Date.now() - ultimo > 6 * 3600000) {
+          ausenciaAvisada.set(remitente, Date.now());
+          const estado = cliA ? ` (estado: ${cliA.estado})` : '';
+          enviarWhatsApp(process.env.COSACO_WHATSAPP,
+            `⏸️ ${quien}${estado} avisó que dejaría de asistir / no viene un tiempo:\n"${mensaje.slice(0, 160)}"\n\nRevisá la conversación por si conviene suspender el servicio. (Solo aviso — no hice nada automático)`).catch(() => {});
+          logActividad('aviso_ausencia', quien, null, remitente);
+        }
+        const nombre1 = cliA && cliA.nombre ? cliA.nombre.split(' ')[0] : '';
+        await enviarWhatsApp(remitente,
+          `¡Gracias por avisar${nombre1 ? ', ' + nombre1 : ''}! Le paso el mensaje al equipo así lo tienen en cuenta. Cuando quieras retomar, escribinos y coordinamos 🏑`,
+          cliA ? cliA.nombre : null);
         return;
       }
 

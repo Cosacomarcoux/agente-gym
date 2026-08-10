@@ -104,6 +104,21 @@ function limpiarNombreBuscado(texto) {
   return t.trim();
 }
 
+// ¿El cliente avisa que va a DEJAR de venir un tiempo largo? (deja de asistir,
+// este mes no va, vuelve el mes que viene / en tal mes...). NO matchea ausencias
+// de un solo día ("hoy no voy", "mañana no puedo"). Sirve para avisarle a Cosaco
+// que evalúe una suspensión — no toma ninguna acción automática.
+function esAvisoDeAusencia(texto) {
+  const t = normalizarTexto(texto);
+  if (!t) return false;
+  const meses = 'enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre';
+  const dejar = /\b(dej(o|a|as|ar|are|ara|aria|amos|an|e) de (ir|asistir|entrenar|venir|jugar|entrenamiento|las clases|hockey)|voy a dejar|quiero dejar|pienso dejar|voy a dejarlo|no voy a seguir|no (voy|vengo|asisto|entreno) mas|no (va|viene|asiste) mas|no vuelvo mas|me doy de baja|dar(me)? de baja|darla de baja|quiero pausar|pausar (el|mi|la|este)|me tomo (un|unos|una) (descanso|tiempo|receso|mes|meses|semanas)|dejo por un tiempo|dejo (el gym|hockey|el gimnasio|el club)|me bajo|voy a faltar (todo|el))\b/;
+  const mesNo = /\b(este mes|el mes que viene|el proximo mes|proximo mes|todo el mes|el resto del mes|en el mes)\b[^]*\bno\b[^]*\b(voy|va|asisto|asiste|entreno|entrena|vengo|viene|puedo|podra|va a ir|voy a ir)\b|\bno\b[^]*\b(voy|va|asisto|asiste|entreno|entrena|vengo|viene|ire|ira)\b[^]*\b(este mes|en el mes|el mes que viene|todo el mes|el resto del mes)\b/;
+  const vuelvo = new RegExp('\\b(vuelvo|vuelve|volvera|volveria|volvere|regreso|regresa|regresara|retomo|retoma|retomara|reanudo|reanuda|arranco|arranca|arrancara|empiezo|empieza|reincorpora|reincorporo)\\b[^]{0,25}?\\b(en|el|a|para|despues de|luego de|dentro de|recien|a partir de|el mes que viene)?\\s*(' + meses + '|mes que viene|proximo mes|mes siguiente|a(n|ñ)?o que viene|\\d+\\s*mes)');
+  const hasta = new RegExp('\\bhasta\\b[^]{0,30}(' + meses + '|el mes que viene|proximo mes|a(n|ñ)?o que viene)[^]{0,20}\\bno\\b[^]{0,15}\\b(voy|va|vengo|viene|asisto|entreno)\\b');
+  return dejar.test(t) || mesNo.test(t) || vuelvo.test(t) || hasta.test(t);
+}
+
 // ¿El mensaje es una cortesía / no-nombre? (para no tratar "gracias", "ok", "dale"
 // como si fueran el nombre de la jugadora cuando el bot está esperando un nombre.)
 function esCortesia(texto) {
@@ -163,4 +178,5 @@ module.exports = {
   filtrarClientesPorNombre,
   limpiarNombreBuscado,
   esCortesia,
+  esAvisoDeAusencia,
 };

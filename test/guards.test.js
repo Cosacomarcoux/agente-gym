@@ -146,6 +146,29 @@ test('esCortesia detecta agradecimientos/OK, no nombres reales', () => {
   }
 });
 
+// ── Aviso de ausencia / baja (para avisar a Cosaco y evaluar suspensión) ────
+test('esAvisoDeAusencia detecta bajas y ausencias largas', () => {
+  for (const t of [
+    'dejará de asistir', 'dejo de ir al gym', 'este mes no voy a ir',
+    'este mes no va a ir', 'voy a dejar hockey', 'quiero pausar este mes',
+    'me tomo un descanso', 'vuelvo en marzo', 'recién vuelve en agosto',
+    'vuelve el mes que viene', 'me doy de baja', 'no voy a venir este mes',
+    'vuelvo el año que viene',
+  ]) {
+    assert.ok(g.esAvisoDeAusencia(t), `debería avisar: "${t}"`);
+  }
+});
+
+test('esAvisoDeAusencia NO se dispara con ausencias de un día ni charla normal', () => {
+  for (const t of [
+    'hoy no voy a poder ir', 'no voy a ir a la clase de hoy', 'mañana no voy',
+    'gracias nos vemos', 'ya pagué', 'te pago el viernes', 'vuelvo el lunes',
+    'quiero cambiar mi turno', 'hola como estan',
+  ]) {
+    assert.strictEqual(g.esAvisoDeAusencia(t), false, `NO debería avisar: "${t}"`);
+  }
+});
+
 // ── parsearMonto: leer el monto del mensaje ─────────────────────────────────
 test('parsearMonto lee montos en formatos comunes', () => {
   assert.strictEqual(g.parsearMonto('transferí 35000'), 35000);
