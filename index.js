@@ -352,6 +352,8 @@ Respondé de forma concisa confirmando lo que hiciste.
 
 CARGA DE PAGOS POR COSACO: si Cosaco te pide registrar/cargar/anotar un pago de un alumno (sobre todo en efectivo que cobró en persona), llamá cargar_pago_cosaco con el nombre, el monto y el método. Eso lo ENCOLA y le pedís que confirme con SÍ o NO. No lo des por registrado hasta que Cosaco confirme.
 
+LINK DEL GRUPO: si Cosaco pide "mandale el link del grupo a [nombre]", "enviá el grupo a [nombre]" o similar, llamá enviar_link_grupo con el nombre. Busca al cliente y le manda el link del grupo de WhatsApp del gimnasio. Exclusivo de Cosaco.
+
 LISTA DE SEGUIMIENTO: los alumnos NUEVOS y los que REACTIVAN (ex-alumnos que vuelven) entran solos a la lista de seguimiento. Si Cosaco pide "anotá a Fulana en seguimiento", "poné a Juan en la lista" o similar, llamá agregar_a_seguimiento con el nombre. Cada mañana, a quien esté en la lista y haya sumado una asistencia nueva sin pagar, el sistema le manda el mensaje de seguimiento. El alumno sale de la lista SOLO cuando se registra su pago (es automático). Esto es exclusivo de Cosaco.
 
 CONFIRMACIÓN DE PAGOS (CRÍTICO): vos NO confirmás ni registrás pagos, y NUNCA digas que confirmaste, registraste o notificaste un pago. Ese proceso es automático y va de a uno. Si Cosaco dice "confirmar", "confirmar pagos", "pendientes" o similar, el sistema ya lo maneja solo (no tenés que hacer nada). Si te pregunta por pagos pendientes, decile que escriba "pendientes" y el sistema los muestra de a uno para confirmar con SÍ o NO. Jamás inventes que un pago quedó confirmado.`;
@@ -453,6 +455,17 @@ const TOOLS = [
         metodo: { type: 'string', description: 'Efectivo o Transferencia (por defecto Efectivo si Cosaco no aclara)' },
       },
       required: ['cliente_nombre', 'monto'],
+    },
+  },
+  {
+    name: 'enviar_link_grupo',
+    description: 'SOLO para Cosaco (el dueño): le envía a un cliente el link del grupo de WhatsApp del gimnasio. Usala cuando Cosaco dice cosas como "mandale el link del grupo a Sofía", "enviá el grupo a Juan", "pasale el grupo de whatsapp a María". Busca al cliente por nombre y le manda el link.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        cliente_nombre: { type: 'string', description: 'Nombre del cliente al que enviar el link del grupo' },
+      },
+      required: ['cliente_nombre'],
     },
   },
   {
@@ -795,6 +808,42 @@ async function ejecutarTool(nombre, input, remitente) {
       await encolarPagoConfirmable(remitente, cli, monto, metodo);
       return { ok: true, encolado: true, cliente: cli.nombre, monto, metodo,
         instruccion: `Pago encolado y ya le pedí a Cosaco que confirme con SÍ o NO. NO agregues otra confirmación ni digas que quedó registrado.` };
+    }
+
+    if (nombre === 'enviar_link_grupo') {
+      // Exclusivo de Cosaco: manda el link del grupo de WhatsApp a un cliente.
+      if (remitente !== process.env.COSACO_WHATSAPP) {
+        return { ok: false, error: 'Solo Cosaco puede enviar el link del grupo.' };
+      }
+      if (!GYM_TOKEN) await loginConReintentos(3, 3000);
+      const nombreLimpio = guards.limpiarNombreBuscado(input.cliente_nombre) || input.cliente_nombre;
+      const clientes = await ejecutarTool('get_clientes', { buscar: nombreLimpio }, remitente);
+      const fuertes = guards.filtrarClientesPorNombre(nombreLimpio, clientes);
+      if (fuertes.length === 0) {
+        return { ok: false, error: `No encontré a "${input.cliente_nombre}". Verificá el nombre completo.` };
+      }
+      if (fuertes.length > 1) {
+        return { ok: false, error: `Hay varias fichas de "${input.cliente_nombre}". Decime nombre y apellido completo para no equivocarme.` };
+      }
+      const cli = fuertes[0];
+      if (!cli.telefono) return { ok: false, error: `${cli.nombre} no tiene teléfono cargado.` };
+      let tel = String(cli.telefono).replace(/\D/g, '');
+      if (tel.startsWith('549')) tel = tel.slice(3);
+      else if (tel.startsWith('54')) tel = tel.slice(2);
+      const to = `whatsapp:+549${tel}`;
+      const nombre1 = cli.nombre.split(' ')[0];
+      const texto = `¡Hola ${nombre1}! 🏑 Sumate al grupo de WhatsApp de Hockey Vivo Gym para enterarte de todo 👇\n${GRUPO_WHATSAPP}\n¡Te esperamos!`;
+      try {
+        await twilioClient.messages.create({ from: TWILIO_FROM, to, body: texto });
+        guardarMensaje(to, cli.nombre, texto, 'agente-cosaco');
+        logActividad('link_grupo', cli.nombre, null, to);
+        return { ok: true, enviado_a: cli.nombre, instruccion: `Ya le mandé el link del grupo a ${cli.nombre}. Confirmáselo a Cosaco.` };
+      } catch (err) {
+        const fueraVentana = err.code === 63016 || /24 hour|freeform/i.test(err.message || '');
+        return { ok: false, error: fueraVentana
+          ? `No se pudo enviar a ${cli.nombre}: pasaron +24h desde su último mensaje, WhatsApp no deja escribir libre. Tiene que escribir primero.`
+          : (err.message || 'Error enviando el link') };
+      }
     }
 
     if (nombre === 'agregar_a_seguimiento') {
@@ -1816,7 +1865,7 @@ async function runJob(diaGrupo, tipoJob) {
     const textoGuardar = tipoJob === 'mora'
       ? `Hola ${nombre}! 👋 Te extrañamos en Hockey Vivo Gym y vimos que todavía no se acreditó tu pago. ¿Fue un error o necesitás ayuda con algo? Sabés que siempre podés contar con nosotros. Un abrazo! 🏑`
       : tipoJob === 'recordatorio'
-      ? `Hola ${nombre}! 👋 Te recordamos que tu cuota de Hockey Vivo está por vencer. Podés transferir al alias hockeyvivo o pagarlo en efectivo en el gimnasio. ¡Cualquier duda avisanos! 🏑`
+      ? `Hola ${nombre}! 👋 Hoy vence tu plan en Hockey Vivo Gym. Cada entrenamiento que hacés es un paso que te acerca a la mejor versión de tu juego. Ese trabajo no se detiene — y nosotros tampoco. Para seguir, estos son los planes: 🏑 2 veces por semana: $42.000 🏑 1 vez por semana: $35.000. Transferí al alias: hockeyvivo. Confirmando el pago, tu lugar queda asegurado. 💪`
       : tipoJob === 'suspension'
       ? `Hola ${nombre}! 👋 Tu membresía en Hockey Vivo fue suspendida por falta de pago. Cuando estés listo/a para volver, avisanos y te reactivamos enseguida. ¡Te esperamos! 🏑`
       : `[${tipoJob}]`;
