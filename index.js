@@ -767,11 +767,25 @@ async function ejecutarTool(nombre, input, remitente) {
         return { ok: false, rechazado: true,
           error: 'RECHAZADO: no hay evidencia de que el cliente haya pagado. El texto_cliente no menciona un pago. NO inventes pagos: si el cliente no dijo que pagó, no registres nada y seguí la conversación normal.' };
       }
+      // BLINDAJE cliente_id: la IA a veces manda 0 o un id inventado. Nunca
+      // encolamos con un id inválido. Si viene mal, lo resolvemos por el NOMBRE.
+      let cid = Number(input.cliente_id);
+      let cnombre = input.cliente_nombre;
+      if (!cid || cid <= 0) {
+        if (!GYM_TOKEN) await loginConReintentos(3, 3000);
+        const clientes = await ejecutarTool('get_clientes', { buscar: guards.limpiarNombreBuscado(input.cliente_nombre) || input.cliente_nombre }, remitente);
+        const fuertes = guards.filtrarClientesPorNombre(input.cliente_nombre, clientes);
+        if (fuertes.length === 1) { cid = fuertes[0].id; cnombre = fuertes[0].nombre; }
+        else {
+          return { ok: false, rechazado: true,
+            error: `No pude identificar una ficha única para "${input.cliente_nombre}". Pedile el nombre y apellido completos tal como está registrada y NO registres el pago hasta identificarla.` };
+        }
+      }
       // FIX: no duplicar. Si ya hay una confirmación pendiente para este
       // cliente, no se inserta otra (evita que Cosaco reciba el mismo pago 2 veces).
       const { rows: dup } = await pool.query(
         `SELECT id, monto FROM pagos_pendientes WHERE esperando_confirmacion = true AND cliente_id = $1`,
-        [input.cliente_id]
+        [cid]
       );
       if (dup.length > 0) {
         return { ok: true, ya_pendiente: true,
@@ -779,11 +793,11 @@ async function ejecutarTool(nombre, input, remitente) {
       }
       await pool.query(
         `INSERT INTO pagos_pendientes (cliente_id, cliente_nombre, cliente_from, monto, metodo) VALUES ($1, $2, $3, $4, $5)`,
-        [input.cliente_id, input.cliente_nombre, remitente, monto, metodo]
+        [cid, cnombre, remitente, monto, metodo]
       );
       const { rows } = await pool.query(`SELECT COUNT(*) AS count FROM pagos_pendientes WHERE esperando_confirmacion = true`);
       if (parseInt(rows[0].count) > 1) return { ok: true, encolado: true };
-      const msg = `💰 Confirmacion de pago\nCliente: ${input.cliente_nombre}\nMonto: $${input.monto}\nMetodo: ${metodo}\n¿Confirmas? SI o NO`;
+      const msg = `💰 Confirmacion de pago\nCliente: ${cnombre}\nMonto: $${input.monto}\nMetodo: ${metodo}\n¿Confirmas? SI o NO`;
       try {
         await twilioClient.messages.create({ from: TWILIO_FROM, to: process.env.COSACO_WHATSAPP, body: msg });
         guardarMensaje(process.env.COSACO_WHATSAPP, null, msg, 'agente');
@@ -1152,14 +1166,31 @@ async function manejarConfirmacionPago(mensajeUpper, pago) {
     // fallaba (token vencido, API caída), el pago desaparecía sin guardarse.
     if (!GYM_TOKEN) await loginConReintentos(3, 3000);
 
-    // ¿El cliente viene de seguimiento / suspendido? → su fecha de inicio debe ser
-    // su ÚLTIMA ASISTENCIA, y Cosaco tiene que CONFIRMARLA antes de registrar.
-    const clienteInfo = await getClienteConReintento(pago.cliente_id);
-
+    // Leer la ficha. Si el cliente_id es inválido (0/null — pasó cuando la IA lo
+    // encoló mal) o no se puede leer, RE-RESOLVEMOS por el nombre guardado y
+    // corregimos el id, así el pago se registra igual (no queda trabado).
+    let clienteInfo = null;
+    if (pago.cliente_id && Number(pago.cliente_id) > 0) {
+      clienteInfo = await getClienteConReintento(pago.cliente_id);
+    }
+    if (!clienteInfo) {
+      const clientes = await ejecutarTool('get_clientes', { buscar: guards.limpiarNombreBuscado(pago.cliente_nombre) || pago.cliente_nombre }, process.env.COSACO_WHATSAPP);
+      const fuertes = guards.filtrarClientesPorNombre(pago.cliente_nombre, clientes);
+      if (fuertes.length === 1) {
+        clienteInfo = fuertes[0];
+        pago.cliente_id = clienteInfo.id; // corregir en memoria
+        await pool.query(`UPDATE pagos_pendientes SET cliente_id = $1 WHERE id = $2`, [clienteInfo.id, pago.id]).catch(() => {});
+        console.log(`Reparado cliente_id del pago ${pago.id}: ${pago.cliente_nombre} → ${clienteInfo.id}`);
+      } else if (fuertes.length > 1) {
+        await enviarWhatsApp(process.env.COSACO_WHATSAPP,
+          `⚠️ El pago de ${pago.cliente_nombre} quedó con la ficha mal cargada y hay VARIAS con ese nombre. Cargalo de nuevo con nombre y apellido completos (o desde el panel). El pago sigue en la cola.`);
+        return;
+      }
+    }
     if (!clienteInfo) {
       await enviarWhatsApp(process.env.COSACO_WHATSAPP,
-        `⚠️ No pude leer la ficha de ${pago.cliente_nombre} (el sistema no respondió). El pago quedó en la cola, NO se perdió. Volvé a escribir "Sí" en un minuto y lo registro.`);
-      return; // el pago sigue en cola
+        `⚠️ No pude encontrar la ficha de ${pago.cliente_nombre} (quedó mal cargada, id inválido). El pago NO se perdió: sigue en la cola. Cargalo de nuevo indicando el nombre completo, o registralo desde el panel.`);
+      return;
     }
 
     const enSeguimiento = clienteInfo.en_seguimiento === true || clienteInfo.estado === 'Suspendido';
