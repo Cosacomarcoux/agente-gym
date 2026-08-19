@@ -29,6 +29,11 @@ const tercerTurnoPendiente = new Map(); // telefonoCosaco → { clienteId, clien
 const montoPendiente = new Map();       // remitente → { clienteId, clienteNombre, metodo } esperando que diga el monto
 const promesaAvisada = new Map();       // remitente → timestamp del último aviso de "paga después" (throttle 1h)
 const ausenciaAvisada = new Map();      // remitente → timestamp del último aviso de "deja de venir" (throttle 6h)
+const fechaInicioPagoPendiente = new Map(); // telefonoCosaco → { pago, plan, propuesta } esperando que confirme la fecha de inicio al pagar
+const menuEstado = new Map();            // remitenteCliente → { paso, data } máquina de estados del menú guiado
+
+// Dirección del local para "Información del gimnasio" (configurable por env).
+const DIRECCION_GIMNASIO = process.env.DIRECCION_GIMNASIO || '(consultá la dirección con el equipo)';
 const seleccionPagoPendiente = new Map(); // telefonoCosaco → { candidatos:[{id,nombre,...}], monto, metodo } esperando que elija número de ficha
 
 // Link del grupo de WhatsApp que se envía al registrar/reactivar un cliente.
@@ -286,6 +291,18 @@ function calcularFechaVencimiento(fecha_pago, fecha_vencimiento_actual) {
   else if (dia >= 16 && dia <= 25) { diaVenc = 25; meses = 1; }
   else { diaVenc = 5; meses = dia >= 26 ? 2 : 1; }
   return new Date(fecha.getFullYear(), fecha.getMonth() + meses, diaVenc).toISOString().split('T')[0];
+}
+
+// Vencimiento = fecha de inicio + 1 mes (mismo criterio que calcularFechaVencimiento).
+function sumarUnMes(iso) {
+  const d = new Date(iso + 'T12:00:00');
+  return new Date(d.getFullYear(), d.getMonth() + 1, d.getDate()).toISOString().split('T')[0];
+}
+// ISO (yyyy-mm-dd) → dd/mm/yyyy para mostrarle a Cosaco.
+function fmtFechaAR(iso) {
+  if (!iso) return '—';
+  const [y, m, d] = iso.split('-');
+  return `${d}/${m}/${y}`;
 }
 
 function parsearFecha(fechaStr) {
@@ -654,13 +671,15 @@ async function ejecutarTool(nombre, input, remitente) {
       const eraInactivo = existente.estado === 'Suspendido' || existente.estado === 'Vencido';
       if (eraInactivo) logActividad('cliente_volvio', `${existente.nombre} (estaba ${existente.estado})`, null, input.telefono);
       if (eraInactivo) {
-        // Reactivación (suspendido/vencido que vuelve) → entra a seguimiento. Sale sólo al pagar.
+        // El cliente vuelve, se le asignan turnos, PERO sigue figurando como estaba
+        // (Suspendido/Vencido) y entra a seguimiento. Recién queda Vigente cuando se
+        // registra su pago — ahí el bot pide confirmar la fecha de inicio (= última
+        // asistencia). NO se reactiva acá.
         try { await fetch(`${GYM_API}/clientes/${existente.id}/seguimiento`, { method: 'POST', headers }); }
         catch (e) { console.warn('alta seguimiento (reactivado):', e.message); }
-        // Avisar a Cosaco que volvió un cliente inactivo (no se creó duplicado)
         try {
           await enviarWhatsApp(process.env.COSACO_WHATSAPP,
-            `🔄 ${existente.nombre} (estado: ${existente.estado}) volvió y pidió turnos. Se reutilizó su ficha existente, no se creó duplicado. Recordá registrarle el pago para reactivarlo.`);
+            `🔄 ${existente.nombre} (estado: ${existente.estado}) volvió y pidió turnos. Se reutilizó su ficha existente (no se duplicó) y quedó en *seguimiento*.\n\nSigue figurando como ${existente.estado}. Cuando registres su pago, te voy a pedir que confirmes la fecha de inicio (su última asistencia).`);
         } catch (e) { console.warn('aviso reactivacion:', e.message); }
       }
       return { ok: true, cliente_id: existente.id, nombre: existente.nombre,
@@ -1046,6 +1065,57 @@ async function mostrarSiguientePendiente() {
   return sig.length;
 }
 
+// Fecha (ISO) de la ÚLTIMA asistencia presente del cliente, o null si no tiene.
+async function ultimaAsistenciaISO(clienteId) {
+  try {
+    if (!GYM_TOKEN) await loginConReintentos(3, 3000);
+    const r = await fetch(`${GYM_API}/asistencias/${clienteId}`, { headers: { Authorization: `Bearer ${GYM_TOKEN}` } });
+    if (!r.ok) return null;
+    const arr = await r.json();
+    // Vienen ordenadas por fecha DESC; la primera presente es la última asistencia.
+    const pres = (Array.isArray(arr) ? arr : []).filter(a => a.presente);
+    return pres.length ? pres[0].fecha : null;
+  } catch (e) { console.error('ultimaAsistenciaISO:', e.message); return null; }
+}
+
+// Escribe el pago en el sistema (POST /pagos). Devuelve true si salió bien.
+// El sistema, al recibir fecha_vencimiento, pone al cliente en Vigente, actualiza
+// sus fechas y lo saca de la lista de seguimiento.
+async function escribirPago(pago, fechaInicio, fechaVenc, plan) {
+  if (!GYM_TOKEN) await loginConReintentos(3, 3000);
+  const hdrs = { Authorization: `Bearer ${GYM_TOKEN}`, 'Content-Type': 'application/json' };
+  try {
+    const hoy = new Date().toISOString().split('T')[0];
+    const r = await fetch(`${GYM_API}/pagos`, {
+      method: 'POST', headers: hdrs,
+      body: JSON.stringify({
+        cliente_id: pago.cliente_id, monto: pago.monto, metodo: pago.metodo,
+        fecha_pago: hoy, fecha_inicio: fechaInicio, fecha_vencimiento: fechaVenc, plan,
+      }),
+    });
+    return r.ok;
+  } catch (e) { console.error('escribirPago:', e.message); return false; }
+}
+
+// Cierra el pago que estaba esperando confirmación de fecha: lo registra con la
+// fecha de inicio elegida, borra el pendiente, avisa al cliente y a Cosaco.
+async function finalizarPagoConFecha(remitente, fd, fechaInicio) {
+  const venc = sumarUnMes(fechaInicio);
+  const ok = await escribirPago(fd.pago, fechaInicio, venc, fd.plan);
+  if (!ok) {
+    await enviarWhatsApp(remitente, `⚠️ No pude registrar el pago de ${fd.pago.cliente_nombre}. Quedó pendiente para reintentar (escribí "pendientes").`);
+    return;
+  }
+  fechaInicioPagoPendiente.delete(remitente);
+  await pool.query(`DELETE FROM pagos_pendientes WHERE id = $1`, [fd.pago.id]);
+  await enviarWhatsApp(fd.pago.cliente_from,
+    `✅ Pago registrado: ${fd.pago.cliente_nombre} - $${fd.pago.monto} - ${fd.pago.metodo} 🏑`, fd.pago.cliente_nombre);
+  await enviarWhatsApp(remitente,
+    `✅ ${fd.pago.cliente_nombre} reactivada y al día.\n📅 Fecha de inicio: ${fmtFechaAR(fechaInicio)}\n⏳ Vence: ${fmtFechaAR(venc)}`);
+  logActividad('pago_confirmado', `${fd.pago.cliente_nombre} (${fd.pago.metodo}, inicio ${fechaInicio})`, fd.pago.monto, fd.pago.cliente_from);
+  await mostrarSiguientePendiente();
+}
+
 async function manejarConfirmacionPago(mensajeUpper, pago) {
   if (mensajeUpper === 'SIGUIENTE') {
     await enviarWhatsApp(process.env.COSACO_WHATSAPP,
@@ -1059,23 +1129,46 @@ async function manejarConfirmacionPago(mensajeUpper, pago) {
     // fallaba (token vencido, API caída), el pago desaparecía sin guardarse.
     if (!GYM_TOKEN) await loginConReintentos(3, 3000);
     const hdrs = { Authorization: `Bearer ${GYM_TOKEN}`, 'Content-Type': 'application/json' };
-    let registrado = false;
+
+    // ¿El cliente viene de seguimiento / suspendido? → su fecha de inicio debe ser
+    // su ÚLTIMA ASISTENCIA, y Cosaco tiene que CONFIRMARLA antes de registrar.
+    let clienteInfo = null;
     try {
       const rCli = await fetch(`${GYM_API}/clientes/${pago.cliente_id}`, { headers: hdrs });
-      if (rCli.ok) {
-        const cliente = await rCli.json();
-        const hoy = new Date().toISOString().split('T')[0];
-        const rPago = await fetch(`${GYM_API}/pagos`, {
-          method: 'POST', headers: hdrs,
-          body: JSON.stringify({
-            cliente_id: pago.cliente_id, monto: pago.monto, metodo: pago.metodo,
-            fecha_pago: hoy, fecha_inicio: calcularFechaInicio(cliente),
-            fecha_vencimiento: calcularFechaVencimiento(hoy, cliente.fecha_vencimiento),
-            plan: cliente.plan,
-          }),
-        });
-        registrado = rPago.ok;
-      }
+      if (rCli.ok) clienteInfo = await rCli.json();
+    } catch (e) { console.error('Error leyendo cliente:', e.message); }
+
+    if (!clienteInfo) {
+      await enviarWhatsApp(process.env.COSACO_WHATSAPP,
+        `⚠️ No pude leer la ficha de ${pago.cliente_nombre} para registrar el pago. Quedó pendiente, probá de nuevo en un minuto.`);
+      return; // el pago sigue en cola
+    }
+
+    const enSeguimiento = clienteInfo.en_seguimiento === true || clienteInfo.estado === 'Suspendido';
+    if (enSeguimiento) {
+      const ultima = await ultimaAsistenciaISO(pago.cliente_id);
+      const propuesta = ultima || new Date().toISOString().split('T')[0];
+      fechaInicioPagoPendiente.set(process.env.COSACO_WHATSAPP, { pago, plan: clienteInfo.plan, propuesta });
+      await enviarWhatsApp(process.env.COSACO_WHATSAPP,
+        `📅 Antes de registrar el pago de *${pago.cliente_nombre}*:\nSu fecha de inicio sería su *última asistencia*: ${fmtFechaAR(propuesta)}${ultima ? '' : ' (no tiene asistencias cargadas, usé hoy)'}.\n\n¿Confirmás esa fecha? Respondé *SÍ*, o mandame otra (ej: 20/08/2026).`);
+      return; // NO se escribe el pago todavía; el pendiente queda en cola
+    }
+
+    // Cliente normal (renovación): se registra con la lógica de siempre (hoy).
+    let registrado = false;
+    try {
+      const cliente = clienteInfo;
+      const hoy = new Date().toISOString().split('T')[0];
+      const rPago = await fetch(`${GYM_API}/pagos`, {
+        method: 'POST', headers: hdrs,
+        body: JSON.stringify({
+          cliente_id: pago.cliente_id, monto: pago.monto, metodo: pago.metodo,
+          fecha_pago: hoy, fecha_inicio: calcularFechaInicio(cliente),
+          fecha_vencimiento: calcularFechaVencimiento(hoy, cliente.fecha_vencimiento),
+          plan: cliente.plan,
+        }),
+      });
+      registrado = rPago.ok;
     } catch (e) { console.error('Error registrando pago:', e.message); }
 
     if (!registrado) {
@@ -1101,6 +1194,239 @@ async function manejarConfirmacionPago(mensajeUpper, pago) {
   await mostrarSiguientePendiente();
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+//  MENÚ GUIADO PARA CLIENTES (opciones numeradas, sin libre escritura)
+// ════════════════════════════════════════════════════════════════════════════
+async function mostrarMenuPrincipal(remitente) {
+  let nombre1 = '';
+  try { const c = await buscarClientePorTelefono(remitente); if (c && c.nombre) nombre1 = ' ' + c.nombre.split(' ')[0]; } catch {}
+  menuEstado.set(remitente, { paso: 'MENU', data: {} });
+  await enviarWhatsApp(remitente,
+`¡Hola${nombre1}! 🏑 Soy el asistente de Hockey Vivo. ¿Qué querés hacer? Respondé con el número (o escribí la opción):
+
+1️⃣ Cargar un pago
+2️⃣ Modificar mis turnos
+3️⃣ Pedir mi estado de cuenta
+4️⃣ Información del gimnasio
+5️⃣ Enviar un mensaje al Equipo de HV`);
+}
+
+// Encola el pago (para que Cosaco lo confirme) y le avisa al cliente.
+async function encolarPagoDesdeMenu(remitente, clienteId, clienteNombre, monto, metodo) {
+  await pool.query(`DELETE FROM pagos_pendientes WHERE esperando_confirmacion = true AND cliente_id = $1`, [clienteId]);
+  await pool.query(
+    `INSERT INTO pagos_pendientes (cliente_id, cliente_nombre, cliente_from, monto, metodo) VALUES ($1, $2, $3, $4, $5)`,
+    [clienteId, clienteNombre, remitente, monto, metodo]
+  );
+  const { rows: existing } = await pool.query(`SELECT COUNT(*) AS count FROM pagos_pendientes WHERE esperando_confirmacion = true`);
+  if (parseInt(existing[0].count) <= 1) {
+    const msg = `💰 ${clienteNombre} - $${monto} - ${metodo}\n¿Confirmás? SÍ o NO`;
+    await twilioClient.messages.create({ from: TWILIO_FROM, to: process.env.COSACO_WHATSAPP, body: msg });
+    guardarMensaje(process.env.COSACO_WHATSAPP, null, msg, 'agente');
+  }
+  logActividad('pago_menu', `${clienteNombre} ($${monto} ${metodo})`, monto, remitente);
+  await enviarWhatsApp(remitente,
+    `¡Gracias! 🏑 Tomé tu pago de *$${monto}* (${metodo}) a nombre de *${clienteNombre}* y lo mandé al equipo para confirmarlo. En breve te avisamos cuando quede acreditado.`);
+}
+
+// Busca un nombre escrito por el cliente y lo deja listo para confirmar.
+async function resolverNombreMenu(remitente, texto, estado) {
+  if (!GYM_TOKEN) await loginConReintentos(3, 3000);
+  const nombreLimpio = guards.limpiarNombreBuscado(texto) || texto.trim();
+  const clientes = await ejecutarTool('get_clientes', { buscar: nombreLimpio }, remitente);
+  const fuertes = guards.filtrarClientesPorNombre(nombreLimpio, clientes);
+  const lista = fuertes.length ? fuertes : (Array.isArray(clientes) ? clientes.slice(0, 5) : []);
+  if (lista.length === 0) {
+    estado.paso = 'PAGO_NOMBRE_OTRO'; menuEstado.set(remitente, estado);
+    await enviarWhatsApp(remitente, `No encontré a nadie con ese nombre 🤔 Escribime el nombre y apellido tal como figura registrada.`);
+    return;
+  }
+  if (lista.length === 1) {
+    estado.data.candidatos = lista; estado.data.multi = false;
+    estado.paso = 'PAGO_NOMBRE_CONFIRMAR'; menuEstado.set(remitente, estado);
+    await enviarWhatsApp(remitente, `¿Confirmás que el pago es para *${lista[0].nombre}*?\n1️⃣ Sí\n2️⃣ No, es otra`);
+    return;
+  }
+  estado.data.candidatos = lista; estado.data.multi = true;
+  estado.paso = 'PAGO_NOMBRE_CONFIRMAR'; menuEstado.set(remitente, estado);
+  let msg = `Encontré varias. ¿Cuál es? Respondé el número:\n`;
+  lista.forEach((c, i) => { msg += `${i + 1}. ${c.nombre}\n`; });
+  msg += `\n(o escribí de nuevo el nombre completo)`;
+  await enviarWhatsApp(remitente, msg.trim());
+}
+
+async function enviarEstadoDeCuenta(remitente) {
+  try {
+    if (!GYM_TOKEN) await loginConReintentos(3, 3000);
+    const cli = await buscarClientePorTelefono(remitente);
+    if (!cli) { await enviarWhatsApp(remitente, `No encontré tu ficha con este número 🤔 Escribile al Equipo de HV (opción 5) y lo revisamos.`); return; }
+    const r = await fetch(`${GYM_API}/clientes/${cli.id}`, { headers: { Authorization: `Bearer ${GYM_TOKEN}` } });
+    const c = await r.json();
+    const venc = c.fecha_vencimiento ? fmtFechaAR(c.fecha_vencimiento) : '—';
+    const planTxt = c.plan == 1 ? '1 vez por semana' : c.plan == 2 ? '2 veces por semana' : c.plan == 3 ? '3 veces por semana' : `${c.plan}`;
+    await enviarWhatsApp(remitente,
+      `📄 *Estado de cuenta* — ${c.nombre}\n\n• Estado: ${c.estado}\n• Plan: ${planTxt}\n• Vencimiento: ${venc}\n\n¿Necesitás algo más? Escribí "menú" para volver 🏑`, c.nombre);
+  } catch (e) {
+    await enviarWhatsApp(remitente, `Uy, no pude traer tu estado de cuenta ahora 😅 Probá de nuevo en un rato o escribile al equipo (opción 5).`);
+  }
+}
+
+async function enviarInfoGimnasio(remitente) {
+  await enviarWhatsApp(remitente,
+`ℹ️ *Hockey Vivo Gym*
+
+💰 Planes:
+• 1 vez por semana: $35.000
+• 2 veces por semana: $42.000
+
+📍 Dirección: ${DIRECCION_GIMNASIO}
+
+👥 Grupo de WhatsApp:
+${GRUPO_WHATSAPP}
+
+Escribí "menú" para volver 🏑`);
+}
+
+// Máquina de estados del menú. Devuelve tras responder.
+async function manejarMenu(remitente, mensaje, profileName) {
+  const estado = menuEstado.get(remitente);
+  const low = mensaje.trim().toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+
+  // Salir / volver al menú en cualquier momento
+  if (/^(cancelar|salir|men[u]|inicio|volver|atras)$/.test(low)) { await mostrarMenuPrincipal(remitente); return; }
+
+  // ── MENÚ PRINCIPAL ──
+  if (estado.paso === 'MENU') {
+    const op = guards.matchOpcionMenu(mensaje);
+    if (!op) { await enviarWhatsApp(remitente, `No te entendí 🤔 Respondé con un número del *1 al 5*, o escribí la opción (ej: "cargar un pago").`); return; }
+    if (op === 1) {
+      estado.paso = 'PAGO_MONTO'; estado.data = {}; menuEstado.set(remitente, estado);
+      await enviarWhatsApp(remitente, `💰 ¿Qué monto vas a pagar?\n1️⃣ $35.000 (1 vez por semana)\n2️⃣ $42.000 (2 veces por semana)\n\n(o escribime el monto si es otro)`);
+      return;
+    }
+    if (op === 2) {
+      estado.paso = 'TURNOS_DESC'; menuEstado.set(remitente, estado);
+      await enviarWhatsApp(remitente, `📅 Contame qué cambio querés en tus turnos (qué día/horario tenés y a cuál querés cambiar) y le paso el pedido al equipo 🏑`);
+      return;
+    }
+    if (op === 3) { menuEstado.delete(remitente); await enviarEstadoDeCuenta(remitente); return; }
+    if (op === 4) { menuEstado.delete(remitente); await enviarInfoGimnasio(remitente); return; }
+    if (op === 5) {
+      estado.paso = 'MENSAJE_EQUIPO'; menuEstado.set(remitente, estado);
+      await enviarWhatsApp(remitente, `✍️ Escribime el mensaje para el Equipo de HV y se lo hago llegar 🏑`);
+      return;
+    }
+  }
+
+  // ── PAGO: monto ──
+  if (estado.paso === 'PAGO_MONTO') {
+    let monto = null;
+    if (/^1$/.test(low)) monto = 35000;
+    else if (/^2$/.test(low)) monto = 42000;
+    else { const m = guards.parsearMonto(mensaje); if (m) monto = m; }
+    if (!monto) { await enviarWhatsApp(remitente, `Elegí el monto: 1️⃣ $35.000 · 2️⃣ $42.000 (o escribí el monto en números).`); return; }
+    estado.data.monto = monto; estado.paso = 'PAGO_METODO'; menuEstado.set(remitente, estado);
+    await enviarWhatsApp(remitente, `¿Cómo lo pagás?\n1️⃣ Transferencia\n2️⃣ Efectivo`);
+    return;
+  }
+
+  // ── PAGO: método ──
+  if (estado.paso === 'PAGO_METODO') {
+    let metodo = null;
+    if (/^1$/.test(low) || /transfer/.test(low)) metodo = 'Transferencia';
+    else if (/^2$/.test(low) || /efectiv/.test(low)) metodo = 'Efectivo';
+    if (!metodo) { await enviarWhatsApp(remitente, `Elegí el método: 1️⃣ Transferencia · 2️⃣ Efectivo`); return; }
+    estado.data.metodo = metodo;
+    const cli = await buscarClientePorTelefono(remitente).catch(() => null);
+    if (cli && cli.nombre) {
+      estado.data.clienteId = cli.id; estado.data.clienteNombre = cli.nombre;
+      estado.paso = 'PAGO_NOMBRE'; menuEstado.set(remitente, estado);
+      await enviarWhatsApp(remitente, `El pago es a nombre de *${cli.nombre}*?\n1️⃣ Sí\n2️⃣ Es para otra jugadora (escribí su nombre y apellido)`);
+    } else {
+      estado.paso = 'PAGO_NOMBRE_OTRO'; menuEstado.set(remitente, estado);
+      await enviarWhatsApp(remitente, `¿A nombre de qué jugadora es el pago? Escribime su nombre y apellido tal como está registrada 🏑`);
+    }
+    return;
+  }
+
+  // ── PAGO: ¿es a nombre del titular del número? ──
+  if (estado.paso === 'PAGO_NOMBRE') {
+    if (/^1$/.test(low) || /^s[i]$/.test(low) || /^si$/.test(low)) {
+      await encolarPagoDesdeMenu(remitente, estado.data.clienteId, estado.data.clienteNombre, estado.data.monto, estado.data.metodo);
+      menuEstado.delete(remitente);
+      return;
+    }
+    if (/^2$/.test(low)) {
+      estado.paso = 'PAGO_NOMBRE_OTRO'; menuEstado.set(remitente, estado);
+      await enviarWhatsApp(remitente, `Dale, escribime el nombre y apellido de la jugadora 🏑`);
+      return;
+    }
+    // Escribió otro nombre directamente
+    await resolverNombreMenu(remitente, mensaje, estado);
+    return;
+  }
+
+  // ── PAGO: pidió otro nombre ──
+  if (estado.paso === 'PAGO_NOMBRE_OTRO') {
+    await resolverNombreMenu(remitente, mensaje, estado);
+    return;
+  }
+
+  // ── PAGO: confirmar el nombre elegido ──
+  if (estado.paso === 'PAGO_NOMBRE_CONFIRMAR') {
+    const cands = estado.data.candidatos || [];
+    if (estado.data.multi) {
+      const mNum = low.match(/^(\d{1,2})$/);
+      if (mNum) {
+        const idx = parseInt(mNum[1], 10) - 1;
+        if (idx >= 0 && idx < cands.length) {
+          await encolarPagoDesdeMenu(remitente, cands[idx].id, cands[idx].nombre, estado.data.monto, estado.data.metodo);
+          menuEstado.delete(remitente); return;
+        }
+        await enviarWhatsApp(remitente, `Ese número no está en la lista. Elegí entre 1 y ${cands.length}, o escribí el nombre completo.`); return;
+      }
+      // no fue número → re-buscar con lo que escribió
+      await resolverNombreMenu(remitente, mensaje, estado); return;
+    }
+    // un solo candidato → Sí/No
+    if (/^1$/.test(low) || /^si$/.test(low) || /^s$/.test(low)) {
+      await encolarPagoDesdeMenu(remitente, cands[0].id, cands[0].nombre, estado.data.monto, estado.data.metodo);
+      menuEstado.delete(remitente); return;
+    }
+    if (/^2$/.test(low) || /^no$/.test(low)) {
+      estado.paso = 'PAGO_NOMBRE_OTRO'; menuEstado.set(remitente, estado);
+      await enviarWhatsApp(remitente, `Dale, escribime el nombre y apellido correcto 🏑`); return;
+    }
+    // cualquier otra cosa → tratar como nuevo nombre
+    await resolverNombreMenu(remitente, mensaje, estado); return;
+  }
+
+  // ── MODIFICAR TURNOS: descripción → avisar a Cosaco ──
+  if (estado.paso === 'TURNOS_DESC') {
+    menuEstado.delete(remitente);
+    const cli = await buscarClientePorTelefono(remitente).catch(() => null);
+    const quien = cli ? cli.nombre : (profileName || remitente.replace('whatsapp:', ''));
+    await enviarWhatsApp(process.env.COSACO_WHATSAPP, `📅 *${quien}* pide modificar turnos:\n"${mensaje.slice(0, 250)}"`);
+    logActividad('pedido_turnos', quien, null, remitente);
+    await enviarWhatsApp(remitente, `¡Listo! Le pasé tu pedido al equipo, en breve te responden 🏑`);
+    return;
+  }
+
+  // ── MENSAJE AL EQUIPO ──
+  if (estado.paso === 'MENSAJE_EQUIPO') {
+    menuEstado.delete(remitente);
+    const cli = await buscarClientePorTelefono(remitente).catch(() => null);
+    const quien = cli ? cli.nombre : (profileName || remitente.replace('whatsapp:', ''));
+    await enviarWhatsApp(process.env.COSACO_WHATSAPP, `✉️ Mensaje de *${quien}* para el equipo:\n"${mensaje.slice(0, 400)}"`);
+    logActividad('mensaje_equipo', quien, null, remitente);
+    await enviarWhatsApp(remitente, `¡Recibido! Le hice llegar tu mensaje al equipo 🏑`);
+    return;
+  }
+
+  // Estado raro → reiniciar al menú
+  await mostrarMenuPrincipal(remitente);
+}
+
 async function procesarMensaje(mensaje, remitente, profileName = null) {
   try {
     const esCosaco = remitente === process.env.COSACO_WHATSAPP;
@@ -1115,6 +1441,22 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
     }
     const mensajeUpper = mensaje.trim().toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
     const esSiNo = ['SI', 'S', 'NO', 'N'].includes(mensajeUpper);
+
+    // ── MENÚ GUIADO (clientes) ────────────────────────────────────────────
+    // Si el cliente está dentro del menú, sus respuestas las maneja la máquina
+    // de estados (números/opciones). Si saluda y no hay otro flujo activo, le
+    // mostramos el menú. Todo esto es SOLO para clientes, nunca para Cosaco.
+    if (!esCosaco && menuEstado.has(remitente)) {
+      await manejarMenu(remitente, mensaje, profileName);
+      return;
+    }
+    const quiereAnotarse = /anotar|inscrib|sumar|arrancar|empezar a (entrenar|jugar)|quiero (entrenar|jugar|empezar|probar)|clase de prueba|info para (anotar|sumar|arrancar|jugar)/i.test(mensaje);
+    if (!esCosaco && guards.esSaludo(mensaje) && !quiereAnotarse
+        && !montoPendiente.has(remitente) && !comprobantePendiente.has(remitente)
+        && !pagosEsperandoNombre.has(remitente)) {
+      await mostrarMenuPrincipal(remitente);
+      return;
+    }
 
     // ── 0-bis. ESPERANDO EL MONTO (le preguntamos "¿cuánto pagaste?") ─────
     if (!esCosaco && montoPendiente.has(remitente)) {
@@ -1206,6 +1548,36 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
 
     // ── 1. MODO SECRETARIO (solo Cosaco) ──────────────────────────────────
     if (esCosaco) {
+      // ── CONFIRMAR FECHA DE INICIO AL PAGAR (reactivación) ─────────────────
+      // Cuando se paga un cliente que estaba en seguimiento/suspendido, el bot
+      // propone su ÚLTIMA ASISTENCIA como fecha de inicio y espera que Cosaco
+      // confirme (SÍ) o mande otra fecha. Va PRIMERO para que ese "SÍ"/fecha no
+      // se confunda con la confirmación normal del pago.
+      if (fechaInicioPagoPendiente.has(remitente)) {
+        const fd = fechaInicioPagoPendiente.get(remitente);
+        const low = mensaje.trim().toLowerCase();
+        if (mensajeUpper === 'SI' || mensajeUpper === 'S' || /^(dale|confirmo|correcto|esa|esa fecha|si esa|ok esa|de una)$/.test(low)) {
+          await finalizarPagoConFecha(remitente, fd, fd.propuesta);
+          return;
+        }
+        if (/^(cancelar|cancela|no|dejalo|despues|despu[eé]s|luego)$/.test(low)) {
+          fechaInicioPagoPendiente.delete(remitente);
+          await enviarWhatsApp(remitente, `Ok, no registré el pago de ${fd.pago.cliente_nombre}. Quedó pendiente — escribí "pendientes" cuando quieras retomarlo.`);
+          return;
+        }
+        const fecha = guards.parsearFechaInicio(mensaje);
+        if (fecha) { await finalizarPagoConFecha(remitente, fd, fecha); return; }
+        // Si parece un intento de fecha fallido, avisamos; si no, no bloqueamos.
+        const pareceFecha = /^\s*\d{1,2}\s*[\/\-.]\s*\d{1,2}/.test(low)
+          || /^\s*(hoy|ayer|manana|mañana)\b/.test(low)
+          || /^\s*\d{1,2}\s+(de\s+)?[a-zñáéíóú]+/i.test(low);
+        if (pareceFecha) {
+          await enviarWhatsApp(remitente, `No entendí la fecha 🤔 Mandame día/mes/año (ej: 20/08/2026), o "SÍ" para usar ${fmtFechaAR(fd.propuesta)} (su última asistencia). O "cancelar".`);
+          return;
+        }
+        // no parece fecha → seguir con el resto de handlers (no return)
+      }
+
       // ── SELECCIÓN DE FICHA (fichas duplicadas): Cosaco responde el número ──
       // Va PRIMERO para que ese "1"/"2" elija la ficha y NUNCA se interprete como
       // monto ($1). Solo se activa si hay una selección pendiente.

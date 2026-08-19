@@ -169,6 +169,52 @@ test('esAvisoDeAusencia NO se dispara con ausencias de un día ni charla normal'
   }
 });
 
+// ── parsearFechaInicio: fecha de inicio para reactivar ──────────────────────
+test('parsearFechaInicio entiende formatos comunes', () => {
+  const hoy = new Date(2026, 7, 20); // 20 ago 2026
+  assert.strictEqual(g.parsearFechaInicio('hoy', hoy), '2026-08-20');
+  assert.strictEqual(g.parsearFechaInicio('ayer', hoy), '2026-08-19');
+  assert.strictEqual(g.parsearFechaInicio('20/08/2026', hoy), '2026-08-20');
+  assert.strictEqual(g.parsearFechaInicio('5/9/2026', hoy), '2026-09-05');
+  assert.strictEqual(g.parsearFechaInicio('20-08-26', hoy), '2026-08-20');
+  assert.strictEqual(g.parsearFechaInicio('1/12', hoy), '2026-12-01');
+  assert.strictEqual(g.parsearFechaInicio('15 de julio de 2026', hoy), '2026-07-15');
+  assert.strictEqual(g.parsearFechaInicio('3 de setiembre', hoy), '2026-09-03');
+});
+
+test('parsearFechaInicio rechaza fechas inválidas o texto suelto', () => {
+  const hoy = new Date(2026, 7, 20);
+  assert.strictEqual(g.parsearFechaInicio('31/02/2026', hoy), null);
+  assert.strictEqual(g.parsearFechaInicio('hola', hoy), null);
+  assert.strictEqual(g.parsearFechaInicio('si', hoy), null);
+  assert.strictEqual(g.parsearFechaInicio('', hoy), null);
+});
+
+// ── Menú guiado ─────────────────────────────────────────────────────────────
+test('esSaludo reconoce saludos y no confunde otras frases', () => {
+  for (const t of ['hola', 'Hola!', 'buenas', 'buen dia', 'buenos dias', 'buenas noches', 'menu']) {
+    assert.ok(g.esSaludo(t), `debería ser saludo: "${t}"`);
+  }
+  for (const t of ['ya pagué 35000', 'quiero pagar', 'modificar turno', '35000']) {
+    assert.strictEqual(g.esSaludo(t), false, `NO debería ser saludo: "${t}"`);
+  }
+});
+
+test('matchOpcionMenu entiende número y texto', () => {
+  assert.strictEqual(g.matchOpcionMenu('1'), 1);
+  assert.strictEqual(g.matchOpcionMenu('cargar un pago'), 1);
+  assert.strictEqual(g.matchOpcionMenu('pagar'), 1);
+  assert.strictEqual(g.matchOpcionMenu('2'), 2);
+  assert.strictEqual(g.matchOpcionMenu('modificar un turno'), 2);
+  assert.strictEqual(g.matchOpcionMenu('3'), 3);
+  assert.strictEqual(g.matchOpcionMenu('estado de cuenta'), 3);
+  assert.strictEqual(g.matchOpcionMenu('4'), 4);
+  assert.strictEqual(g.matchOpcionMenu('informacion del gimnasio'), 4);
+  assert.strictEqual(g.matchOpcionMenu('5'), 5);
+  assert.strictEqual(g.matchOpcionMenu('enviar un mensaje al equipo'), 5);
+  assert.strictEqual(g.matchOpcionMenu('cualquier cosa rara'), null);
+});
+
 // ── parsearMonto: leer el monto del mensaje ─────────────────────────────────
 test('parsearMonto lee montos en formatos comunes', () => {
   assert.strictEqual(g.parsearMonto('transferí 35000'), 35000);

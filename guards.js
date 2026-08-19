@@ -5,6 +5,27 @@
 //  código donde se procesan pagos. Sin dependencias externas: 100% testeable.
 // ============================================================================
 
+// ── MENÚ GUIADO ─────────────────────────────────────────────────────────────
+// ¿El cliente saludó / quiere arrancar? → mostramos el menú de opciones.
+function esSaludo(texto) {
+  const t = String(texto || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!t) return false;
+  return /^(hola+|holis|hol[a]+|ola|buenas|buenos|buen dia|buen dias|buenos dias|buenas tardes|buenas noches|hey|ey|que tal|menu|inicio|empezar|arrancar|volver|hello)\b/.test(t);
+}
+
+// De un mensaje en el menú principal, devuelve la opción elegida (1-5) por número
+// o por texto ("modificar un turno" → 2). null si no reconoce ninguna.
+function matchOpcionMenu(texto) {
+  const t = String(texto || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!t) return null;
+  if (/^1\b/.test(t) || /\bpagar\b/.test(t) || /\b(cargar|carga|registrar|hacer)\b.*\bpago\b/.test(t) || /^pago\b/.test(t) || /\bun pago\b/.test(t)) return 1;
+  if (/^2\b/.test(t) || /\bturnos?\b/.test(t)) return 2;
+  if (/^3\b/.test(t) || /estado (de )?cuenta/.test(t) || /\bcuenta\b/.test(t) || /cuanto (debo|adeudo|falta)/.test(t) || /mi estado/.test(t) || /vencimiento/.test(t)) return 3;
+  if (/^4\b/.test(t) || /informacion/.test(t) || /\binfo\b/.test(t) || /gimnasio/.test(t) || /precios?/.test(t) || /\bmontos?\b/.test(t) || /direccion/.test(t) || /donde (queda|estan|es|quedan)/.test(t) || /\bgrupo\b/.test(t)) return 4;
+  if (/^5\b/.test(t) || /mensaje/.test(t) || /\bequipo\b/.test(t) || /hablar con/.test(t) || /contactar/.test(t) || /una consulta/.test(t)) return 5;
+  return null;
+}
+
 // ── PAGOS ──────────────────────────────────────────────────────────────────
 
 // ¿El texto del cliente SUENA a un pago real? Candado contra pagos inventados:
@@ -119,6 +140,43 @@ function esAvisoDeAusencia(texto) {
   return dejar.test(t) || mesNo.test(t) || vuelvo.test(t) || hasta.test(t);
 }
 
+// Parsea una fecha escrita por Cosaco a formato ISO (yyyy-mm-dd). Acepta:
+// "hoy", "ayer", "mañana", "20/08/2026", "20-08-2026", "20/8/26", "20/08"
+// (año actual). Devuelve null si no reconoce una fecha válida.
+function parsearFechaInicio(texto, hoyDate) {
+  const hoy = hoyDate instanceof Date ? hoyDate : new Date();
+  const raw = String(texto || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').trim();
+  if (!raw) return null;
+  const iso = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const armar = (y, mo, d) => {
+    y = parseInt(y, 10); mo = parseInt(mo, 10); d = parseInt(d, 10);
+    if (String(y).length === 2) y = 2000 + y;
+    if (mo < 1 || mo > 12 || d < 1 || d > 31) return null;
+    const dt = new Date(y, mo - 1, d);
+    // Rechazar fechas inexistentes (ej: 31/02 → JS la corre a marzo)
+    if (dt.getFullYear() !== y || dt.getMonth() !== mo - 1 || dt.getDate() !== d) return null;
+    return iso(dt);
+  };
+  if (/\bhoy\b/.test(raw)) return iso(hoy);
+  if (/\bayer\b/.test(raw)) { const d = new Date(hoy); d.setDate(d.getDate() - 1); return iso(d); }
+  if (/\bmanana\b/.test(raw)) { const d = new Date(hoy); d.setDate(d.getDate() + 1); return iso(d); }
+  let m = raw.match(/(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})/);      // yyyy-mm-dd
+  if (m) return armar(m[1], m[2], m[3]);
+  m = raw.match(/(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})/);        // dd/mm/yyyy
+  if (m) return armar(m[3], m[2], m[1]);
+  // "20 de agosto [de 2026]" / "20 agosto"
+  const meses = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'setiembre', 'octubre', 'noviembre', 'diciembre'];
+  m = raw.match(/\b(\d{1,2})\s+(?:de\s+)?([a-z]+)(?:\s+(?:de\s+)?(\d{2,4}))?/);
+  if (m) {
+    let idx = meses.indexOf(m[2]);
+    if (idx === 9) idx = 8; // setiembre = septiembre
+    if (idx >= 0) return armar(m[3] || hoy.getFullYear(), idx + 1, m[1]);
+  }
+  m = raw.match(/\b(\d{1,2})[-/.](\d{1,2})\b/);                  // dd/mm (año actual)
+  if (m) return armar(hoy.getFullYear(), m[2], m[1]);
+  return null;
+}
+
 // ¿El mensaje es una cortesía / no-nombre? (para no tratar "gracias", "ok", "dale"
 // como si fueran el nombre de la jugadora cuando el bot está esperando un nombre.)
 function esCortesia(texto) {
@@ -179,4 +237,7 @@ module.exports = {
   limpiarNombreBuscado,
   esCortesia,
   esAvisoDeAusencia,
+  parsearFechaInicio,
+  esSaludo,
+  matchOpcionMenu,
 };
