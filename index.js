@@ -1065,11 +1065,33 @@ async function mostrarSiguientePendiente() {
   return sig.length;
 }
 
+// Lee la ficha del cliente con reintentos. Robustece contra: token vencido
+// (fuerza re-login) y arranque en frío del sistema en Railway (502/503 mientras
+// despierta → espera y reintenta). Devuelve el objeto cliente o null.
+async function getClienteConReintento(clienteId, intentos = 3) {
+  for (let i = 1; i <= intentos; i++) {
+    try {
+      if (!GYM_TOKEN) await loginConReintentos(3, 3000);
+      const r = await fetch(`${GYM_API}/clientes/${clienteId}`, {
+        headers: { Authorization: `Bearer ${GYM_TOKEN}` },
+        signal: AbortSignal.timeout(30000),
+      });
+      if (r.ok) return await r.json();
+      console.warn(`getCliente ${clienteId} intento ${i}: HTTP ${r.status}`);
+      if (r.status === 401) { try { await loginGimnasio(); } catch {} }
+    } catch (e) {
+      console.warn(`getCliente ${clienteId} intento ${i}: ${e.message}`);
+    }
+    if (i < intentos) await new Promise(res => setTimeout(res, 2000 * i)); // 2s, 4s (deja despertar al sistema)
+  }
+  return null;
+}
+
 // Fecha (ISO) de la ÚLTIMA asistencia presente del cliente, o null si no tiene.
 async function ultimaAsistenciaISO(clienteId) {
   try {
     if (!GYM_TOKEN) await loginConReintentos(3, 3000);
-    const r = await fetch(`${GYM_API}/asistencias/${clienteId}`, { headers: { Authorization: `Bearer ${GYM_TOKEN}` } });
+    const r = await fetch(`${GYM_API}/asistencias/${clienteId}`, { headers: { Authorization: `Bearer ${GYM_TOKEN}` }, signal: AbortSignal.timeout(30000) });
     if (!r.ok) return null;
     const arr = await r.json();
     // Vienen ordenadas por fecha DESC; la primera presente es la última asistencia.
@@ -1092,6 +1114,7 @@ async function escribirPago(pago, fechaInicio, fechaVenc, plan) {
         cliente_id: pago.cliente_id, monto: pago.monto, metodo: pago.metodo,
         fecha_pago: hoy, fecha_inicio: fechaInicio, fecha_vencimiento: fechaVenc, plan,
       }),
+      signal: AbortSignal.timeout(30000),
     });
     return r.ok;
   } catch (e) { console.error('escribirPago:', e.message); return false; }
@@ -1128,19 +1151,14 @@ async function manejarConfirmacionPago(mensajeUpper, pago) {
     // borrar el pendiente. Antes se borraba antes de registrar → si el registro
     // fallaba (token vencido, API caída), el pago desaparecía sin guardarse.
     if (!GYM_TOKEN) await loginConReintentos(3, 3000);
-    const hdrs = { Authorization: `Bearer ${GYM_TOKEN}`, 'Content-Type': 'application/json' };
 
     // ¿El cliente viene de seguimiento / suspendido? → su fecha de inicio debe ser
     // su ÚLTIMA ASISTENCIA, y Cosaco tiene que CONFIRMARLA antes de registrar.
-    let clienteInfo = null;
-    try {
-      const rCli = await fetch(`${GYM_API}/clientes/${pago.cliente_id}`, { headers: hdrs });
-      if (rCli.ok) clienteInfo = await rCli.json();
-    } catch (e) { console.error('Error leyendo cliente:', e.message); }
+    const clienteInfo = await getClienteConReintento(pago.cliente_id);
 
     if (!clienteInfo) {
       await enviarWhatsApp(process.env.COSACO_WHATSAPP,
-        `⚠️ No pude leer la ficha de ${pago.cliente_nombre} para registrar el pago. Quedó pendiente, probá de nuevo en un minuto.`);
+        `⚠️ No pude leer la ficha de ${pago.cliente_nombre} (el sistema no respondió). El pago quedó en la cola, NO se perdió. Volvé a escribir "Sí" en un minuto y lo registro.`);
       return; // el pago sigue en cola
     }
 
@@ -1155,21 +1173,14 @@ async function manejarConfirmacionPago(mensajeUpper, pago) {
     }
 
     // Cliente normal (renovación): se registra con la lógica de siempre (hoy).
-    let registrado = false;
-    try {
-      const cliente = clienteInfo;
-      const hoy = new Date().toISOString().split('T')[0];
-      const rPago = await fetch(`${GYM_API}/pagos`, {
-        method: 'POST', headers: hdrs,
-        body: JSON.stringify({
-          cliente_id: pago.cliente_id, monto: pago.monto, metodo: pago.metodo,
-          fecha_pago: hoy, fecha_inicio: calcularFechaInicio(cliente),
-          fecha_vencimiento: calcularFechaVencimiento(hoy, cliente.fecha_vencimiento),
-          plan: cliente.plan,
-        }),
-      });
-      registrado = rPago.ok;
-    } catch (e) { console.error('Error registrando pago:', e.message); }
+    const cliente = clienteInfo;
+    const hoy = new Date().toISOString().split('T')[0];
+    const registrado = await escribirPago(
+      pago,
+      calcularFechaInicio(cliente),
+      calcularFechaVencimiento(hoy, cliente.fecha_vencimiento),
+      cliente.plan
+    );
 
     if (!registrado) {
       // NO se borra el pendiente: el pago sigue en cola para reintentar.
@@ -2260,6 +2271,13 @@ async function runJob(diaGrupo, tipoJob) {
 // 48 h (Etapa 0 del backend), así que sin esto el bot muere a los 2 días.
 // Refrescamos cada 12 h: el token nunca llega ni cerca de vencer.
 cron.schedule('0 */12 * * *', () => loginConReintentos(3, 5000));
+
+// Keep-warm: cada 4 min pingea el sistema para que no se "duerma" en Railway.
+// Sin esto, la primera llamada tras un rato de inactividad fallaba con 502/timeout
+// (cold start) — era lo que rompía la confirmación de pagos. Silencioso.
+cron.schedule('*/4 * * * *', () => {
+  fetch(`${GYM_API}/`, { signal: AbortSignal.timeout(20000) }).catch(() => {});
+});
 
 cron.schedule('0 13 4 * *',  () => runJob(5, 'recordatorio'));
 cron.schedule('0 13 14 * *', () => runJob(15, 'recordatorio'));
