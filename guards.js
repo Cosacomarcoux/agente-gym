@@ -54,7 +54,10 @@ function esPagoRealizado(texto) {
 // ("mañana", "el viernes", "cuando cobre", "la semana que viene", etc.).
 function esPromesaFutura(texto) {
   const t = String(texto || '').toLowerCase();
-  const intencionExplicita = /(quiero|voy a|puedo|quisiera|querr[ií]a|necesito|pienso|tengo que|deber[ií]a) (pagar|transferir|depositar|abonar|se[ñn]ar)|c[oó]mo (te )?(pago|hago el pago|abono|transfiero|deposito)|te (pago|transfiero|deposito|mando|paso|abono|se[ñn]o) (despu[eé]s|luego|m[aá]s tarde|m[aá]s adelante|ma[ñn]ana|el |la |los |cuando |apenas |en cuanto |ni bien |a fin|esta semana|la semana|el finde|el fin)|pago (el|la|los) (lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado|domingo|finde|fin|semana|mes|d[ií]a|pr[oó]ximo)|esta semana (pago|te pago|abono|transfiero)|ma[ñn]ana (te )?(pago|abono|transfiero|deposito)/;
+  // Solo cuenta como promesa si hay MARCADOR DE FUTURO explícito. Las intenciones
+  // puras ("quiero pagar", "cómo pago") ya NO entran acá: esas abren el flujo de
+  // pago guiado (el cliente quiere pagar ahora, no más adelante).
+  const intencionExplicita = /te (pago|transfiero|deposito|mando|paso|abono|se[ñn]o) (despu[eé]s|luego|m[aá]s tarde|m[aá]s adelante|ma[ñn]ana|el |la |los |cuando |apenas |en cuanto |ni bien |a fin|esta semana|la semana|el finde|el fin)|pago (el|la|los) (lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado|domingo|finde|fin|semana|mes|d[ií]a|pr[oó]ximo)|esta semana (pago|te pago|abono|transfiero)|ma[ñn]ana (te )?(pago|abono|transfiero|deposito)/;
   if (intencionExplicita.test(t)) return true;
   const futuro = /despu[eé]s|luego|m[aá]s tarde|m[aá]s adelante|ma[ñn]ana|pasado ma[ñn]ana|el (lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado|domingo|finde|fin de semana|mes|d[ií]a|pr[oó]ximo)|la semana que viene|semana que viene|el mes que viene|a fin de mes|fin de mes|cuando (pueda|cobre|tenga|junte|me paguen)|apenas (pueda|cobre|tenga)|en cuanto (pueda|cobre|tenga)|ni bien (pueda|cobre)|ahora no (puedo|tengo)|no puedo (pagar )?ahora|no tengo (ahora|la plata)/;
   const mencionPago = /pag|transf|dep[oó]sit|abon|se[ñn]a|cuota|plata/;
@@ -138,6 +141,15 @@ function esAvisoDeAusencia(texto) {
   const vuelvo = new RegExp('\\b(vuelvo|vuelve|volvera|volveria|volvere|regreso|regresa|regresara|retomo|retoma|retomara|reanudo|reanuda|arranco|arranca|arrancara|empiezo|empieza|reincorpora|reincorporo)\\b[^]{0,25}?\\b(en|el|a|para|despues de|luego de|dentro de|recien|a partir de|el mes que viene)?\\s*(' + meses + '|mes que viene|proximo mes|mes siguiente|a(n|ñ)?o que viene|\\d+\\s*mes)');
   const hasta = new RegExp('\\bhasta\\b[^]{0,30}(' + meses + '|el mes que viene|proximo mes|a(n|ñ)?o que viene)[^]{0,20}\\bno\\b[^]{0,15}\\b(voy|va|vengo|viene|asisto|entreno)\\b');
   return dejar.test(t) || mesNo.test(t) || vuelvo.test(t) || hasta.test(t);
+}
+
+// ¿El cliente quiere pagar AHORA / pregunta cómo pagar? (sin marcador de futuro).
+// Dispara el flujo de pago guiado. OJO: esPromesaFutura se chequea ANTES, así que
+// "voy a pagar el viernes" no llega acá (es promesa).
+function quierePagar(texto) {
+  const t = String(texto || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+  if (!t) return false;
+  return /\b(quiero pagar|voy a pagar|quisiera pagar|querria pagar|necesito pagar|quiero abonar|voy a abonar|quiero transferir|voy a transferir|paso a pagar|vengo a pagar|quiero (hacer|realizar) (el|un) pago|como (te )?(pago|abono|transfiero|hago el pago)|donde (pago|deposito|transfiero|abono)|a que (alias|cuenta|cbu)|cual es el alias|quiero (dejar|registrar) (el|mi) pago)\b/.test(t);
 }
 
 // Parsea una fecha escrita por Cosaco a formato ISO (yyyy-mm-dd). Acepta:
@@ -240,4 +252,5 @@ module.exports = {
   parsearFechaInicio,
   esSaludo,
   matchOpcionMenu,
+  quierePagar,
 };

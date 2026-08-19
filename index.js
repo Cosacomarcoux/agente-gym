@@ -1222,6 +1222,15 @@ async function mostrarMenuPrincipal(remitente) {
 5️⃣ Enviar un mensaje al Equipo de HV`);
 }
 
+// Arranca el flujo de pago guiado (monto → método → nombre). Se usa tanto desde
+// el menú (opción 1) como cuando el cliente menciona un pago o manda comprobante.
+async function iniciarFlujoPagoMenu(remitente, encabezado) {
+  menuEstado.set(remitente, { paso: 'PAGO_MONTO', data: {} });
+  const enc = encabezado || '¡Gracias! Vamos a registrar tu pago 🏑';
+  await enviarWhatsApp(remitente,
+    `${enc}\n\n💰 ¿Qué monto?\n1️⃣ $35.000 (1 vez por semana)\n2️⃣ $42.000 (2 veces por semana)\n\n(o escribime el monto si es otro)`);
+}
+
 // Encola el pago (para que Cosaco lo confirme) y le avisa al cliente.
 async function encolarPagoDesdeMenu(remitente, clienteId, clienteNombre, monto, metodo) {
   await pool.query(`DELETE FROM pagos_pendientes WHERE esperando_confirmacion = true AND cliente_id = $1`, [clienteId]);
@@ -2095,41 +2104,14 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
         return;
       }
 
-      if (esPagoRealizado && !esIntFutura) {
-        if (!GYM_TOKEN) await loginConReintentos(3, 3000);
-        const cliente = await buscarClientePorTelefono(remitente);
-        if (cliente) {
-          // FIX $0: intentar leer el monto del propio mensaje ("transferí 35000")
-          const mMonto = mensaje.match(/\$?\s*([\d]{4,}[\d.,]*)/);
-          const montoMsg = mMonto ? parseFloat(mMonto[1].replace(/\./g, '').replace(',', '.')) : 0;
-          if (!(montoMsg > 0)) {
-            // Sin monto → NO encolar $0: preguntarle cuánto pagó
-            montoPendiente.set(remitente, { clienteId: cliente.id, clienteNombre: cliente.nombre, metodo: 'Transferencia' });
-            await enviarWhatsApp(remitente, `¡Gracias por avisar! ¿Cuál fue el monto que pagaste? 🏑`, cliente.nombre);
-            return;
-          }
-          if (await hayPagoPendiente(cliente.id)) {
-            await enviarWhatsApp(remitente, `¡Ya lo tengo registrado! En breve te confirmamos 🏑`, cliente.nombre);
-            return;
-          }
-          await pool.query(
-            `INSERT INTO pagos_pendientes (cliente_id, cliente_nombre, cliente_from, monto, metodo) VALUES ($1, $2, $3, $4, $5)`,
-            [cliente.id, cliente.nombre, remitente, montoMsg, 'Transferencia']
-          );
-          const { rows: existing } = await pool.query(`SELECT COUNT(*) AS count FROM pagos_pendientes WHERE esperando_confirmacion = true`);
-          if (parseInt(existing[0].count) <= 1) {
-            const msg = `💰 ${cliente.nombre} - $${montoMsg} - Transferencia\n¿Confirmás? SÍ o NO`;
-            await twilioClient.messages.create({ from: TWILIO_FROM, to: process.env.COSACO_WHATSAPP, body: msg });
-            guardarMensaje(process.env.COSACO_WHATSAPP, null, msg, 'agente');
-          }
-          await enviarWhatsApp(remitente, `Gracias! Ya le avisé al equipo, en breve te confirmamos 🏑`, cliente.nombre);
-        } else {
-          const matchMonto = mensaje.match(/\$?(\d[\d.,]*)\s*(transferencia|efectivo)?/i);
-          const montoDetectado = matchMonto ? parseFloat(matchMonto[1].replace(/\./g, '').replace(',', '.')) : 0;
-          const metodoDetectado = matchMonto?.[2] ? (matchMonto[2].charAt(0).toUpperCase() + matchMonto[2].slice(1).toLowerCase()) : 'Transferencia';
-          pagosEsperandoNombre.set(remitente, { monto: montoDetectado, metodo: metodoDetectado });
-          await enviarWhatsApp(remitente, `¡Gracias por avisarnos! Para identificar el pago, pasame el nombre y apellido de la jugadora tal como está registrada. Si escribís por tu hija, es el nombre de ella (no el tuyo) 🏑`);
-        }
+      // El cliente menciona un pago (ya pagó, o quiere pagar ahora) → arranca el
+      // FLUJO DE PAGO GUIADO (monto → método → nombre), con las mismas opciones
+      // que la opción 1 del menú. Nada de libre escritura.
+      if ((esPagoRealizado || guards.quierePagar(mensaje)) && !esIntFutura) {
+        const enc = esPagoRealizado
+          ? '¡Gracias por avisar! Vamos a registrar tu pago 🏑'
+          : '¡Dale! Vamos a registrar tu pago 🏑';
+        await iniciarFlujoPagoMenu(remitente, enc);
         return;
       }
     }
@@ -2436,11 +2418,12 @@ app.post('/webhook', (req, res) => {
   guardarMensaje(remitente, profileName, mensaje || (media ? '📎 Imagen' : '[imagen]'), 'cliente', null, media);
   res.type('text/xml').send(new twilio.twiml.MessagingResponse().toString());
   if (numMedia > 0 && (!mensaje || !mensaje.trim())) {
-    comprobantePendiente.set(remitente, true);
-    const resp = '¡Recibí el comprobante de transferencia! 🏑 Para registrar el pago necesito:\n- Nombre y apellido de la jugadora (tal como está registrada — si sos el papá o la mamá, es el nombre de tu hija, no el tuyo)\n- El monto que transferiste\n\nEscribime los dos datos y listo 😊';
-    twilioClient.messages.create({ from: TWILIO_FROM, to: remitente, body: resp })
-      .then(() => guardarMensaje(remitente, null, resp, 'agente'))
-      .catch(err => console.error('Error respondiendo comprobante:', err.message));
+    // Comprobante (imagen sin texto) de un cliente → arranca el flujo de pago
+    // guiado (monto → método → nombre), no libre escritura.
+    if (remitente !== process.env.COSACO_WHATSAPP) {
+      iniciarFlujoPagoMenu(remitente, '¡Recibí tu comprobante! 🏑 Vamos a registrar tu pago.')
+        .catch(err => console.error('Error iniciando flujo pago (comprobante):', err.message));
+    }
     return;
   }
   procesarMensaje(mensaje, remitente, profileName);
@@ -3092,6 +3075,32 @@ app.get('/test-jobs', async (req, res) => {
       }
       await enviarSeguimiento();
       return res.json({ ok: true, job });
+    }
+    // Diagnóstico de conexión con el sistema del gimnasio.
+    // /test-jobs?secret=hockeyvivo&job=diag  (opcional &cliente_id=123)
+    if (job === 'diag') {
+      const out = { gym_api: GYM_API, token_presente: !!GYM_TOKEN, gym_user_set: !!process.env.GYM_USER };
+      // 1) Ping raíz
+      try {
+        const r0 = await fetch(`${GYM_API}/`, { signal: AbortSignal.timeout(20000) });
+        out.ping_raiz = { status: r0.status, ok: r0.ok };
+      } catch (e) { out.ping_raiz = { error: e.message }; }
+      // 2) Login
+      try { await loginGimnasio(); out.login = { ok: true, token_len: (GYM_TOKEN || '').length }; }
+      catch (e) { out.login = { ok: false, error: e.message }; }
+      // 3) GET /clientes/{id}
+      const cid = req.query.cliente_id || 1;
+      try {
+        const r = await fetch(`${GYM_API}/clientes/${cid}`, { headers: { Authorization: `Bearer ${GYM_TOKEN}` }, signal: AbortSignal.timeout(20000) });
+        let body = ''; try { body = (await r.text()).slice(0, 300); } catch {}
+        out.get_cliente = { cliente_id: cid, status: r.status, ok: r.ok, body };
+      } catch (e) { out.get_cliente = { cliente_id: cid, error: e.message }; }
+      // 4) Pagos pendientes en la cola (con su cliente_id)
+      try {
+        const { rows } = await pool.query(`SELECT id, cliente_id, cliente_nombre, monto FROM pagos_pendientes WHERE esperando_confirmacion = true ORDER BY id ASC`);
+        out.pendientes = rows;
+      } catch (e) { out.pendientes = { error: e.message }; }
+      return res.json(out);
     }
     res.status(400).json({ error: `Job desconocido: ${job}` });
   } catch (err) { res.status(500).json({ error: err.message }); }

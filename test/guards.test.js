@@ -40,10 +40,22 @@ test('esPagoRealizado detecta pagos ya hechos', () => {
   assert.ok(g.esPagoRealizado('hice el pago'));
 });
 
-test('esPromesaFutura detecta promesas, no pagos hechos', () => {
+test('esPromesaFutura detecta promesas (con marcador de futuro), no pagos hechos', () => {
   assert.ok(g.esPromesaFutura('voy a pagar el viernes'));
   assert.ok(g.esPromesaFutura('esta semana pago'));
-  assert.ok(g.esPromesaFutura('quiero pagar'));
+  assert.ok(g.esPromesaFutura('te pago cuando cobre'));
+  // "quiero pagar" (sin futuro) YA NO es promesa: abre el flujo de pago guiado
+  assert.strictEqual(g.esPromesaFutura('quiero pagar'), false);
+});
+
+test('quierePagar detecta intención de pagar ahora (y no promesas futuras)', () => {
+  for (const t of ['quiero pagar', 'voy a pagar', 'como pago', 'donde deposito', 'cual es el alias', 'quiero abonar', 'quiero hacer el pago']) {
+    assert.ok(g.quierePagar(t), `debería querer pagar: "${t}"`);
+  }
+  for (const t of ['te pago el viernes', 'gracias', 'hola', 'no puedo pagar ahora']) {
+    // estas no deben abrir el flujo (son promesa/cortesía/saludo)
+    assert.ok(!g.quierePagar(t) || g.esPromesaFutura(t), `no debería abrir flujo directo: "${t}"`);
+  }
 });
 
 test('"ya pagué" es realizado y NO promesa (no se confunden)', () => {
