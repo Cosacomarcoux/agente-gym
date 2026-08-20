@@ -212,6 +212,17 @@ test('esSaludo reconoce saludos y no confunde otras frases', () => {
   }
 });
 
+test('esInscripcion detecta altas nuevas y no confunde pagos/saludos', () => {
+  const template = 'Hola! Me interesa reservar lugar en Hockey Vivo\n*Turnos elegidos:*\n• Martes 16:00\n• Jueves 16:00\n*Mis datos:*\n• Nombre: Maitena Lucca\n• Nacimiento: 12/12/2012\n• WhatsApp: 3854973165\n¿Hay lugar disponible?';
+  assert.ok(g.esInscripcion(template), 'la plantilla de inscripción debe detectarse');
+  for (const t of ['quiero anotarme', 'me quiero inscribir', 'quiero probar una clase', 'hay lugar disponible?']) {
+    assert.ok(g.esInscripcion(t), `debería ser inscripción: "${t}"`);
+  }
+  for (const t of ['hola', 'hola quiero pagar', 'ya pagué 35000', 'modificar turno', '3']) {
+    assert.strictEqual(g.esInscripcion(t), false, `NO debería ser inscripción: "${t}"`);
+  }
+});
+
 test('matchOpcionMenu entiende número y texto', () => {
   assert.strictEqual(g.matchOpcionMenu('1'), 1);
   assert.strictEqual(g.matchOpcionMenu('cargar un pago'), 1);

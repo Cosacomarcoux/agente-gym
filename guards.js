@@ -13,6 +13,21 @@ function esSaludo(texto) {
   return /^(hola+|holis|hol[a]+|ola|buenas|buenos|buen dia|buen dias|buenos dias|buenas tardes|buenas noches|hey|ey|que tal|menu|inicio|empezar|arrancar|volver|hello)\b/.test(t);
 }
 
+// ¿Es un mensaje de INSCRIPCIÓN / reserva de un cliente nuevo? (aunque empiece
+// con "Hola"). No debe abrir el menú: va directo al flujo de alta (la IA).
+function esInscripcion(texto) {
+  const t = String(texto || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!t) return false;
+  if (/turnos elegidos|hay lugar|me interesa reservar|reservar (un |mi )?lugar|quiero reservar|reservar lugar/.test(t)) return true;
+  if (/\b(anotar|anotarme|anotarla|inscribir|inscribirme|inscripcion|sumarme|sumarla)\b/.test(t)) return true;
+  if (/me (quiero|gustaria|interesa) (anotar|sumar|inscribir|reservar)/.test(t)) return true;
+  if (/clase de prueba|quiero probar|probar una clase/.test(t)) return true;
+  // Plantilla de inscripción: varios campos de datos juntos (nombre, nacimiento…)
+  const campos = ['nombre', 'nacimiento', 'whatsapp', 'equipo', 'nivel', 'turnos', 'comentario'].filter(k => t.includes(k)).length;
+  if (campos >= 3 && /reservar|lugar|turno|inscrib|interesa|disponible/.test(t)) return true;
+  return false;
+}
+
 // De un mensaje en el menú principal, devuelve la opción elegida (1-5) por número
 // o por texto ("modificar un turno" → 2). null si no reconoce ninguna.
 function matchOpcionMenu(texto) {
@@ -253,4 +268,5 @@ module.exports = {
   esSaludo,
   matchOpcionMenu,
   quierePagar,
+  esInscripcion,
 };

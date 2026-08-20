@@ -969,7 +969,10 @@ async function ejecutarTool(nombre, input, remitente) {
         return { ok: false, error: `No hay template configurado para "${input.template_tipo}". Para un mensaje libre usá template_tipo "general".` };
       }
       const variables = { "1": nombre1 };
-      await enviarTemplate(cliente.telefono, sid, variables, input.mensaje || null);
+      // Guardar en el panel el TEXTO REAL del template (no null), así no figura
+      // como "sin texto". Si es un tipo conocido, usamos su cuerpo legible.
+      const textoPanel = input.mensaje || textoParaTipo(input.template_tipo, nombre1);
+      await enviarTemplate(cliente.telefono, sid, variables, textoPanel);
       return { ok: true, enviado_a: cliente.nombre };
     }
 
@@ -1497,12 +1500,18 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
     // Si el cliente está dentro del menú, sus respuestas las maneja la máquina
     // de estados (números/opciones). Si saluda y no hay otro flujo activo, le
     // mostramos el menú. Todo esto es SOLO para clientes, nunca para Cosaco.
-    if (!esCosaco && menuEstado.has(remitente)) {
+    // EXCEPCIÓN: una INSCRIPCIÓN nueva (aunque empiece con "Hola") NO abre el
+    // menú — rompe cualquier estado de menú y va directo al alta (la IA).
+    const esInscripcion = !esCosaco && guards.esInscripcion(mensaje);
+    if (esInscripcion) {
+      menuEstado.delete(remitente); // por si había quedado en el menú
+      // NO return: cae al flujo normal → la IA maneja la inscripción con turnos.
+    }
+    if (!esCosaco && !esInscripcion && menuEstado.has(remitente)) {
       await manejarMenu(remitente, mensaje, profileName);
       return;
     }
-    const quiereAnotarse = /anotar|inscrib|sumar|arrancar|empezar a (entrenar|jugar)|quiero (entrenar|jugar|empezar|probar)|clase de prueba|info para (anotar|sumar|arrancar|jugar)/i.test(mensaje);
-    if (!esCosaco && guards.esSaludo(mensaje) && !quiereAnotarse
+    if (!esCosaco && !esInscripcion && guards.esSaludo(mensaje)
         && !montoPendiente.has(remitente) && !comprobantePendiente.has(remitente)
         && !pagosEsperandoNombre.has(remitente)) {
       await mostrarMenuPrincipal(remitente);
@@ -2249,6 +2258,18 @@ async function clientesPorGrupo(diaGrupo, tipoJob) {
   }
 }
 
+// Texto legible de cada template (para GUARDAR en el panel — que muestre lo que
+// realmente recibe la clienta). No empieza con "[" a propósito.
+function textoParaTipo(tipoJob, nombre) {
+  if (tipoJob === 'mora')
+    return `Hola ${nombre}! 👋 Te extrañamos en Hockey Vivo Gym y vimos que todavía no se acreditó tu pago. ¿Fue un error o necesitás ayuda con algo? Sabés que siempre podés contar con nosotros. Un abrazo! 🏑`;
+  if (tipoJob === 'recordatorio')
+    return `Hola ${nombre}! 👋 Hoy vence tu plan en Hockey Vivo Gym. Cada entrenamiento que hacés es un paso que te acerca a la mejor versión de tu juego. Ese trabajo no se detiene — y nosotros tampoco. Para seguir, estos son los planes: 🏑 2 veces por semana: $42.000 🏑 1 vez por semana: $35.000. Transferí al alias: hockeyvivo. Confirmando el pago, tu lugar queda asegurado. 💪`;
+  if (tipoJob === 'suspension')
+    return `Hola ${nombre}! 👋 Tu membresía en Hockey Vivo fue suspendida por falta de pago. Cuando estés listo/a para volver, avisanos y te reactivamos enseguida. ¡Te esperamos! 🏑`;
+  return `Mensaje de Hockey Vivo para ${nombre}`;
+}
+
 async function runJob(diaGrupo, tipoJob) {
   const clientes = await clientesPorGrupo(diaGrupo, tipoJob);
   const templateMap = {
@@ -2258,13 +2279,7 @@ async function runJob(diaGrupo, tipoJob) {
   };
   for (const c of clientes) {
     const nombre = c.nombre.split(' ')[0];
-    const textoGuardar = tipoJob === 'mora'
-      ? `Hola ${nombre}! 👋 Te extrañamos en Hockey Vivo Gym y vimos que todavía no se acreditó tu pago. ¿Fue un error o necesitás ayuda con algo? Sabés que siempre podés contar con nosotros. Un abrazo! 🏑`
-      : tipoJob === 'recordatorio'
-      ? `Hola ${nombre}! 👋 Hoy vence tu plan en Hockey Vivo Gym. Cada entrenamiento que hacés es un paso que te acerca a la mejor versión de tu juego. Ese trabajo no se detiene — y nosotros tampoco. Para seguir, estos son los planes: 🏑 2 veces por semana: $42.000 🏑 1 vez por semana: $35.000. Transferí al alias: hockeyvivo. Confirmando el pago, tu lugar queda asegurado. 💪`
-      : tipoJob === 'suspension'
-      ? `Hola ${nombre}! 👋 Tu membresía en Hockey Vivo fue suspendida por falta de pago. Cuando estés listo/a para volver, avisanos y te reactivamos enseguida. ¡Te esperamos! 🏑`
-      : `[${tipoJob}]`;
+    const textoGuardar = textoParaTipo(tipoJob, nombre);
     await enviarTemplate(c.telefono, templateMap[tipoJob], { "1": nombre }, textoGuardar);
     if (tipoJob === 'suspension') {
       await pool.query(
@@ -3052,7 +3067,8 @@ app.get('/test-jobs', async (req, res) => {
       const sid = mapaSid[job];
       if (!sid) return res.status(400).json({ error: `Falta la variable de entorno para ${job}` });
       const nombre = req.query.nombre || 'Cosaco';
-      await enviarTemplate(process.env.COSACO_WHATSAPP, sid, { "1": nombre }, `[Prueba ${job}]`);
+      const tipoReal = job.replace('test-', ''); // recordatorio | mora | suspension
+      await enviarTemplate(process.env.COSACO_WHATSAPP, sid, { "1": nombre }, textoParaTipo(tipoReal, nombre));
       return res.json({ ok: true, job, enviado_a: 'Cosaco (solo prueba)', sid });
     }
     if (job === 'cumpleanos') {
