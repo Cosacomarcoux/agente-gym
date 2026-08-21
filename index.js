@@ -29,11 +29,12 @@ const tercerTurnoPendiente = new Map(); // telefonoCosaco → { clienteId, clien
 const montoPendiente = new Map();       // remitente → { clienteId, clienteNombre, metodo } esperando que diga el monto
 const promesaAvisada = new Map();       // remitente → timestamp del último aviso de "paga después" (throttle 1h)
 const ausenciaAvisada = new Map();      // remitente → timestamp del último aviso de "deja de venir" (throttle 6h)
+const derivacionAvisada = new Map();    // remitente → timestamp del último aviso de "no entendí, tomá vos" (throttle 20min)
 const fechaInicioPagoPendiente = new Map(); // telefonoCosaco → { pago, plan, propuesta } esperando que confirme la fecha de inicio al pagar
 const menuEstado = new Map();            // remitenteCliente → { paso, data } máquina de estados del menú guiado
 
 // Dirección del local para "Información del gimnasio" (configurable por env).
-const DIRECCION_GIMNASIO = process.env.DIRECCION_GIMNASIO || '(consultá la dirección con el equipo)';
+const DIRECCION_GIMNASIO = process.env.DIRECCION_GIMNASIO || 'Moreno (N) 55, entre Andes y Rivadavia';
 const seleccionPagoPendiente = new Map(); // telefonoCosaco → { candidatos:[{id,nombre,...}], monto, metodo } esperando que elija número de ficha
 
 // Link del grupo de WhatsApp que se envía al registrar/reactivar un cliente.
@@ -320,6 +321,8 @@ function parsearFecha(fechaStr) {
 
 const SYSTEM_PROMPT = `Sos el asistente de Hockey Vivo. Respondés en español argentino, amable y breve.
 
+REGLA N°1 — SI NO ENTENDÉS, DERIVÁ (NO IMPROVISES): si NO entendés qué pide el cliente, o es algo que no podés resolver con tus herramientas, o no estás 100% seguro de la respuesta, NO inventes ni improvises: llamá derivar_a_cosaco (con un resumen corto en "motivo") y NO le respondas NADA al cliente. Cosaco toma la conversación. Es MUCHO mejor derivar que dar una respuesta equivocada o confusa.
+
 PAGOS (LEER CON ATENCIÓN):
 Solo registrás un pago si el cliente DICE, con sus propias palabras, que YA pagó/transfirió/depositó/abonó. Ahí sí: si no dio el monto, preguntáselo; con nombre y monto, llamá consultar_pago_a_cosaco (poniendo en texto_cliente la frase textual donde dijo que pagó). Después: "Gracias! Ya le avisé al equipo, en breve te confirmamos 🏑".
 NOMBRE DE LA JUGADORA: cuando pidas el nombre para un pago, aclarále SIEMPRE que necesitás el nombre y apellido de la JUGADORA tal como está registrada — muchos que escriben son el papá o la mamá y mandan su propio nombre. Decilo así: "Pasame el nombre y apellido de la jugadora tal como está registrada (si escribís por tu hija, es el nombre de ella, no el tuyo) 🏑". El mismo mensaje sirve aunque escriba la jugadora directamente.
@@ -432,6 +435,17 @@ const TOOLS = [
         cliente_nombre: { type: 'string' },
       },
       required: ['cliente_id', 'cliente_nombre'],
+    },
+  },
+  {
+    name: 'derivar_a_cosaco',
+    description: 'USALA cuando NO entendés lo que pide el cliente, o es algo que NO podés resolver con tus otras herramientas (un reclamo, una consulta rara o ambigua, un tema que no manejás, o cualquier cosa donde no estés SEGURO de la respuesta). Regla de oro: si no estás seguro, NO inventes ni improvises una respuesta — llamá esta herramienta. Cuando la llames, NO le respondas NADA al cliente: Cosaco (el equipo) va a tomar la conversación y responderle. Poné en "motivo" un resumen corto de qué pidió el cliente.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        motivo: { type: 'string', description: 'Resumen corto de lo que pidió el cliente y no pudiste resolver/entender' },
+      },
+      required: ['motivo'],
     },
   },
   {
@@ -740,6 +754,24 @@ async function ejecutarTool(nombre, input, remitente) {
       const r = await fetch(`${GYM_API}/clientes/${input.cliente_id}/suspender`, { method: 'DELETE', headers });
       if (!r.ok) return { error: `Error: ${await r.text()}` };
       return { ok: true, nombre: input.cliente_nombre };
+    }
+
+    if (nombre === 'derivar_a_cosaco') {
+      // La IA no entendió / no puede resolver → avisar a Cosaco y NO responder al
+      // cliente. Solo para clientes (si escribe Cosaco, no tiene sentido avisarse).
+      if (remitente === process.env.COSACO_WHATSAPP) {
+        return { ok: true, instruccion: 'Respondé normalmente (esto lo escribió Cosaco).' };
+      }
+      const cli = await buscarClientePorTelefono(remitente).catch(() => null);
+      const quien = cli ? cli.nombre : String(remitente).replace('whatsapp:', '');
+      const ultimo = derivacionAvisada.get(remitente) || 0;
+      if (Date.now() - ultimo > 20 * 60000) { // throttle 20 min por cliente
+        derivacionAvisada.set(remitente, Date.now());
+        await enviarWhatsApp(process.env.COSACO_WHATSAPP,
+          `🤖❓ No supe responderle a *${quien}*.\nPidió: "${String(input.motivo || '').slice(0, 220)}"\n(De: ${String(remitente).replace('whatsapp:', '')})\n\nTomá vos la conversación y respondele 🏑`).catch(() => {});
+        logActividad('no_entendio', `${quien}: ${String(input.motivo || '').slice(0, 80)}`, null, remitente);
+      }
+      return { ok: true, derivado: true, instruccion: 'Ya avisé a Cosaco. NO le respondas NADA al cliente (ni un saludo).' };
     }
 
     if (nombre === 'notificar_cosaco') {
@@ -2200,6 +2232,7 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
     }
     system += `\n\nFECHA ACTUAL: ${fechaHoy} (${fechaISO})`;
 
+    let derivado = false; // si la IA derivó a Cosaco, NO le respondemos al cliente
     while (true) {
       const respuesta = await anthropic.messages.create({
         model: 'claude-sonnet-4-6',
@@ -2210,6 +2243,9 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
       });
 
       if (respuesta.stop_reason !== 'tool_use') {
+        // Si se derivó a Cosaco (bot no entendió) → NO se le responde nada al
+        // cliente. Cosaco toma la conversación.
+        if (derivado && !esCosaco) break;
         const bloqueTexto = respuesta.content.find(b => b.type === 'text');
         const texto = bloqueTexto?.text?.trim() || '¡Listo! Si necesitás algo más, avisame 🏑';
         await twilioClient.messages.create({ from: TWILIO_FROM, to: remitente, body: texto });
@@ -2223,6 +2259,7 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
       for (const bloque of respuesta.content) {
         if (bloque.type !== 'tool_use') continue;
         console.log(`Tool: ${bloque.name}`, JSON.stringify(bloque.input).slice(0, 200));
+        if (bloque.name === 'derivar_a_cosaco' && !esCosaco) derivado = true;
         const resultado = await ejecutarTool(bloque.name, bloque.input, remitente);
         console.log(`Resultado ${bloque.name}:`, JSON.stringify(resultado).slice(0, 200));
         toolResults.push({ type: 'tool_result', tool_use_id: bloque.id, content: JSON.stringify(resultado) });
