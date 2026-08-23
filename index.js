@@ -361,7 +361,7 @@ INFORMACIÓN:
 - Dirección: Moreno (N) 55 entre Andes y Rivadavia, Santiago del Estero
 - Horarios: Lun/Mié/Vie 18:30-21hs | Mar/Jue 16-21hs
 - Planes que se ofrecen: 1 vez por semana $35.000 | 2 veces por semana $42.000. (El de 3 veces NO se ofrece: cupos completos.)
-- Alias: hockeyvivo | Primera clase GRATIS
+- Métodos de pago: transferencia al alias *hockeyvivo* o efectivo en el gimnasio. Primera clase GRATIS.
 - Requisitos: palo, botines, agua
 - Cupos: https://hockeyvivo.up.railway.app/cupos
 
@@ -1416,6 +1416,10 @@ async function enviarInfoGimnasio(remitente) {
 • 1 vez por semana: $35.000
 • 2 veces por semana: $42.000
 
+💳 Cómo pagar:
+• Transferencia al alias: *hockeyvivo*
+• Efectivo en el gimnasio
+
 📍 Dirección: ${DIRECCION_GIMNASIO}
 
 👥 Grupo de WhatsApp:
@@ -1575,6 +1579,46 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
     }
     const mensajeUpper = mensaje.trim().toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
     const esSiNo = ['SI', 'S', 'NO', 'N'].includes(mensajeUpper);
+
+    // ── CONFIRMACIÓN DE INSCRIPCIÓN (PRIORIDAD sobre el menú) ──────────────
+    // Va ANTES del menú: si hay una inscripción esperando confirmación, un
+    // "holis, sí confirmo" NO debe abrir el menú (eso perdía la inscripción).
+    if (!esCosaco) {
+      const { rows: regP } = await pool.query('SELECT datos FROM registros_pendientes WHERE telefono = $1', [remitente]);
+      if (regP.length > 0) {
+        const t = mensaje.trim().toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+        const niega = /\b(no|cancelar|cancela|todavia|despues|espera|ahora no|mas tarde)\b/.test(t);
+        const afirma = /\b(si|confirmo|confirmar|confirmado|confirmada|dale|ok|okay|listo|de una|obvio|claro|perfecto|acepto|correcto)\b/.test(t);
+        if (afirma && !niega) {
+          const datos = regP[0].datos;
+          if (!GYM_TOKEN) await loginConReintentos(3, 3000);
+          const resultado = await ejecutarTool('registrar_cliente_y_asignar_turno', datos, remitente);
+          await pool.query('DELETE FROM registros_pendientes WHERE telefono = $1', [remitente]);
+          if (resultado.ok) {
+            const turnosData = await ejecutarTool('get_turnos', {}, remitente);
+            const turnosStr = (datos.turno_ids || []).map(id => {
+              const tt = Array.isArray(turnosData) ? turnosData.find(x => x.id === id) : null;
+              return tt ? `📅 ${tt.dia_semana} ${tt.hora_inicio}` : `📅 Turno ${id}`;
+            }).join('\n');
+            const texto = `¡Todo listo ${datos.nombre}! Ya quedaste registrado/a en Hockey Vivo 🎉\n\nTus turnos:\n${turnosStr}\n\nSumate al grupo de WhatsApp del gimnasio para enterarte de todo 👇\n${GRUPO_WHATSAPP}\n\nNo olvidés traer: 🏑 Palo | 👟 Botines | 💧 Agua\n¡Te esperamos! 💪`;
+            await enviarWhatsApp(remitente, texto, datos.nombre);
+            guardarMensaje(remitente, datos.nombre, texto, 'agente');
+          } else {
+            await enviarWhatsApp(remitente, 'Ya tomamos nota, en breve te confirmamos tu lugar 🏑', datos.nombre);
+            await enviarWhatsApp(process.env.COSACO_WHATSAPP, `⚠️ Error al registrar a ${datos.nombre}: ${resultado.error}`);
+          }
+          return;
+        }
+        if (niega) {
+          await pool.query('DELETE FROM registros_pendientes WHERE telefono = $1', [remitente]);
+          await enviarWhatsApp(remitente, 'Dale, no hay problema. Cuando quieras coordinar tu lugar, escribinos 🏑');
+          return;
+        }
+        // Ni sí ni no claro → repreguntar (NO mostrar el menú)
+        await enviarWhatsApp(remitente, `¿Confirmás tu inscripción en Hockey Vivo? Respondé *Sí* o *No* 🏑`);
+        return;
+      }
+    }
 
     // ── MENÚ GUIADO (clientes) ────────────────────────────────────────────
     // Si el cliente está dentro del menú, sus respuestas las maneja la máquina
@@ -2100,31 +2144,6 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
         `¡Hola ${nombre}! Verificamos y ${turnosStr} ${turnoIds.length > 1 ? 'tienen' : 'tiene'} lugar disponible 🏑\n¿Confirmás tu inscripción en Hockey Vivo?`,
         nombre);
       return;
-    }
-
-    // ── 3. CONFIRMACIÓN DE INSCRIPCIÓN ─────────────────────────────────────
-    if (!esCosaco && ['si', 'sí', 'confirmo', 'dale', 'ok', 'yes'].includes(mensaje.trim().toLowerCase())) {
-      const { rows } = await pool.query('SELECT datos FROM registros_pendientes WHERE telefono = $1', [remitente]);
-      if (rows.length > 0) {
-        const datos = rows[0].datos;
-        if (!GYM_TOKEN) await loginConReintentos(3, 3000);
-        const resultado = await ejecutarTool('registrar_cliente_y_asignar_turno', datos, remitente);
-        await pool.query('DELETE FROM registros_pendientes WHERE telefono = $1', [remitente]);
-        if (resultado.ok) {
-          const turnosData = await ejecutarTool('get_turnos', {}, remitente);
-          const turnosStr = datos.turno_ids.map(id => {
-            const t = Array.isArray(turnosData) ? turnosData.find(t => t.id === id) : null;
-            return t ? `📅 ${t.dia_semana} ${t.hora_inicio}` : `📅 Turno ${id}`;
-          }).join('\n');
-          const texto = `¡Todo listo ${datos.nombre}! Ya quedaste registrado/a en Hockey Vivo 🎉\n\nTus turnos:\n${turnosStr}\n\nSumate al grupo de WhatsApp del gimnasio para enterarte de todo 👇\n${GRUPO_WHATSAPP}\n\nNo olvidés traer: 🏑 Palo | 👟 Botines | 💧 Agua\n¡Te esperamos! 💪`;
-          await enviarWhatsApp(remitente, texto, datos.nombre);
-          guardarMensaje(remitente, datos.nombre, texto, 'agente');
-        } else {
-          await enviarWhatsApp(remitente, 'Ya tomamos nota, en breve te confirmamos tu lugar 🏑', datos.nombre);
-          await enviarWhatsApp(process.env.COSACO_WHATSAPP, `⚠️ Error al registrar a ${datos.nombre}: ${resultado.error}`);
-        }
-        return;
-      }
     }
 
     // ── 4. INTENCIÓN DE PAGO ───────────────────────────────────────────────

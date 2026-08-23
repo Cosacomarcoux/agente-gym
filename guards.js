@@ -36,7 +36,7 @@ function matchOpcionMenu(texto) {
   if (/^1\b/.test(t) || /\bpagar\b/.test(t) || /\b(cargar|carga|registrar|hacer)\b.*\bpago\b/.test(t) || /^pago\b/.test(t) || /\bun pago\b/.test(t)) return 1;
   if (/^2\b/.test(t) || /\bturnos?\b/.test(t)) return 2;
   if (/^3\b/.test(t) || /estado (de )?cuenta/.test(t) || /\bcuenta\b/.test(t) || /cuanto (debo|adeudo|falta)/.test(t) || /mi estado/.test(t) || /vencimiento/.test(t)) return 3;
-  if (/^4\b/.test(t) || /informacion/.test(t) || /\binfo\b/.test(t) || /gimnasio/.test(t) || /precios?/.test(t) || /\bmontos?\b/.test(t) || /direccion/.test(t) || /donde (queda|estan|es|quedan)/.test(t) || /\bgrupo\b/.test(t)) return 4;
+  if (/^4\b/.test(t) || /informacion/.test(t) || /\binfo\b/.test(t) || /gimnasio/.test(t) || /precios?/.test(t) || /\bmontos?\b/.test(t) || /direccion/.test(t) || /donde (queda|estan|es|quedan)/.test(t) || /\bgrupo\b/.test(t) || /(metodos?|formas?|medios?) de pago|como (puedo )?pag|como se paga|donde (pago|deposito|transfiero|deposit)|\balias\b|\bcbu\b|a que (cuenta|alias)/.test(t)) return 4;
   if (/^5\b/.test(t) || /mensaje/.test(t) || /\bequipo\b/.test(t) || /hablar con/.test(t) || /contactar/.test(t) || /una consulta/.test(t)) return 5;
   return null;
 }
