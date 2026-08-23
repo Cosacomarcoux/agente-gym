@@ -260,12 +260,17 @@ async function buscarClientePorTelefono(telefono) {
     let tel = telefono.replace(/\D/g, '');
     if (tel.startsWith('549')) tel = tel.slice(3);
     else if (tel.startsWith('54')) tel = tel.slice(2);
+    const nac = tel.slice(-10);
     const headers = { Authorization: `Bearer ${GYM_TOKEN}` };
-    for (const buscar of [tel.slice(-10), tel.slice(-8), `549${tel.slice(-10)}`]) {
+    // Estricto: buscar por el número nacional y quedarnos SOLO con quien coincide
+    // exacto en los últimos 10 dígitos (sin match parcial que traía a otra persona).
+    for (const buscar of [nac, `549${nac}`]) {
       const r = await fetch(`${GYM_API}/clientes?buscar=${buscar}`, { headers });
       const data = await r.json();
       const clientes = Array.isArray(data) ? data : [];
-      if (clientes.length > 0) return clientes[0];
+      const norm = s => String(s || '').replace(/\D/g, '').slice(-10);
+      const exacto = clientes.find(c => norm(c.telefono) === nac);
+      if (exacto) return exacto;
     }
     return null;
   } catch (err) {
@@ -1291,10 +1296,9 @@ async function mostrarMenuPrincipal(remitente) {
 // Arranca el flujo de pago guiado (monto → método → nombre). Se usa tanto desde
 // el menú (opción 1) como cuando el cliente menciona un pago o manda comprobante.
 async function iniciarFlujoPagoMenu(remitente, encabezado) {
-  menuEstado.set(remitente, { paso: 'PAGO_MONTO', data: {} });
-  const enc = encabezado || '¡Gracias! Vamos a registrar tu pago 🏑';
-  await enviarWhatsApp(remitente,
-    `${enc}\n\n💰 ¿Qué monto?\n1️⃣ $35.000 (1 vez por semana)\n2️⃣ $42.000 (2 veces por semana)\n\n(o escribime el monto si es otro)`);
+  const estado = { paso: 'PAGO_QUIEN', data: {} };
+  menuEstado.set(remitente, estado);
+  await arrancarPago(remitente, estado, encabezado || '¡Gracias! Vamos a registrar tu pago 🏑');
 }
 
 // Encola el pago (para que Cosaco lo confirme) y le avisa al cliente.
@@ -1315,7 +1319,54 @@ async function encolarPagoDesdeMenu(remitente, clienteId, clienteNombre, monto, 
     `¡Gracias! 🏑 Tomé tu pago de *$${monto}* (${metodo}) a nombre de *${clienteNombre}* y lo mandé al equipo para confirmarlo. En breve te avisamos cuando quede acreditado.`);
 }
 
-// Busca un nombre escrito por el cliente y lo deja listo para confirmar.
+// Identifica a la jugadora por el NÚMERO, de forma ESTRICTA: match exacto de los
+// últimos 10 dígitos, sin usar la caché ni coincidencias parciales (eso era lo que
+// traía a otra persona, ej. Adriel → Adriana). Devuelve el cliente o null.
+async function identificarPorTelefonoEstricto(remitente) {
+  try {
+    if (!GYM_TOKEN) await loginConReintentos(3, 3000);
+    let tel = String(remitente).replace(/\D/g, '');
+    if (tel.startsWith('549')) tel = tel.slice(3); else if (tel.startsWith('54')) tel = tel.slice(2);
+    const nac = tel.slice(-10);
+    if (nac.length < 8) return null;
+    const r = await fetch(`${GYM_API}/clientes?buscar=${nac}`, { headers: { Authorization: `Bearer ${GYM_TOKEN}` }, signal: AbortSignal.timeout(20000) });
+    if (!r.ok) return null;
+    const arr = await r.json();
+    const norm = s => String(s || '').replace(/\D/g, '').slice(-10);
+    const exactos = (Array.isArray(arr) ? arr : []).filter(c => norm(c.telefono) === nac);
+    return exactos.length === 1 ? exactos[0] : null;
+  } catch { return null; }
+}
+
+// PASO 1 del pago: identificar PRIMERO a la jugadora (por número, o pidiendo nombre).
+async function arrancarPago(remitente, estado, encabezado) {
+  estado.data = {};
+  const pre = encabezado ? encabezado + '\n\n' : '';
+  const cli = await identificarPorTelefonoEstricto(remitente);
+  if (cli && cli.nombre) {
+    estado.data.clienteId = cli.id; estado.data.clienteNombre = cli.nombre;
+    estado.paso = 'PAGO_QUIEN'; menuEstado.set(remitente, estado);
+    await enviarWhatsApp(remitente, `${pre}¿El pago es a nombre de *${cli.nombre}*?\n1️⃣ Sí\n2️⃣ Es para otra jugadora (escribí su nombre y apellido)`);
+  } else {
+    estado.paso = 'PAGO_QUIEN_OTRO'; menuEstado.set(remitente, estado);
+    await enviarWhatsApp(remitente, `${pre}¿A nombre de qué jugadora es el pago? Escribime su *nombre y apellido* tal como está registrada 🏑`);
+  }
+}
+
+// Jugadora ya elegida → pasar a pedir el monto.
+async function pedirMontoPago(remitente, estado) {
+  estado.paso = 'PAGO_MONTO'; menuEstado.set(remitente, estado);
+  await enviarWhatsApp(remitente, `Perfecto, pago de *${estado.data.clienteNombre}* 🏑\n\n💰 ¿Qué monto?\n1️⃣ $35.000 (1 vez por semana)\n2️⃣ $42.000 (2 veces por semana)\n\n(o escribime el monto)`);
+}
+
+// Resumen final antes de mandarle el pago a Cosaco para confirmar.
+async function mostrarResumenPago(remitente, estado) {
+  estado.paso = 'PAGO_RESUMEN'; menuEstado.set(remitente, estado);
+  await enviarWhatsApp(remitente,
+    `Revisá que esté todo bien 👇\n\n👤 ${estado.data.clienteNombre}\n💰 $${estado.data.monto}\n💳 ${estado.data.metodo}\n\n1️⃣ Confirmar\n2️⃣ Cancelar`);
+}
+
+// Busca un nombre escrito por el cliente y lo deja listo para confirmar (paso QUIEN).
 async function resolverNombreMenu(remitente, texto, estado) {
   if (!GYM_TOKEN) await loginConReintentos(3, 3000);
   const nombreLimpio = guards.limpiarNombreBuscado(texto) || texto.trim();
@@ -1323,18 +1374,18 @@ async function resolverNombreMenu(remitente, texto, estado) {
   const fuertes = guards.filtrarClientesPorNombre(nombreLimpio, clientes);
   const lista = fuertes.length ? fuertes : (Array.isArray(clientes) ? clientes.slice(0, 5) : []);
   if (lista.length === 0) {
-    estado.paso = 'PAGO_NOMBRE_OTRO'; menuEstado.set(remitente, estado);
+    estado.paso = 'PAGO_QUIEN_OTRO'; menuEstado.set(remitente, estado);
     await enviarWhatsApp(remitente, `No encontré a nadie con ese nombre 🤔 Escribime el nombre y apellido tal como figura registrada.`);
     return;
   }
   if (lista.length === 1) {
     estado.data.candidatos = lista; estado.data.multi = false;
-    estado.paso = 'PAGO_NOMBRE_CONFIRMAR'; menuEstado.set(remitente, estado);
+    estado.paso = 'PAGO_QUIEN_CONFIRMAR'; menuEstado.set(remitente, estado);
     await enviarWhatsApp(remitente, `¿Confirmás que el pago es para *${lista[0].nombre}*?\n1️⃣ Sí\n2️⃣ No, es otra`);
     return;
   }
   estado.data.candidatos = lista; estado.data.multi = true;
-  estado.paso = 'PAGO_NOMBRE_CONFIRMAR'; menuEstado.set(remitente, estado);
+  estado.paso = 'PAGO_QUIEN_CONFIRMAR'; menuEstado.set(remitente, estado);
   let msg = `Encontré varias. ¿Cuál es? Respondé el número:\n`;
   lista.forEach((c, i) => { msg += `${i + 1}. ${c.nombre}\n`; });
   msg += `\n(o escribí de nuevo el nombre completo)`;
@@ -1344,7 +1395,7 @@ async function resolverNombreMenu(remitente, texto, estado) {
 async function enviarEstadoDeCuenta(remitente) {
   try {
     if (!GYM_TOKEN) await loginConReintentos(3, 3000);
-    const cli = await buscarClientePorTelefono(remitente);
+    const cli = await identificarPorTelefonoEstricto(remitente);
     if (!cli) { await enviarWhatsApp(remitente, `No encontré tu ficha con este número 🤔 Escribile al Equipo de HV (opción 5) y lo revisamos.`); return; }
     const r = await fetch(`${GYM_API}/clientes/${cli.id}`, { headers: { Authorization: `Bearer ${GYM_TOKEN}` } });
     const c = await r.json();
@@ -1386,8 +1437,7 @@ async function manejarMenu(remitente, mensaje, profileName) {
     const op = guards.matchOpcionMenu(mensaje);
     if (!op) { await enviarWhatsApp(remitente, `No te entendí 🤔 Respondé con un número del *1 al 5*, o escribí la opción (ej: "cargar un pago").`); return; }
     if (op === 1) {
-      estado.paso = 'PAGO_MONTO'; estado.data = {}; menuEstado.set(remitente, estado);
-      await enviarWhatsApp(remitente, `💰 ¿Qué monto vas a pagar?\n1️⃣ $35.000 (1 vez por semana)\n2️⃣ $42.000 (2 veces por semana)\n\n(o escribime el monto si es otro)`);
+      await arrancarPago(remitente, estado);
       return;
     }
     if (op === 2) {
@@ -1404,6 +1454,51 @@ async function manejarMenu(remitente, mensaje, profileName) {
     }
   }
 
+  // ── PAGO: ¿es a nombre del titular del número? ──
+  if (estado.paso === 'PAGO_QUIEN') {
+    if (/^1$/.test(low) || /^si$/.test(low) || /^s$/.test(low)) {
+      await pedirMontoPago(remitente, estado); return;
+    }
+    if (/^2$/.test(low)) {
+      estado.paso = 'PAGO_QUIEN_OTRO'; menuEstado.set(remitente, estado);
+      await enviarWhatsApp(remitente, `Dale, escribime el nombre y apellido de la jugadora 🏑`); return;
+    }
+    // Escribió otro nombre directamente
+    await resolverNombreMenu(remitente, mensaje, estado); return;
+  }
+
+  // ── PAGO: pidió otro nombre ──
+  if (estado.paso === 'PAGO_QUIEN_OTRO') {
+    await resolverNombreMenu(remitente, mensaje, estado); return;
+  }
+
+  // ── PAGO: confirmar el nombre elegido ──
+  if (estado.paso === 'PAGO_QUIEN_CONFIRMAR') {
+    const cands = estado.data.candidatos || [];
+    if (estado.data.multi) {
+      const mNum = low.match(/^(\d{1,2})$/);
+      if (mNum) {
+        const idx = parseInt(mNum[1], 10) - 1;
+        if (idx >= 0 && idx < cands.length) {
+          estado.data.clienteId = cands[idx].id; estado.data.clienteNombre = cands[idx].nombre;
+          await pedirMontoPago(remitente, estado); return;
+        }
+        await enviarWhatsApp(remitente, `Ese número no está en la lista. Elegí entre 1 y ${cands.length}, o escribí el nombre completo.`); return;
+      }
+      await resolverNombreMenu(remitente, mensaje, estado); return;
+    }
+    // un solo candidato → Sí/No
+    if (/^1$/.test(low) || /^si$/.test(low) || /^s$/.test(low)) {
+      estado.data.clienteId = cands[0].id; estado.data.clienteNombre = cands[0].nombre;
+      await pedirMontoPago(remitente, estado); return;
+    }
+    if (/^2$/.test(low) || /^no$/.test(low)) {
+      estado.paso = 'PAGO_QUIEN_OTRO'; menuEstado.set(remitente, estado);
+      await enviarWhatsApp(remitente, `Dale, escribime el nombre y apellido correcto 🏑`); return;
+    }
+    await resolverNombreMenu(remitente, mensaje, estado); return;
+  }
+
   // ── PAGO: monto ──
   if (estado.paso === 'PAGO_MONTO') {
     let monto = null;
@@ -1416,75 +1511,28 @@ async function manejarMenu(remitente, mensaje, profileName) {
     return;
   }
 
-  // ── PAGO: método ──
+  // ── PAGO: método → resumen ──
   if (estado.paso === 'PAGO_METODO') {
     let metodo = null;
     if (/^1$/.test(low) || /transfer/.test(low)) metodo = 'Transferencia';
     else if (/^2$/.test(low) || /efectiv/.test(low)) metodo = 'Efectivo';
     if (!metodo) { await enviarWhatsApp(remitente, `Elegí el método: 1️⃣ Transferencia · 2️⃣ Efectivo`); return; }
     estado.data.metodo = metodo;
-    const cli = await buscarClientePorTelefono(remitente).catch(() => null);
-    if (cli && cli.nombre) {
-      estado.data.clienteId = cli.id; estado.data.clienteNombre = cli.nombre;
-      estado.paso = 'PAGO_NOMBRE'; menuEstado.set(remitente, estado);
-      await enviarWhatsApp(remitente, `El pago es a nombre de *${cli.nombre}*?\n1️⃣ Sí\n2️⃣ Es para otra jugadora (escribí su nombre y apellido)`);
-    } else {
-      estado.paso = 'PAGO_NOMBRE_OTRO'; menuEstado.set(remitente, estado);
-      await enviarWhatsApp(remitente, `¿A nombre de qué jugadora es el pago? Escribime su nombre y apellido tal como está registrada 🏑`);
-    }
+    await mostrarResumenPago(remitente, estado);
     return;
   }
 
-  // ── PAGO: ¿es a nombre del titular del número? ──
-  if (estado.paso === 'PAGO_NOMBRE') {
-    if (/^1$/.test(low) || /^s[i]$/.test(low) || /^si$/.test(low)) {
+  // ── PAGO: resumen y confirmación final ──
+  if (estado.paso === 'PAGO_RESUMEN') {
+    if (/^1$/.test(low) || /^si$/.test(low) || /^s$/.test(low) || /confirm/.test(low)) {
       await encolarPagoDesdeMenu(remitente, estado.data.clienteId, estado.data.clienteNombre, estado.data.monto, estado.data.metodo);
-      menuEstado.delete(remitente);
-      return;
-    }
-    if (/^2$/.test(low)) {
-      estado.paso = 'PAGO_NOMBRE_OTRO'; menuEstado.set(remitente, estado);
-      await enviarWhatsApp(remitente, `Dale, escribime el nombre y apellido de la jugadora 🏑`);
-      return;
-    }
-    // Escribió otro nombre directamente
-    await resolverNombreMenu(remitente, mensaje, estado);
-    return;
-  }
-
-  // ── PAGO: pidió otro nombre ──
-  if (estado.paso === 'PAGO_NOMBRE_OTRO') {
-    await resolverNombreMenu(remitente, mensaje, estado);
-    return;
-  }
-
-  // ── PAGO: confirmar el nombre elegido ──
-  if (estado.paso === 'PAGO_NOMBRE_CONFIRMAR') {
-    const cands = estado.data.candidatos || [];
-    if (estado.data.multi) {
-      const mNum = low.match(/^(\d{1,2})$/);
-      if (mNum) {
-        const idx = parseInt(mNum[1], 10) - 1;
-        if (idx >= 0 && idx < cands.length) {
-          await encolarPagoDesdeMenu(remitente, cands[idx].id, cands[idx].nombre, estado.data.monto, estado.data.metodo);
-          menuEstado.delete(remitente); return;
-        }
-        await enviarWhatsApp(remitente, `Ese número no está en la lista. Elegí entre 1 y ${cands.length}, o escribí el nombre completo.`); return;
-      }
-      // no fue número → re-buscar con lo que escribió
-      await resolverNombreMenu(remitente, mensaje, estado); return;
-    }
-    // un solo candidato → Sí/No
-    if (/^1$/.test(low) || /^si$/.test(low) || /^s$/.test(low)) {
-      await encolarPagoDesdeMenu(remitente, cands[0].id, cands[0].nombre, estado.data.monto, estado.data.metodo);
       menuEstado.delete(remitente); return;
     }
-    if (/^2$/.test(low) || /^no$/.test(low)) {
-      estado.paso = 'PAGO_NOMBRE_OTRO'; menuEstado.set(remitente, estado);
-      await enviarWhatsApp(remitente, `Dale, escribime el nombre y apellido correcto 🏑`); return;
+    if (/^2$/.test(low) || /^no$/.test(low) || /cancel/.test(low)) {
+      menuEstado.delete(remitente);
+      await enviarWhatsApp(remitente, `Listo, cancelé la carga. Cuando quieras, escribime "menú" para empezar de nuevo 🏑`); return;
     }
-    // cualquier otra cosa → tratar como nuevo nombre
-    await resolverNombreMenu(remitente, mensaje, estado); return;
+    await enviarWhatsApp(remitente, `Respondé 1️⃣ Confirmar o 2️⃣ Cancelar.`); return;
   }
 
   // ── MODIFICAR TURNOS: descripción → avisar a Cosaco ──
