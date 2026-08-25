@@ -1620,27 +1620,8 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
       }
     }
 
-    // ── MENÚ GUIADO (clientes) ────────────────────────────────────────────
-    // Si el cliente está dentro del menú, sus respuestas las maneja la máquina
-    // de estados (números/opciones). Si saluda y no hay otro flujo activo, le
-    // mostramos el menú. Todo esto es SOLO para clientes, nunca para Cosaco.
-    // EXCEPCIÓN: una INSCRIPCIÓN nueva (aunque empiece con "Hola") NO abre el
-    // menú — rompe cualquier estado de menú y va directo al alta (la IA).
-    const esInscripcion = !esCosaco && guards.esInscripcion(mensaje);
-    if (esInscripcion) {
-      menuEstado.delete(remitente); // por si había quedado en el menú
-      // NO return: cae al flujo normal → la IA maneja la inscripción con turnos.
-    }
-    if (!esCosaco && !esInscripcion && menuEstado.has(remitente)) {
-      await manejarMenu(remitente, mensaje, profileName);
-      return;
-    }
-    if (!esCosaco && !esInscripcion && guards.esSaludo(mensaje)
-        && !montoPendiente.has(remitente) && !comprobantePendiente.has(remitente)
-        && !pagosEsperandoNombre.has(remitente)) {
-      await mostrarMenuPrincipal(remitente);
-      return;
-    }
+    // (Diseño conversacional: sin menú. Los saludos y consultas los maneja la IA;
+    // los pagos y comprobantes se detectan por texto y se te mandan a confirmar.)
 
     // ── 0-bis. ESPERANDO EL MONTO (le preguntamos "¿cuánto pagaste?") ─────
     if (!esCosaco && montoPendiente.has(remitente)) {
@@ -2243,14 +2224,41 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
         return;
       }
 
-      // El cliente menciona un pago (ya pagó, o quiere pagar ahora) → arranca el
-      // FLUJO DE PAGO GUIADO (monto → método → nombre), con las mismas opciones
-      // que la opción 1 del menú. Nada de libre escritura.
-      if ((esPagoRealizado || guards.quierePagar(mensaje)) && !esIntFutura) {
-        const enc = esPagoRealizado
-          ? '¡Gracias por avisar! Vamos a registrar tu pago 🏑'
-          : '¡Dale! Vamos a registrar tu pago 🏑';
-        await iniciarFlujoPagoMenu(remitente, enc);
+      // El cliente dice que YA pagó → encolar para que Cosaco confirme.
+      if (esPagoRealizado && !esIntFutura) {
+        if (!GYM_TOKEN) await loginConReintentos(3, 3000);
+        const cliente = await buscarClientePorTelefono(remitente);
+        if (cliente) {
+          // FIX $0: intentar leer el monto del propio mensaje ("transferí 35000")
+          const mMonto = mensaje.match(/\$?\s*([\d]{4,}[\d.,]*)/);
+          const montoMsg = mMonto ? parseFloat(mMonto[1].replace(/\./g, '').replace(',', '.')) : 0;
+          if (!(montoMsg > 0)) {
+            montoPendiente.set(remitente, { clienteId: cliente.id, clienteNombre: cliente.nombre, metodo: 'Transferencia' });
+            await enviarWhatsApp(remitente, `¡Gracias por avisar! ¿Cuál fue el monto que pagaste? 🏑`, cliente.nombre);
+            return;
+          }
+          if (await hayPagoPendiente(cliente.id)) {
+            await enviarWhatsApp(remitente, `¡Ya lo tengo registrado! En breve te confirmamos 🏑`, cliente.nombre);
+            return;
+          }
+          await pool.query(
+            `INSERT INTO pagos_pendientes (cliente_id, cliente_nombre, cliente_from, monto, metodo) VALUES ($1, $2, $3, $4, $5)`,
+            [cliente.id, cliente.nombre, remitente, montoMsg, 'Transferencia']
+          );
+          const { rows: existing } = await pool.query(`SELECT COUNT(*) AS count FROM pagos_pendientes WHERE esperando_confirmacion = true`);
+          if (parseInt(existing[0].count) <= 1) {
+            const msg = `💰 ${cliente.nombre} - $${montoMsg} - Transferencia\n¿Confirmás? SÍ o NO`;
+            await twilioClient.messages.create({ from: TWILIO_FROM, to: process.env.COSACO_WHATSAPP, body: msg });
+            guardarMensaje(process.env.COSACO_WHATSAPP, null, msg, 'agente');
+          }
+          await enviarWhatsApp(remitente, `Gracias! Ya le avisé al equipo, en breve te confirmamos 🏑`, cliente.nombre);
+        } else {
+          const matchMonto = mensaje.match(/\$?(\d[\d.,]*)\s*(transferencia|efectivo)?/i);
+          const montoDetectado = matchMonto ? parseFloat(matchMonto[1].replace(/\./g, '').replace(',', '.')) : 0;
+          const metodoDetectado = matchMonto && matchMonto[2] ? (matchMonto[2].charAt(0).toUpperCase() + matchMonto[2].slice(1).toLowerCase()) : 'Transferencia';
+          pagosEsperandoNombre.set(remitente, { monto: montoDetectado, metodo: metodoDetectado });
+          await enviarWhatsApp(remitente, `¡Gracias por avisarnos! Para identificar el pago, pasame el nombre y apellido de la jugadora tal como está registrada. Si escribís por tu hija, es el nombre de ella (no el tuyo) 🏑`);
+        }
         return;
       }
     }
@@ -2568,11 +2576,13 @@ app.post('/webhook', (req, res) => {
   guardarMensaje(remitente, profileName, mensaje || (media ? '📎 Imagen' : '[imagen]'), 'cliente', null, media);
   res.type('text/xml').send(new twilio.twiml.MessagingResponse().toString());
   if (numMedia > 0 && (!mensaje || !mensaje.trim())) {
-    // Comprobante (imagen sin texto) de un cliente → arranca el flujo de pago
-    // guiado (monto → método → nombre), no libre escritura.
+    // Comprobante (imagen sin texto) de un cliente → pedir nombre y monto.
     if (remitente !== process.env.COSACO_WHATSAPP) {
-      iniciarFlujoPagoMenu(remitente, '¡Recibí tu comprobante! 🏑 Vamos a registrar tu pago.')
-        .catch(err => console.error('Error iniciando flujo pago (comprobante):', err.message));
+      comprobantePendiente.set(remitente, true);
+      const resp = '¡Recibí el comprobante de transferencia! 🏑 Para registrar el pago necesito:\n- Nombre y apellido de la jugadora (tal como está registrada — si sos el papá o la mamá, es el nombre de tu hija, no el tuyo)\n- El monto que transferiste\n\nEscribime los dos datos y listo 😊';
+      twilioClient.messages.create({ from: TWILIO_FROM, to: remitente, body: resp })
+        .then(() => guardarMensaje(remitente, null, resp, 'agente'))
+        .catch(err => console.error('Error respondiendo comprobante:', err.message));
     }
     return;
   }
