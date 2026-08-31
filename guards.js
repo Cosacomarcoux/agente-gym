@@ -204,6 +204,16 @@ function parsearFechaInicio(texto, hoyDate) {
   return null;
 }
 
+// ¿El cliente menciona una LESIÓN / problema físico? → avisar a Cosaco para que
+// evalúe si suspende el servicio. No toma acción automática, solo detecta.
+function esLesion(texto) {
+  const t = normalizarTexto(texto);
+  if (!t) return false;
+  if (/\b(lesion|esguince|fractur|fisura|rotura|me rompi|desgarr|distension|torcedura|me torci|luxacion|tendinitis|tendon|menisco|ligamento|operad|operacion|cirugia|reposo|recuper|convaleciente|kinesio|fisioterapia|rehabilitacion|yeso|muletas|cabestrillo|me lastime|me golpee|me quebre)/.test(t)) return true;
+  if (/\bme duele (el|la|un|una|mi) (rodilla|tobillo|hombro|espalda|cadera|muneca|pie|pierna|brazo|cuello|tendon)\b/.test(t)) return true;
+  return false;
+}
+
 // ¿El mensaje es una cortesía / no-nombre? (para no tratar "gracias", "ok", "dale"
 // como si fueran el nombre de la jugadora cuando el bot está esperando un nombre.)
 function esCortesia(texto) {
@@ -264,6 +274,7 @@ module.exports = {
   limpiarNombreBuscado,
   esCortesia,
   esAvisoDeAusencia,
+  esLesion,
   parsearFechaInicio,
   esSaludo,
   matchOpcionMenu,

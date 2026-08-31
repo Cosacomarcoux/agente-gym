@@ -30,6 +30,7 @@ const montoPendiente = new Map();       // remitente → { clienteId, clienteNom
 const promesaAvisada = new Map();       // remitente → timestamp del último aviso de "paga después" (throttle 1h)
 const ausenciaAvisada = new Map();      // remitente → timestamp del último aviso de "deja de venir" (throttle 6h)
 const derivacionAvisada = new Map();    // remitente → timestamp del último aviso de "no entendí, tomá vos" (throttle 20min)
+const lesionAvisada = new Map();        // remitente → timestamp del último aviso de lesión (throttle 6h)
 const fechaInicioPagoPendiente = new Map(); // telefonoCosaco → { pago, plan, propuesta } esperando que confirme la fecha de inicio al pagar
 const menuEstado = new Map();            // remitenteCliente → { paso, data } máquina de estados del menú guiado
 
@@ -1623,6 +1624,23 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
     // (Diseño conversacional: sin menú. Los saludos y consultas los maneja la IA;
     // los pagos y comprobantes se detectan por texto y se te mandan a confirmar.)
 
+    // ── AVISO DE LESIÓN ────────────────────────────────────────────────────
+    // Si el cliente menciona una lesión/problema físico, avisar a Cosaco para que
+    // evalúe suspender el servicio. NO corta la conversación (el bot igual le
+    // responde). Throttle 6h por cliente. No toma ninguna acción automática.
+    if (!esCosaco && guards.esLesion(mensaje)) {
+      const ultimo = lesionAvisada.get(remitente) || 0;
+      if (Date.now() - ultimo > 6 * 3600000) {
+        lesionAvisada.set(remitente, Date.now());
+        const cliL = await buscarClientePorTelefono(remitente).catch(() => null);
+        const quien = cliL ? cliL.nombre : (profileName || String(remitente).replace('whatsapp:', ''));
+        enviarWhatsApp(process.env.COSACO_WHATSAPP,
+          `🩹 ${quien} mencionó una lesión:\n"${mensaje.slice(0, 180)}"\nRevisá si conviene suspenderle el servicio hasta que se recupere. (Solo aviso — no hice nada automático)`).catch(() => {});
+        logActividad('lesion', quien, null, remitente);
+      }
+      // NO return: el bot le responde igual (la IA responde con empatía).
+    }
+
     // ── 0-bis. ESPERANDO EL MONTO (le preguntamos "¿cuánto pagaste?") ─────
     if (!esCosaco && montoPendiente.has(remitente)) {
       const datos = montoPendiente.get(remitente);
@@ -2532,8 +2550,10 @@ cron.schedule('5 12 * * *', async () => {
 //  Requiere una plantilla de WhatsApp aprobada: TEMPLATE_CLASE_PRUEBA.
 // ────────────────────────────────────────────────────────────────────────────
 async function enviarSeguimiento() {
-  const SID = process.env.TEMPLATE_CLASE_PRUEBA || process.env.TEMPLATE_INCENTIVO_PRUEBA;
-  if (!SID) { console.warn('[SEGUIMIENTO] Falta TEMPLATE_CLASE_PRUEBA — no se envía nada.'); return; }
+  // Plantilla de SEGUIMIENTO (distinta de la de vencimiento). SID fijo para que
+  // siempre mande el mensaje correcto; se puede sobrescribir con TEMPLATE_SEGUIMIENTO.
+  const SID = process.env.TEMPLATE_SEGUIMIENTO || 'HX9df9508ac29c10f582f02af1dc266b0b';
+  if (!SID) { console.warn('[SEGUIMIENTO] Falta TEMPLATE_SEGUIMIENTO — no se envía nada.'); return; }
   if (!GYM_TOKEN) await loginConReintentos(3, 5000);
   const hdrs = { Authorization: `Bearer ${GYM_TOKEN}` };
   let alumnos = [];
@@ -3225,8 +3245,8 @@ app.get('/test-jobs', async (req, res) => {
         return res.json({
           ok: true,
           diagnostico: {
-            template_configurado: !!(process.env.TEMPLATE_CLASE_PRUEBA || process.env.TEMPLATE_INCENTIVO_PRUEBA),
-            template_sid: process.env.TEMPLATE_CLASE_PRUEBA || process.env.TEMPLATE_INCENTIVO_PRUEBA || null,
+            template_configurado: true,
+            template_sid: process.env.TEMPLATE_SEGUIMIENTO || 'HX9df9508ac29c10f582f02af1dc266b0b',
             en_la_lista_de_seguimiento: Array.isArray(enLista) ? enLista.length : enLista,
             a_notificar_hoy: aNotificar,
             error_api: errorApi,
