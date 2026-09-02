@@ -119,6 +119,16 @@ function nombreCoincide(buscado, candidato) {
   return toks.every(tok => c.includes(' ' + tok));
 }
 
+// Capitaliza un nombre para guardarlo prolijo: "virginia paz bravo" → "Virginia
+// Paz Bravo". Deja en minúscula los conectores (de, del, la, los...).
+function capitalizarNombre(str) {
+  const conectores = new Set(['de', 'del', 'la', 'las', 'los', 'y', 'da', 'das', 'do', 'dos']);
+  const palabras = String(str || '').trim().toLowerCase().split(/\s+/).filter(Boolean);
+  return palabras
+    .map((w, i) => (i > 0 && conectores.has(w)) ? w : (w.charAt(0).toUpperCase() + w.slice(1)))
+    .join(' ');
+}
+
 // De una lista de clientes ({nombre,...}), devolver SOLO los que calzan fuerte.
 // Si el buscado trae apellido, esto descarta homónimos de otro apellido.
 function filtrarClientesPorNombre(buscado, clientes) {
@@ -271,6 +281,7 @@ module.exports = {
   normalizarTexto,
   nombreCoincide,
   filtrarClientesPorNombre,
+  capitalizarNombre,
   limpiarNombreBuscado,
   esCortesia,
   esAvisoDeAusencia,

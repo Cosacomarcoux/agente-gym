@@ -351,6 +351,7 @@ Nunca confirmar un turno sin haber llamado gestionar_turnos_cliente Y recibido o
 - Si la herramienta devuelve ok:true → recién ahí confirmá, mostrando día y horario.
 - Si devuelve ok:false, error o requiere_autorizacion → NO digas que quedó asignado. Decí "lo estamos gestionando, en breve te confirmamos" y llamá notificar_cosaco con el motivo.
 - Si es una persona NUEVA (no está en el sistema) que pide turnos, usá registrar_cliente_y_asignar_turno, NO gestionar_turnos_cliente. Nunca confirmes una inscripción sin que esa herramienta haya devuelto ok:true.
+- Si la persona YA ESTÁ REGISTRADA (la encontrás por su teléfono/nombre) y te reenvía una inscripción o pide turnos nuevos: NO la registres de nuevo (evitá duplicar la ficha). Fijate la disponibilidad de lo que pide y preguntale qué quiere hacer: (a) CAMBIAR su turno actual por el nuevo, o (b) SUMAR un segundo día y pasar al plan de 2 veces por semana. Pasale los precios (1 vez $35.000 · 2 veces $42.000). Cuando elija, usá gestionar_turnos_cliente para el cambio y avisá a Cosaco con notificar_cosaco.
 
 LÍMITE DE TURNOS:
 - El plan de 2 veces por semana es el máximo que se ofrece. NUNCA ofrezcas ni sugieras el plan de 3 veces por tu cuenta.
@@ -633,7 +634,7 @@ async function ejecutarTool(nombre, input, remitente) {
     }
 
     if (nombre === 'registrar_cliente_y_asignar_turno') {
-      const nombreCompleto = `${input.nombre} ${input.apellido}`;
+      const nombreCompleto = guards.capitalizarNombre(`${input.nombre || ''} ${input.apellido || ''}`);
       const asignarTurnos = async (cliente_id, turno_ids) => {
         const asignados = [], errores = [];
         for (const id of turno_ids) {

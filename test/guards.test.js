@@ -238,6 +238,13 @@ test('matchOpcionMenu entiende número y texto', () => {
   assert.strictEqual(g.matchOpcionMenu('cualquier cosa rara'), null);
 });
 
+test('capitalizarNombre deja los nombres prolijos', () => {
+  assert.strictEqual(g.capitalizarNombre('virginia paz bravo'), 'Virginia Paz Bravo');
+  assert.strictEqual(g.capitalizarNombre('MARTINA GOMEZ'), 'Martina Gomez');
+  assert.strictEqual(g.capitalizarNombre('maria de los angeles'), 'Maria de los Angeles');
+  assert.strictEqual(g.capitalizarNombre('  juan   perez  '), 'Juan Perez');
+});
+
 // ── parsearMonto: leer el monto del mensaje ─────────────────────────────────
 test('parsearMonto lee montos en formatos comunes', () => {
   assert.strictEqual(g.parsearMonto('transferí 35000'), 35000);
