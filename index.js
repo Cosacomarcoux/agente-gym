@@ -2477,7 +2477,7 @@ cron.schedule('0 12 * * *', async () => {
       return f.getDate() === hoy.getDate() && f.getMonth() === hoy.getMonth();
     });
     for (const c of cumpleaneros) {
-      await enviarTemplate(c.telefono, process.env.TEMPLATE_CUMPLEANOS, { "1": c.nombre.split(' ')[0] }, '[Cumpleaños]');
+      await enviarTemplate(c.telefono, process.env.TEMPLATE_CUMPLEANOS, { "1": c.nombre.split(' ')[0] }, `¡Hola ${c.nombre.split(' ')[0]}! 🎂 Todo el equipo de Hockey Vivo te desea un muy feliz cumpleaños. ¡Que tengas un día increíble! 🏑`);
       await enviarWhatsApp(process.env.COSACO_WHATSAPP, `🎂 Hoy es el cumpleaños de ${c.nombre}! Saludalo desde tu celular 🏑`);
     }
     console.log(`Cumpleaños enviados: ${cumpleaneros.length}`);
@@ -2569,7 +2569,8 @@ async function enviarSeguimiento() {
     if (!a.telefono) continue;
     try {
       const nombre1 = (a.nombre || '').split(' ')[0];
-      await enviarTemplate(a.telefono, SID, { "1": nombre1 }, '[Seguimiento]');
+      const textoSeg = `Hola ${nombre1}! 🏑 ¡Nos encanta verte entrenando en Hockey Vivo! Para asegurar tu lugar y seguir sumándote, coordinemos el pago de tu plan cuando puedas. Cualquier consulta, escribinos por acá 💪`;
+      await enviarTemplate(a.telefono, SID, { "1": nombre1 }, textoSeg);
       // Marcar el envío de HOY SOLO si el mensaje salió (Opción B: al próximo
       // presente nuevo se vuelve a enviar; sale de la lista sólo al pagar).
       await fetch(`${GYM_API}/clientes/${a.id}/seguimiento-enviado`, { method: 'POST', headers: hdrs });
@@ -2583,7 +2584,45 @@ async function enviarSeguimiento() {
 // Alias por compatibilidad con llamadas existentes (comando manual de Cosaco).
 const enviarIncentivosPrueba = enviarSeguimiento;
 
-cron.schedule('0 12 * * *', () => enviarSeguimiento().catch(e => console.error('cron seguimiento:', e.message)));
+// Suspende automáticamente a quienes llevan 5+ días en seguimiento sin pagar.
+// (El pago los saca de la lista antes; si no pagaron en 5 días, se suspenden.)
+async function suspenderSeguimientoVencido() {
+  const DIAS_MAX = 5;
+  if (!GYM_TOKEN) await loginConReintentos(3, 5000);
+  const hdrs = { Authorization: `Bearer ${GYM_TOKEN}`, 'Content-Type': 'application/json' };
+  let lista = [];
+  try {
+    const r = await fetch(`${GYM_API}/seguimiento`, { headers: hdrs });
+    if (!r.ok) { console.error('[SEG-SUSP] API', r.status); return; }
+    lista = await r.json();
+  } catch (e) { console.error('[SEG-SUSP] error:', e.message); return; }
+  const hoy = new Date();
+  const suspendidos = [];
+  for (const c of (Array.isArray(lista) ? lista : [])) {
+    if (!c.desde) continue;
+    const dias = Math.floor((hoy - new Date(c.desde + 'T00:00:00')) / 86400000);
+    if (dias >= DIAS_MAX) {
+      try {
+        const rs = await fetch(`${GYM_API}/clientes/${c.id}/suspender`, { method: 'DELETE', headers: hdrs });
+        if (rs.ok) {
+          await fetch(`${GYM_API}/clientes/${c.id}/seguimiento`, { method: 'DELETE', headers: hdrs }).catch(() => {});
+          suspendidos.push(`${c.nombre} (${dias} días)`);
+          logActividad('seguimiento_suspendido', `${c.nombre} (${dias} días sin pagar)`, null, c.telefono);
+        }
+      } catch (e) { console.error('[SEG-SUSP] fallo', c.nombre, e.message); }
+    }
+  }
+  if (suspendidos.length) {
+    await enviarWhatsApp(process.env.COSACO_WHATSAPP,
+      `⛔ Suspendí automáticamente a ${suspendidos.length} alumno(s) con +${DIAS_MAX} días en seguimiento sin pagar:\n• ${suspendidos.join('\n• ')}`).catch(() => {});
+  }
+  console.log(`[SEG-SUSP] ${suspendidos.length} suspendido(s) por vencer el seguimiento`);
+}
+
+cron.schedule('0 12 * * *', async () => {
+  try { await suspenderSeguimientoVencido(); } catch (e) { console.error('cron seg-susp:', e.message); }
+  try { await enviarSeguimiento(); } catch (e) { console.error('cron seguimiento:', e.message); }
+});
 
 app.post('/webhook', (req, res) => {
   const mensaje = req.body.Body;
@@ -3216,7 +3255,7 @@ app.get('/test-jobs', async (req, res) => {
         return f.getDate() === hoy.getDate() && f.getMonth() === hoy.getMonth();
       });
       for (const c of lista) {
-        await enviarTemplate(c.telefono, process.env.TEMPLATE_CUMPLEANOS, { "1": c.nombre.split(' ')[0] }, '[Cumpleaños]');
+        await enviarTemplate(c.telefono, process.env.TEMPLATE_CUMPLEANOS, { "1": c.nombre.split(' ')[0] }, `¡Hola ${c.nombre.split(' ')[0]}! 🎂 Todo el equipo de Hockey Vivo te desea un muy feliz cumpleaños. ¡Que tengas un día increíble! 🏑`);
       }
       return res.json({ ok: true, job, enviados: lista.map(c => c.nombre) });
     }
