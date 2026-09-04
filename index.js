@@ -4,6 +4,7 @@ const twilio = require('twilio');
 const Anthropic = require('@anthropic-ai/sdk');
 const { Pool } = require('pg');
 const cron = require('node-cron');
+const crypto = require('crypto');
 const guards = require('./guards');
 
 const app = express();
@@ -195,7 +196,8 @@ function guardarMensaje(from, nombre, texto, rol, contentJson = null, media = nu
     [from, nombre && nombre !== from ? nombre : null, rol, textoFinal,
      contentJson ? JSON.stringify(contentJson) : null,
      media?.url || null, media?.type || null]
-  ).catch(err => console.error('Error guardando mensaje:', err.message));
+  ).then(() => { try { notificarPanel(from); } catch { /* SSE opcional */ } })
+   .catch(err => console.error('Error guardando mensaje:', err.message));
 }
 
 async function getHistorial(from) {
@@ -2649,6 +2651,143 @@ app.post('/webhook', (req, res) => {
   procesarMensaje(mensaje, remitente, profileName);
 });
 
+// ══════════════════════════════════════════════════════════════════════════
+//  PANEL — Autenticación (login del sistema) + tiempo real (SSE)
+// ══════════════════════════════════════════════════════════════════════════
+// El panel se protege con el MISMO login del sistema del gimnasio. El usuario
+// entra con su usuario/clave del sistema; el bot reenvía esas credenciales a
+// GYM_API/login y solo deja pasar a los roles habilitados. La sesión se guarda
+// en una cookie firmada (HMAC) para no pedir la clave en cada request.
+const PANEL_SECRET = process.env.PANEL_SECRET || crypto.randomBytes(32).toString('hex');
+if (!process.env.PANEL_SECRET) {
+  console.warn('[PANEL] PANEL_SECRET no seteada: uso una clave aleatoria (las sesiones se cierran al reiniciar). Seteala en Railway para sesiones estables.');
+}
+const PANEL_ROLES_OK = new Set(['admin', 'dueño', 'dueno', 'administrativo']);
+const PANEL_SESION_HORAS = 12;
+
+function _firmarSesion(payload) {
+  const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  const sig = crypto.createHmac('sha256', PANEL_SECRET).update(body).digest('base64url');
+  return body + '.' + sig;
+}
+function _verificarSesion(cookie) {
+  if (!cookie) return null;
+  const i = cookie.lastIndexOf('.');
+  if (i < 0) return null;
+  const body = cookie.slice(0, i), sig = cookie.slice(i + 1);
+  const esperado = crypto.createHmac('sha256', PANEL_SECRET).update(body).digest('base64url');
+  // Comparación en tiempo constante
+  const a = Buffer.from(sig), b = Buffer.from(esperado);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
+  try {
+    const p = JSON.parse(Buffer.from(body, 'base64url').toString());
+    if (!p.exp || Date.now() > p.exp) return null;
+    return p;
+  } catch { return null; }
+}
+function _leerCookie(req, nombre) {
+  const raw = req.headers.cookie || '';
+  for (const parte of raw.split(';')) {
+    const idx = parte.indexOf('=');
+    if (idx < 0) continue;
+    if (parte.slice(0, idx).trim() === nombre) return decodeURIComponent(parte.slice(idx + 1).trim());
+  }
+  return null;
+}
+function _paginaLogin(msg = '') {
+  const aviso = msg ? '<div class="err">' + msg + '</div>' : '';
+  return `<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Panel Hockey Vivo — Ingresar</title>
+<style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#075e54;min-height:100dvh;display:flex;align-items:center;justify-content:center;padding:20px}
+.card{background:#fff;border-radius:14px;box-shadow:0 10px 40px rgba(0,0,0,.25);padding:32px 28px;width:100%;max-width:360px}
+h1{font-size:20px;color:#075e54;margin-bottom:4px}.sub{font-size:13px;color:#667;margin-bottom:20px}
+label{display:block;font-size:13px;color:#444;margin:12px 0 6px;font-weight:600}
+input{width:100%;padding:11px 12px;border:1px solid #ddd;border-radius:8px;font-size:15px;outline:none}
+input:focus{border-color:#075e54}
+button{width:100%;margin-top:22px;padding:12px;background:#075e54;color:#fff;border:none;border-radius:8px;font-size:15px;font-weight:600;cursor:pointer}
+button:hover{background:#0a7d6f}.err{background:#fdecea;color:#c0392b;font-size:13px;padding:10px 12px;border-radius:8px;margin-bottom:16px;border:1px solid #f5c6cb}</style></head>
+<body><form class="card" method="POST" action="/panel/login">
+<h1>🏑 Panel Hockey Vivo</h1><div class="sub">Ingresá con tu usuario del sistema.</div>
+${aviso}
+<label>Usuario (email)</label><input type="text" name="usuario" autocomplete="username" autofocus required>
+<label>Contraseña</label><input type="password" name="clave" autocomplete="current-password" required>
+<button type="submit">Ingresar</button></form></body></html>`;
+}
+
+// Middleware: exige sesión válida en /panel y /panel/* (menos login/logout)
+app.use((req, res, next) => {
+  const p = req.path;
+  if (p === '/panel/login' || p === '/panel/logout') return next();
+  if (p === '/panel' || p.startsWith('/panel/')) {
+    const sess = _verificarSesion(_leerCookie(req, 'panel_sess'));
+    if (sess) { req.panelUser = sess; return next(); }
+    if (p === '/panel') return res.redirect('/panel/login');
+    return res.status(401).json({ error: 'no_autorizado' });
+  }
+  next();
+});
+
+app.get('/panel/login', (req, res) => {
+  if (_verificarSesion(_leerCookie(req, 'panel_sess'))) return res.redirect('/panel');
+  res.type('html').send(_paginaLogin());
+});
+
+app.post('/panel/login', async (req, res) => {
+  const usuario = (req.body.usuario || '').trim();
+  const clave = req.body.clave || '';
+  if (!usuario || !clave) return res.status(400).send(_paginaLogin('Completá usuario y contraseña.'));
+  try {
+    const r = await fetch(`${GYM_API}/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ username: usuario, password: clave }).toString(),
+      signal: AbortSignal.timeout(20000),
+    });
+    if (!r.ok) return res.status(401).send(_paginaLogin('Usuario o contraseña incorrectos.'));
+    const data = await r.json();
+    const rol = (data.rol || '').toLowerCase();
+    if (!PANEL_ROLES_OK.has(rol)) {
+      return res.status(403).send(_paginaLogin('Tu rol (' + (data.rol || '?') + ') no tiene acceso al panel.'));
+    }
+    const exp = Date.now() + PANEL_SESION_HORAS * 3600 * 1000;
+    const cookie = _firmarSesion({ u: usuario, rol: data.rol, nombre: data.nombre || usuario, exp });
+    res.setHeader('Set-Cookie',
+      `panel_sess=${encodeURIComponent(cookie)}; HttpOnly; Path=/; Max-Age=${PANEL_SESION_HORAS * 3600}; SameSite=Lax`);
+    res.redirect('/panel');
+  } catch (e) {
+    console.error('[PANEL] login error:', e.message);
+    res.status(502).send(_paginaLogin('No pude contactar al sistema, probá de nuevo en unos segundos.'));
+  }
+});
+
+app.get('/panel/logout', (req, res) => {
+  res.setHeader('Set-Cookie', 'panel_sess=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax');
+  res.redirect('/panel/login');
+});
+
+// ─── Tiempo real: Server-Sent Events. guardarMensaje() avisa a los paneles ───
+const _panelClients = new Set();
+app.get('/panel/stream', (req, res) => {
+  res.set({
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  });
+  if (res.flushHeaders) res.flushHeaders();
+  res.write(': conectado\n\n');
+  _panelClients.add(res);
+  const hb = setInterval(() => { try { res.write(': hb\n\n'); } catch { /* cerrada */ } }, 25000);
+  req.on('close', () => { clearInterval(hb); _panelClients.delete(res); });
+});
+function notificarPanel(telefono) {
+  if (!_panelClients.size) return;
+  const data = JSON.stringify({ telefono: telefono || '' });
+  for (const res of _panelClients) {
+    try { res.write('event: msg\ndata: ' + data + '\n\n'); } catch { _panelClients.delete(res); }
+  }
+}
+
 app.get('/panel', (req, res) => {
   res.type('text/html').send(`<!DOCTYPE html>
 <html lang="es">
@@ -2722,7 +2861,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 <div id="banner"><span id="banner-txt"></span><button onclick="ocultarBanner()">✕</button></div>
 <div class="app">
   <div class="sb" id="sb">
-    <div class="sbh">Conversaciones</div>
+    <div class="sbh" style="display:flex;align-items:center;justify-content:space-between">
+      <span>Conversaciones</span>
+      <a href="/panel/logout" style="color:#cfe9e3;font-size:12px;font-weight:500;text-decoration:none">Salir ⟶</a>
+    </div>
     <div class="tabs">
       <div class="tab activo" id="tab-todos" onclick="cambiarTab('todos')">Todos</div>
       <div class="tab" id="tab-pend" onclick="cambiarTab('pend')">Pendientes<span class="badge-n" id="badge-pend" style="display:none">0</span></div>
@@ -2802,6 +2944,11 @@ async function pedir(url, opciones){
     r = await fetch(url, opciones);
   } catch(e){
     throw new Error('Sin conexión con el servidor');
+  }
+  if (r.status === 401){
+    // Sesión vencida o cerrada: volver al login.
+    window.location.href = '/panel/login';
+    throw new Error('Sesión vencida');
   }
   if (!r.ok){
     let detalle = '';
@@ -3063,11 +3210,30 @@ async function refrescarHiloAbierto() {
   _ultimoConteoHilo = n;
 }
 
+// Tiempo real: el servidor empuja un evento cada vez que se guarda un mensaje.
+// Apenas llega, refrescamos la lista y (si corresponde) el hilo abierto. Sin esperar.
+function conectarStream() {
+  try {
+    const es = new EventSource('/panel/stream');
+    es.addEventListener('msg', function() {
+      // Llega un mensaje nuevo: refrescamos la lista y el hilo abierto. refrescarHiloAbierto
+      // solo re-renderiza si de verdad cambió la cantidad de mensajes, así que es barato.
+      cargarHilos();
+      refrescarHiloAbierto();
+    });
+    // Si la conexión se corta, el navegador reconecta solo. Ante error persistente,
+    // el polling de respaldo de abajo mantiene el panel al día igual.
+    es.onerror = function() { /* reconexión automática del navegador */ };
+  } catch (_) { /* sin SSE, queda el polling */ }
+}
+conectarStream();
+
+// Respaldo: por si el stream se cae o el navegador lo suspende en segundo plano.
 setInterval(() => {
   if (document.hidden) return;
   cargarHilos();            // actualiza lista + badge de pendientes
   refrescarHiloAbierto();   // actualiza la conversación abierta si hay algo nuevo
-}, 8000);
+}, 15000);
 
 cargarHilos();
 </script>
