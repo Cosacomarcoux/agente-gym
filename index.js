@@ -1798,58 +1798,56 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
         return;
       }
 
-      // Lista de pagos múltiples: 2+ líneas con "Nombre $monto"
-      const lineas = mensaje.split('\n').map(l => l.trim()).filter(l => l);
-      const esPagoMultiple = lineas.length >= 2 && lineas.every(l => /\w+.*\$?[\d.,]+/.test(l));
-      if (esPagoMultiple) {
-        const parsearLinea = (l) => {
-          const matchBeca = l.match(/beca[^\d]*([\d]+)%/i);
-          const beca = matchBeca ? matchBeca[1] : null;
-          const matchMonto = l.match(/\$?([\d.,]+)/);
-          const montoBase = matchMonto ? parseFloat(matchMonto[1].replace(/\./g, '').replace(',', '.')) : 0;
-          const monto = beca ? Math.round(montoBase * (1 - parseInt(beca) / 100)) : montoBase;
-          const nombre = l.replace(/\$?[\d.,]+.*$/, '').replace(/beca.*/i, '').trim();
-          return { nombre, monto, beca };
-        };
-
+      // ── REGISTRO DE PAGO(S) POR COSACO — DETERMINÍSTICO (nunca la IA) ─────
+      // Cosaco pide registrar uno o varios pagos, en UNA línea o en varias, con o
+      // sin comas ("registrá el pago de María Allende $35000 Máxima Ruiz $42000").
+      // Parseamos nombre+monto, resolvemos la ficha y ENCOLAMOS; después la
+      // confirmación es de a uno con SÍ/NO. Antes, cuando venían en un solo
+      // renglón, esto caía en la IA, que INVENTABA "✅ Pago registrado" sin
+      // escribir nada en el sistema (plata perdida). Esto lo elimina de raíz.
+      const pagosLibres = guards.parsearPagosLibres(mensaje);
+      const pedidoDePago = guards.esPedidoDeRegistroPago(mensaje) || pagosLibres.length >= 2;
+      if (pedidoDePago && pagosLibres.length >= 1) {
         if (!GYM_TOKEN) await loginConReintentos(3, 3000);
         const procesados = [];
-        for (const linea of lineas) {
-          const { nombre, monto, beca } = parsearLinea(linea);
-          if (!nombre) continue;
-          if (!(monto > 0)) { procesados.push({ nombre, monto, beca, montoInvalido: true }); continue; }
-          const clientes = await ejecutarTool('get_clientes', { buscar: nombre }, remitente);
-          const fuertes = guards.filtrarClientesPorNombre(nombre, clientes);
+        for (const p of pagosLibres) {
+          // Beca en el texto del nombre ("... beca 50%")
+          const mBeca = p.nombre.match(/beca[^\d]*([\d]+)\s*%/i);
+          const nombreBusca = guards.limpiarNombreBuscado(p.nombre) || p.nombre;
+          const clientes = await ejecutarTool('get_clientes', { buscar: nombreBusca }, remitente);
+          const fuertes = guards.filtrarClientesPorNombre(nombreBusca, clientes);
           if (fuertes.length === 1) {
             const cliente = fuertes[0];
-            const metodo = beca ? `Transferencia (Beca ${beca}%)` : 'Transferencia';
+            const metodo = mBeca ? `${p.metodo} (Beca ${mBeca[1]}%)` : p.metodo;
             await pool.query(`DELETE FROM pagos_pendientes WHERE esperando_confirmacion = true AND cliente_id = $1`, [cliente.id]);
             await pool.query(
               `INSERT INTO pagos_pendientes (cliente_id, cliente_nombre, cliente_from, monto, metodo) VALUES ($1, $2, $3, $4, $5)`,
-              [cliente.id, cliente.nombre, remitente, monto, metodo]
+              [cliente.id, cliente.nombre, remitente, p.monto, metodo]
             );
-            procesados.push({ nombre: cliente.nombre, monto, beca });
+            procesados.push({ nombre: cliente.nombre, monto: p.monto, metodo });
           } else if (fuertes.length > 1) {
-            procesados.push({ nombre, monto, beca, ambiguo: true });
+            procesados.push({ nombre: p.nombre, monto: p.monto, ambiguo: true });
           } else {
-            procesados.push({ nombre, monto, beca, noEncontrado: true });
+            procesados.push({ nombre: p.nombre, monto: p.monto, noEncontrado: true });
           }
         }
 
         const { rows: cola } = await pool.query(`SELECT * FROM pagos_pendientes WHERE esperando_confirmacion = true ORDER BY id ASC`);
-        const formatMonto = n => n.toLocaleString('es-AR');
-        let resumen = `Procesé ${procesados.filter(p => !p.noEncontrado).length} pagos:\n\n`;
+        const fmt = n => Number(n).toLocaleString('es-AR');
+        const okCount = procesados.filter(p => !p.ambiguo && !p.noEncontrado).length;
+        let resumen = okCount ? `Encolé ${okCount} pago(s) para confirmar:\n` : '';
         for (const p of procesados) {
-          if (p.montoInvalido) resumen += `⚠️ Monto inválido (no encolé): ${p.nombre}\n`;
-          else if (p.ambiguo) resumen += `⚠️ Hay varias fichas de "${p.nombre}" — cargalo aparte para elegir cuál\n`;
-          else if (p.noEncontrado) resumen += `⚠️ No encontré: ${p.nombre}\n`;
-          else resumen += `💰 ${p.nombre} - $${formatMonto(p.monto)}${p.beca ? ` - Beca ${p.beca}%` : ''}\n`;
+          if (p.ambiguo) resumen += `⚠️ Hay varias fichas de "${p.nombre}" — cargalo aparte para elegir cuál.\n`;
+          else if (p.noEncontrado) resumen += `⚠️ No encontré a "${p.nombre}" — revisá el nombre y apellido completos.\n`;
+          else resumen += `• ${p.nombre} — $${fmt(p.monto)} ${p.metodo}\n`;
         }
         if (cola.length > 0) {
-          const primero = cola[0];
-          resumen += `\n¿Confirmás el pago de ${primero.cliente_nombre} por $${formatMonto(primero.monto)}? SÍ o NO`;
+          await enviarWhatsApp(process.env.COSACO_WHATSAPP, resumen.trim());
+          await mostrarSiguientePendiente();   // arranca la confirmación de a uno (SÍ/NO)
+        } else {
+          resumen += `\nNo pude encolar ninguno. Escribime "Nombre Apellido $monto" (podés poner varios).`;
+          await enviarWhatsApp(process.env.COSACO_WHATSAPP, resumen.trim());
         }
-        await enviarWhatsApp(process.env.COSACO_WHATSAPP, resumen);
         return;
       }
 

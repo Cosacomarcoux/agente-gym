@@ -313,3 +313,47 @@ test('esComandoConfirmarPagos NO se dispara con SÍ/NO ni frases sueltas', () =>
     assert.strictEqual(g.esComandoConfirmarPagos(m), false, `no debería dispararse: "${m}"`);
   }
 });
+
+// ── parsearPagosLibres: registro determinístico de pagos (uno o varios) ──────
+test('parsearPagosLibres extrae varios pagos de UN SOLO renglón (bug real)', () => {
+  const txt = 'Por favor registra el pago de la siguiente jugadoras: María cruz Allende $35.000 transferencia Máxima Ruiz $42000 Justina Saad $42000';
+  const p = g.parsearPagosLibres(txt);
+  assert.strictEqual(p.length, 3, 'debería encontrar 3 pagos');
+  assert.strictEqual(p[0].nombre, 'Maria Cruz Allende');
+  assert.strictEqual(p[0].monto, 35000);
+  assert.strictEqual(p[1].nombre, 'Maxima Ruiz');
+  assert.strictEqual(p[1].monto, 42000);
+  assert.strictEqual(p[2].nombre, 'Justina Saad');
+  assert.strictEqual(p[2].monto, 42000);
+});
+
+test('parsearPagosLibres funciona con líneas separadas y método efectivo', () => {
+  const txt = 'Juan Perez $35000\nMaria Lopez $42000 efectivo';
+  const p = g.parsearPagosLibres(txt);
+  assert.strictEqual(p.length, 2);
+  assert.strictEqual(p[0].nombre, 'Juan Perez');
+  assert.strictEqual(p[0].metodo, 'Transferencia');
+  assert.strictEqual(p[1].nombre, 'Maria Lopez');
+  assert.strictEqual(p[1].metodo, 'Efectivo');
+});
+
+test('parsearPagosLibres: un solo pago', () => {
+  const p = g.parsearPagosLibres('registrá el pago de Delfina Coronel $49.000');
+  assert.strictEqual(p.length, 1);
+  assert.strictEqual(p[0].nombre, 'Delfina Coronel');
+  assert.strictEqual(p[0].monto, 49000);
+});
+
+test('parsearPagosLibres ignora nombres de una sola palabra (evita basura)', () => {
+  // Sin apellido no encola: preferimos que Cosaco lo aclare a registrar mal.
+  const p = g.parsearPagosLibres('pago 35000');
+  assert.strictEqual(p.length, 0);
+});
+
+test('esPedidoDeRegistroPago: SÍ con pago+monto, NO con turnos/otros', () => {
+  assert.ok(g.esPedidoDeRegistroPago('registra el pago de Ana Gomez $35000'));
+  assert.ok(g.esPedidoDeRegistroPago('Cobré 42000 no... Maria Paz Bravo $42000 efectivo'));
+  assert.strictEqual(g.esPedidoDeRegistroPago('poné a Ana Gomez en el turno de las 1800'), false);
+  assert.strictEqual(g.esPedidoDeRegistroPago('hola cosaco todo bien?'), false);
+  assert.strictEqual(g.esPedidoDeRegistroPago('si'), false);
+});

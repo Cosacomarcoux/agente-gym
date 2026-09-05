@@ -147,7 +147,10 @@ function limpiarNombreBuscado(texto) {
     'transferencia', 'transfer', 'transf', 'transferi', 'transferir', 'efectivo', 'efvo',
     'monto', 'porfa', 'porfis', 'porfavor', 'por', 'favor',
     'gracias', 'hola', 'buenas', 'buenos', 'buen', 'dia', 'dias', 'tardes', 'noches',
-    'registra', 'registrar', 'registrame', 'confirma', 'confirmar', 'puedes', 'podes', 'podrias',
+    'registra', 'registrar', 'registrame', 'registrá', 'confirma', 'confirmar', 'puedes', 'podes', 'podrias',
+    'carga', 'cargar', 'cargá', 'cargale', 'anota', 'anotar', 'anotá', 'cobre', 'cobrar', 'cobré',
+    'siguiente', 'siguientes', 'jugadora', 'jugadoras', 'jugador', 'jugadores',
+    'alumna', 'alumnas', 'alumno', 'alumnos', 'chica', 'chicas', 'chico', 'chicos',
   ]);
   t = t.split(/\s+/).filter(w => w && !stop.has(w) && !/^\d/.test(w)).join(' ');
   return t.trim();
@@ -244,6 +247,57 @@ function esComandoConfirmarPagos(texto) {
   return /^(pendientes?|confirmar( pagos?)?|confirmemos|ver pendientes|revisar pendientes)$/i.test(String(texto || '').trim());
 }
 
+// Parsea uno o varios pagos escritos en texto libre por Cosaco, en una sola línea
+// o en varias, con o sin comas. Reconoce el patrón "Nombre Apellido $monto [método]".
+// Devuelve [{ nombre, monto, metodo }]. Es la base para que el REGISTRO de pagos sea
+// determinístico (nunca lo maneja la IA, que llegó a inventar "✅ Pago registrado").
+// Ej: "María Cruz Allende $35.000 transferencia Máxima Ruiz $42000" →
+//     [{nombre:'Maria Cruz Allende',monto:35000,...},{nombre:'Maxima Ruiz',monto:42000,...}]
+function parsearPagosLibres(texto) {
+  let s = String(texto || '');
+  if (!s.trim()) return [];
+  // Sacar un preámbulo típico ("(por favor) registrá el pago de las siguientes
+  // jugadoras:") para que no ensucie el primer nombre.
+  s = s.replace(/^\s*(por\s+favor\s+)?(me\s+)?(pod[eé]s\s+|puedes\s+|podr[ií]as\s+)?(registr[a-záéíóúñ]*|carg[a-záéíóúñ]*|anot[a-záéíóúñ]*|cobr[a-záéíóúñ]*|confirm[a-záéíóúñ]*)?\s*(el|los|las)?\s*pagos?\s+de\b(\s+(la|las|los))?(\s+siguientes?)?(\s+(jugadoras?|alumnas?|alumnos?|chicas?|chicos?))?\s*:?/i, ' ');
+  const re = /\$?\s*(\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{1,2})?|\d{3,})/g;
+  const ms = [];
+  let m;
+  while ((m = re.exec(s)) !== null) {
+    const raw = m[1].replace(/[.,](?=\d{3}\b)/g, '').replace(',', '.');
+    const monto = parseFloat(raw);
+    if (Number.isFinite(monto)) ms.push({ monto, start: m.index, end: re.lastIndex });
+  }
+  if (!ms.length) return [];
+  // Saltar un preámbulo ("...registrá el pago de las siguientes jugadoras:")
+  // cortando en el último ":" que haya antes del primer monto.
+  const pre = s.slice(0, ms[0].start);
+  const c0 = pre.lastIndexOf(':');
+  let cursor = c0 >= 0 ? c0 + 1 : 0;
+  const pagos = [];
+  for (let i = 0; i < ms.length; i++) {
+    const seg = s.slice(cursor, ms[i].start);                 // texto del nombre (antes del monto)
+    const post = s.slice(ms[i].end, i + 1 < ms.length ? ms[i + 1].start : s.length); // método (después)
+    const metodo = /efectivo|efvo|cash/i.test(post) ? 'Efectivo' : 'Transferencia';
+    // Limpiar y sacar restos de conectores/artículos al principio ("a", "el", "la").
+    const nombre = limpiarNombreBuscado(seg).replace(/^((el|la|a)\s+)+/g, '').trim();
+    if (nombre && nombre.split(' ').filter(Boolean).length >= 2) {
+      pagos.push({ nombre: capitalizarNombre(nombre), monto: ms[i].monto, metodo });
+    }
+    cursor = ms[i].end;
+  }
+  return pagos;
+}
+
+// ¿Cosaco está pidiendo REGISTRAR uno o varios pagos? (palabra de pago + al menos
+// un monto reconocible). Si es true, el flujo determinístico toma el control y la
+// IA NO interviene. Evita el bug de la IA inventando confirmaciones.
+function esPedidoDeRegistroPago(texto) {
+  const t = normalizarTexto(texto);
+  if (!t) return false;
+  const kw = /\b(pag\w*|abon\w*|transf\w*|transfir\w*|deposit\w*|efectivo|efvo|cobr\w*)\b/.test(t);
+  return kw && parsearPagosLibres(texto).length >= 1;
+}
+
 // ── TELÉFONOS ──────────────────────────────────────────────────────────────
 
 // Normaliza cualquier formato de teléfono argentino a "whatsapp:+549XXXXXXXXXX".
@@ -275,6 +329,8 @@ module.exports = {
   esPromesaFutura,
   esComandoConfirmarPagos,
   parsearMonto,
+  parsearPagosLibres,
+  esPedidoDeRegistroPago,
   montoValido,
   normalizarWhatsApp,
   telefonoNacional,
