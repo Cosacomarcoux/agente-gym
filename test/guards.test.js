@@ -357,3 +357,22 @@ test('esPedidoDeRegistroPago: SÍ con pago+monto, NO con turnos/otros', () => {
   assert.strictEqual(g.esPedidoDeRegistroPago('hola cosaco todo bien?'), false);
   assert.strictEqual(g.esPedidoDeRegistroPago('si'), false);
 });
+
+// ── parsearMontoPago: montos informales que escribe la gente ────────────────
+test('parsearMontoPago entiende formatos formales e informales', () => {
+  const casos = [
+    ['35000', 35000], ['35.000', 35000], ['$35.000', 35000], ['42,000', 42000],
+    ['35 mil', 35000], ['35mil', 35000], ['29mil', 29000], ['35k', 35000],
+    ['42 lucas', 42000], ['35mio', 35000], ['35mik', 35000],
+    ['35 . Una vez a la semana', 35000], ['35', 35000], ['42', 42000], ['49', 49000],
+  ];
+  for (const [txt, esperado] of casos) {
+    assert.strictEqual(g.parsearMontoPago(txt), esperado, `"${txt}" debería ser ${esperado}`);
+  }
+});
+
+test('parsearMontoPago devuelve null cuando no hay monto', () => {
+  for (const txt of ['hola', 'una vez a la semana', 'gracias', '']) {
+    assert.strictEqual(g.parsearMontoPago(txt), null, `"${txt}" no debería tener monto`);
+  }
+});

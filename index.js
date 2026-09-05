@@ -1653,8 +1653,7 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
         await enviarWhatsApp(remitente, `¡De nada! Cuando tengas el monto me lo pasás y lo registramos 🏑`, datos.clienteNombre);
         return;
       }
-      const mM = mensaje.match(/\$?\s*([\d]{3,}[\d.,]*)/);
-      const monto = mM ? parseFloat(mM[1].replace(/\./g, '').replace(',', '.')) : 0;
+      const monto = guards.parsearMontoPago(mensaje) || 0;
       if (monto > 0) {
         montoPendiente.delete(remitente);
         if (!(await hayPagoPendiente(datos.clienteId))) {
@@ -1685,49 +1684,77 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
         await enviarWhatsApp(remitente, `¡De nada! Cualquier cosa escribinos 🏑`);
         return;
       }
-      comprobantePendiente.delete(remitente);
-      // Intentar extraer nombre y monto del mensaje
-      const matchMonto = mensaje.match(/\$?([\d.,]+)/);
-      const monto = matchMonto ? parseFloat(matchMonto[1].replace(/\./g, '').replace(',', '.')) : null;
-      // Nombre: sacar montos y muletillas de pago, quedarnos con el nombre real.
-      const nombreRaw = guards.limpiarNombreBuscado(mensaje.replace(/\$?[\d.,]+/g, ' '));
-      const nombre = nombreRaw && nombreRaw.length > 2 ? nombreRaw : null;
-
-      if (nombre && monto) {
-        if (!GYM_TOKEN) await loginConReintentos(3, 3000);
-        const clientes = await ejecutarTool('get_clientes', { buscar: nombre }, remitente);
-        const fuertes = guards.filtrarClientesPorNombre(nombre, clientes);
-        if (fuertes.length >= 1) {
-          const cliente = fuertes[0];
-          pagosEsperandoNombre.delete(remitente); // limpiar estado residual
-          if (await hayPagoPendiente(cliente.id)) {
-            await enviarWhatsApp(remitente, `¡Ya lo tengo registrado! En breve te confirmamos 🏑`, cliente.nombre);
+      // ACUMULAR datos entre mensajes: guardamos lo que ya sabemos (ficha y/o
+      // monto) en pagosEsperandoNombre y lo MERGEAMOS con lo que venga ahora. Antes
+      // cada mensaje se parseaba aislado y el nombre guardado NUNCA se leía → el bot
+      // pedía nombre, después monto, y volvía a pedir nombre (loop infinito real).
+      const prev = pagosEsperandoNombre.get(remitente) || {};
+      // Monto: del mensaje (parser tolerante: "35", "35 mil", "29mil", "35k") o el previo.
+      const montoMsg = guards.parsearMontoPago(mensaje);
+      const monto = (montoMsg && montoMsg > 0) ? montoMsg : (prev.monto || null);
+      // Ficha: si ya la teníamos, la usamos; si no, intentamos resolverla ahora.
+      let clienteId = prev.clienteId || null;
+      let clienteNombre = prev.clienteNombre || null;
+      if (!clienteId) {
+        // Sacar montos (incluidos "29mil", "$35.000") y quedarnos con el nombre real.
+        const nombreTxt = guards.limpiarNombreBuscado(mensaje.replace(/\$?\d[\d.,]*\w*/g, ' '));
+        if (nombreTxt && nombreTxt.split(' ').filter(Boolean).length >= 2) {
+          if (!GYM_TOKEN) await loginConReintentos(3, 3000);
+          const clientes = await ejecutarTool('get_clientes', { buscar: nombreTxt }, remitente);
+          let fuertes = guards.filtrarClientesPorNombre(nombreTxt, clientes);
+          // Fallback: el cliente puso un nombre de más (2do nombre que no está en la
+          // ficha). Aceptar si la ficha está CONTENIDA en lo que escribió y es única.
+          if (fuertes.length === 0) {
+            fuertes = (Array.isArray(clientes) ? clientes : []).filter(c => guards.nombreCoincide(c && c.nombre, nombreTxt));
+          }
+          if (fuertes.length === 1) {
+            clienteId = fuertes[0].id; clienteNombre = fuertes[0].nombre;
+          } else if (fuertes.length > 1) {
+            pagosEsperandoNombre.set(remitente, { monto: monto || undefined });
+            comprobantePendiente.set(remitente, true);
+            await enviarWhatsApp(remitente, `Hay varias jugadoras que coinciden con "${nombreTxt}" 🤔 Pasame el nombre y apellido completos tal como está registrada.`);
+            return;
+          } else {
+            pagosEsperandoNombre.set(remitente, { monto: monto || undefined });
+            comprobantePendiente.set(remitente, true);
+            await enviarWhatsApp(remitente, `No encontré a "${nombreTxt}" en el sistema 🤔 Pasame el nombre y apellido de la jugadora tal como está registrada. Si escribís por tu hija, es el nombre de ella (no el tuyo) 🏑`);
             return;
           }
-          await pool.query(
-            `INSERT INTO pagos_pendientes (cliente_id, cliente_nombre, cliente_from, monto, metodo) VALUES ($1, $2, $3, $4, $5)`,
-            [cliente.id, cliente.nombre, remitente, monto, 'Transferencia']
-          );
-          const { rows: existing } = await pool.query(`SELECT COUNT(*) AS count FROM pagos_pendientes WHERE esperando_confirmacion = true`);
-          if (parseInt(existing[0].count) <= 1) {
-            const msg = `💰 Comprobante de ${cliente.nombre} - $${monto} - Transferencia\n¿Confirmás? SÍ o NO`;
-            await twilioClient.messages.create({ from: TWILIO_FROM, to: process.env.COSACO_WHATSAPP, body: msg });
-            guardarMensaje(process.env.COSACO_WHATSAPP, null, msg, 'agente');
-          }
-          await enviarWhatsApp(remitente, `Gracias! Ya le avisé al equipo, en breve te confirmamos 🏑`, cliente.nombre);
-        } else {
-          // No encontró cliente → pedir nombre de nuevo
-          comprobantePendiente.set(remitente, true);
-          await enviarWhatsApp(remitente, `No encontré a "${nombre}" en el sistema 🤔 Pasame el nombre y apellido de la jugadora tal como está registrada. Si escribís por tu hija, es el nombre de ella (no el tuyo) 🏑`);
         }
-      } else if (!nombre) {
-        comprobantePendiente.set(remitente, true);
+      }
+
+      if (clienteId && monto) {
+        comprobantePendiente.delete(remitente);
+        pagosEsperandoNombre.delete(remitente);
+        if (await hayPagoPendiente(clienteId)) {
+          await enviarWhatsApp(remitente, `¡Ya lo tengo registrado! En breve te confirmamos 🏑`, clienteNombre);
+          return;
+        }
+        await pool.query(
+          `INSERT INTO pagos_pendientes (cliente_id, cliente_nombre, cliente_from, monto, metodo) VALUES ($1, $2, $3, $4, $5)`,
+          [clienteId, clienteNombre, remitente, monto, 'Transferencia']
+        );
+        const { rows: existing } = await pool.query(`SELECT COUNT(*) AS count FROM pagos_pendientes WHERE esperando_confirmacion = true`);
+        if (parseInt(existing[0].count) <= 1) {
+          const msg = `💰 Comprobante de ${clienteNombre} - $${monto} - Transferencia\n¿Confirmás? SÍ o NO`;
+          await twilioClient.messages.create({ from: TWILIO_FROM, to: process.env.COSACO_WHATSAPP, body: msg });
+          guardarMensaje(process.env.COSACO_WHATSAPP, null, msg, 'agente');
+        }
+        await enviarWhatsApp(remitente, `¡Gracias! Ya le avisé al equipo, en breve te confirmamos 🏑`, clienteNombre);
+        return;
+      }
+
+      // Falta algo: guardar lo que tengamos y pedir SOLO lo que falta.
+      pagosEsperandoNombre.set(remitente, {
+        clienteId: clienteId || undefined,
+        clienteNombre: clienteNombre || undefined,
+        monto: monto || undefined,
+      });
+      comprobantePendiente.set(remitente, true);
+      if (!clienteId) {
         await enviarWhatsApp(remitente, `Para registrar el pago necesito el nombre y apellido de la jugadora, tal como está registrada. Si escribís por tu hija, pasame el nombre de ella (no el tuyo) 🏑`);
       } else {
-        // Tiene nombre pero falta monto
-        comprobantePendiente.set(remitente, true);
-        pagosEsperandoNombre.set(remitente, { monto: 0, metodo: 'Transferencia', nombreYaConocido: nombre });
-        await enviarWhatsApp(remitente, `¿Cuál fue el monto que transferiste?`);
+        await enviarWhatsApp(remitente, `¡Gracias ${clienteNombre.split(' ')[0]}! ¿Cuál fue el monto que transferiste? (ej: 35000)`, clienteNombre);
       }
       return;
     }
@@ -2161,12 +2188,17 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
         }
         pagosEsperandoNombre.delete(remitente);
         if (!GYM_TOKEN) await loginConReintentos(3, 3000);
-        const nombreDado = guards.limpiarNombreBuscado(mensaje) || mensaje.trim();
+        const nombreDado = guards.limpiarNombreBuscado(mensaje.replace(/\$?\d[\d.,]*\w*/g, ' ')) || mensaje.trim();
         const clientes = await ejecutarTool('get_clientes', { buscar: nombreDado }, remitente);
-        const fuertes = guards.filtrarClientesPorNombre(nombreDado, clientes);
+        let fuertes = guards.filtrarClientesPorNombre(nombreDado, clientes);
+        // Fallback: el cliente agregó un 2do nombre que no está en la ficha.
+        if (fuertes.length === 0) {
+          fuertes = (Array.isArray(clientes) ? clientes : []).filter(c => guards.nombreCoincide(c && c.nombre, nombreDado));
+        }
         if (fuertes.length >= 1) {
           const cliente = fuertes[0];
-          const montoDP = Number(datosPago.monto) || 0;
+          // Monto: el que ya sabíamos, o si el cliente lo mandó junto con el nombre.
+          const montoDP = Number(datosPago.monto) || guards.parsearMontoPago(mensaje) || 0;
           // FIX $0: si no sabemos el monto, preguntarlo en vez de encolar $0
           if (!(montoDP > 0)) {
             montoPendiente.set(remitente, { clienteId: cliente.id, clienteNombre: cliente.nombre, metodo: datosPago.metodo || 'Transferencia' });

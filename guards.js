@@ -94,6 +94,32 @@ function parsearMonto(texto) {
   return Number.isFinite(n) ? n : null;
 }
 
+// Igual que parsearMonto pero PENSADO PARA PAGOS del gimnasio, donde la gente
+// escribe informal: "35", "35 mil", "35mil", "35k", "42 lucas", "35mio" (typo de
+// "mil"). Como los planes son de decenas de miles, un número "pelado" de 1-3
+// dígitos se interpreta como miles (35 → 35000). Devuelve null si no hay monto.
+function parsearMontoPago(texto) {
+  const t = String(texto || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+  if (!t.trim()) return null;
+  // 1) Formateado con miles (35.000) o número de 4+ dígitos (35000, 42000)
+  let m = t.match(/\$?\s*(\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{1,2})?|\d{4,})/);
+  if (m) {
+    const raw = m[1].replace(/[.,](?=\d{3}\b)/g, '').replace(',', '.');
+    const n = parseFloat(raw);
+    if (Number.isFinite(n)) return n;
+  }
+  // 2) "35 mil" / "35mil" / "35k" / "35 lucas" / "35mio" / "35mik" (typos) → ×1000
+  m = t.match(/(\d{1,3})\s*(mil\w*|mi\w+|lu\w*|palos?|k)\b/);
+  if (m) return parseInt(m[1], 10) * 1000;
+  // 3) Número pelado de 1-3 dígitos (en contexto de pago) → miles: "35" → 35000
+  m = t.match(/(?:^|[^\d])(\d{1,3})(?:[^\d]|$)/);
+  if (m) {
+    const n = parseInt(m[1], 10);
+    if (n >= 1 && n <= 999) return n * 1000;
+  }
+  return null;
+}
+
 // ── RESOLUCIÓN DE NOMBRES (evitar registrar pagos al cliente equivocado) ─────
 // Bug histórico: el bot buscaba "Martina Munar", la API devolvía también a
 // "Martina Chaparro" (match por el nombre de pila) y el código agarraba el
@@ -151,6 +177,8 @@ function limpiarNombreBuscado(texto) {
     'carga', 'cargar', 'cargá', 'cargale', 'anota', 'anotar', 'anotá', 'cobre', 'cobrar', 'cobré',
     'siguiente', 'siguientes', 'jugadora', 'jugadoras', 'jugador', 'jugadores',
     'alumna', 'alumnas', 'alumno', 'alumnos', 'chica', 'chicas', 'chico', 'chicos',
+    'mil', 'miles', 'mio', 'mik', 'mils', 'luca', 'lucas', 'palo', 'palos', 'k',
+    'pagado', 'pagada', 'pagados', 'ya', 'esta', 'listo', 'lista',
   ]);
   t = t.split(/\s+/).filter(w => w && !stop.has(w) && !/^\d/.test(w)).join(' ');
   return t.trim();
@@ -329,6 +357,7 @@ module.exports = {
   esPromesaFutura,
   esComandoConfirmarPagos,
   parsearMonto,
+  parsearMontoPago,
   parsearPagosLibres,
   esPedidoDeRegistroPago,
   montoValido,
