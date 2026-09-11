@@ -23,6 +23,27 @@ const TWILIO_FROM = process.env.TWILIO_WHATSAPP_NUMBER?.startsWith('whatsapp:')
   ? process.env.TWILIO_WHATSAPP_NUMBER
   : `whatsapp:${process.env.TWILIO_WHATSAPP_NUMBER}`;
 let GYM_TOKEN = null;
+
+// ── OPERADORES DEL BOT ───────────────────────────────────────────────────────
+// Quiénes pueden operar el bot por WhatsApp (registrar pagos, asignar turnos…) y
+// quién recibe las confirmaciones/avisos. Cosaco delegó el día a día en el
+// administrativo: el ADMIN recibe las confirmaciones y avisos operativos; Cosaco
+// solo el resumen diario (AUDITOR) a las 22 h. AMBOS pueden operar cuando quieran.
+// Si no está seteado ADMIN_WHATSAPP, todo cae en Cosaco (comportamiento anterior).
+const OPERADORES = [process.env.COSACO_WHATSAPP, process.env.ADMIN_WHATSAPP].filter(Boolean);
+// Normalizados a "whatsapp:+549…" para que sirvan como destino de Twilio sin
+// importar en qué formato se carguen las variables de entorno.
+const CONFIRMADOR = guards.normalizarWhatsApp(process.env.ADMIN_WHATSAPP || process.env.COSACO_WHATSAPP); // confirmaciones/avisos
+const AUDITOR = guards.normalizarWhatsApp(process.env.COSACO_WHATSAPP);                                   // resumen diario
+function esOperador(tel) {
+  if (!tel) return false;
+  const n = guards.telefonoNacional(tel);
+  return OPERADORES.some(o => guards.telefonoNacional(o) === n);
+}
+// A quién contestarle sobre temas de "jefe": si escribe un OPERADOR, a él mismo
+// (está operando); si lo dispara un cliente, al CONFIRMADOR (admin).
+function jefeDe(remitente) { return esOperador(remitente) ? remitente : CONFIRMADOR; }
+
 const pagosEsperandoNombre = new Map(); // telefono → { monto, metodo }
 const comprobantePendiente = new Map(); // telefono → true (mandó imagen/comprobante)
 const cobrosPendientesDatos = new Map(); // telefonoCosaco → { nombreCliente, metodo, clienteId, clienteNombre }
@@ -701,7 +722,7 @@ async function ejecutarTool(nombre, input, remitente) {
         try { await fetch(`${GYM_API}/clientes/${existente.id}/seguimiento`, { method: 'POST', headers }); }
         catch (e) { console.warn('alta seguimiento (reactivado):', e.message); }
         try {
-          await enviarWhatsApp(process.env.COSACO_WHATSAPP,
+          await enviarWhatsApp(jefeDe(remitente),
             `🔄 ${existente.nombre} (estado: ${existente.estado}) volvió y pidió turnos. Se reutilizó su ficha existente (no se duplicó) y quedó en *seguimiento*.\n\nSigue figurando como ${existente.estado}. Cuando registres su pago, te voy a pedir que confirmes la fecha de inicio (su última asistencia).`);
         } catch (e) { console.warn('aviso reactivacion:', e.message); }
       }
@@ -732,14 +753,14 @@ async function ejecutarTool(nombre, input, remitente) {
           // autorización. (FIX: antes se guardaba solo el primero, y al
           // autorizar se cargaba 1 solo turno de los que pidió.)
           const turnoIds = (input.turno_ids_agregar || []).slice();
-          tercerTurnoPendiente.set(process.env.COSACO_WHATSAPP, {
+          tercerTurnoPendiente.set(jefeDe(remitente), {
             clienteId: input.cliente_id,
             clienteNombre: input.cliente_nombre || cliData.nombre,
             turnoIds,
             quitarIds: (input.turno_ids_quitar || []).slice(),
             clienteFrom: remitente,
           });
-          await enviarWhatsApp(process.env.COSACO_WHATSAPP,
+          await enviarWhatsApp(jefeDe(remitente),
             `⚠️ ${cliData.nombre} tiene ${turnosActuales} turno(s) y pide agregar ${turnoIds.length} más (quedaría con ${turnosPost}). ¿Autorizás TODOS? SÍ o NO`);
           return { ok: false, requiere_autorizacion: true, mensaje: 'Tu solicitud fue enviada al equipo para autorización. En breve te confirmamos 🏑' };
         }
@@ -768,15 +789,15 @@ async function ejecutarTool(nombre, input, remitente) {
     if (nombre === 'derivar_a_cosaco') {
       // La IA no entendió / no puede resolver → avisar a Cosaco y NO responder al
       // cliente. Solo para clientes (si escribe Cosaco, no tiene sentido avisarse).
-      if (remitente === process.env.COSACO_WHATSAPP) {
-        return { ok: true, instruccion: 'Respondé normalmente (esto lo escribió Cosaco).' };
+      if (esOperador(remitente)) {
+        return { ok: true, instruccion: 'Respondé normalmente (esto lo escribió un operador).' };
       }
       const cli = await buscarClientePorTelefono(remitente).catch(() => null);
       const quien = cli ? cli.nombre : String(remitente).replace('whatsapp:', '');
       const ultimo = derivacionAvisada.get(remitente) || 0;
       if (Date.now() - ultimo > 20 * 60000) { // throttle 20 min por cliente
         derivacionAvisada.set(remitente, Date.now());
-        await enviarWhatsApp(process.env.COSACO_WHATSAPP,
+        await enviarWhatsApp(jefeDe(remitente),
           `🤖❓ No supe responderle a *${quien}*.\nPidió: "${String(input.motivo || '').slice(0, 220)}"\n(De: ${String(remitente).replace('whatsapp:', '')})\n\nTomá vos la conversación y respondele 🏑`).catch(() => {});
         logActividad('no_entendio', `${quien}: ${String(input.motivo || '').slice(0, 80)}`, null, remitente);
       }
@@ -785,9 +806,9 @@ async function ejecutarTool(nombre, input, remitente) {
 
     if (nombre === 'notificar_cosaco') {
       const quien = input.cliente_nombre ? `${input.cliente_nombre}: ` : '';
-      const desde = remitente && remitente !== process.env.COSACO_WHATSAPP
+      const desde = remitente && !esOperador(remitente)
         ? `\n(De: ${String(remitente).replace('whatsapp:', '')})` : '';
-      await enviarWhatsApp(process.env.COSACO_WHATSAPP, `📣 ${quien}${input.motivo}${desde}`);
+      await enviarWhatsApp(jefeDe(remitente), `📣 ${quien}${input.motivo}${desde}`);
       logActividad('aviso_cosaco', `${quien}${input.motivo}`, null, remitente);
       return { ok: true, avisado: true, nota: 'Cosaco ya fue notificado. Ahora sí podés decirle al cliente que el equipo está al tanto.' };
     }
@@ -840,8 +861,8 @@ async function ejecutarTool(nombre, input, remitente) {
       if (parseInt(rows[0].count) > 1) return { ok: true, encolado: true };
       const msg = `💰 Confirmacion de pago\nCliente: ${cnombre}\nMonto: $${input.monto}\nMetodo: ${metodo}\n¿Confirmas? SI o NO`;
       try {
-        await twilioClient.messages.create({ from: TWILIO_FROM, to: process.env.COSACO_WHATSAPP, body: msg });
-        guardarMensaje(process.env.COSACO_WHATSAPP, null, msg, 'agente');
+        await twilioClient.messages.create({ from: TWILIO_FROM, to: jefeDe(remitente), body: msg });
+        guardarMensaje(jefeDe(remitente), null, msg, 'agente');
       } catch (err) {
         console.error('Error notificando pago a Cosaco:', err.message);
       }
@@ -851,7 +872,7 @@ async function ejecutarTool(nombre, input, remitente) {
     if (nombre === 'cargar_pago_cosaco') {
       // Exclusivo de Cosaco: carga un pago (típicamente efectivo) para que él lo
       // reconfirme con SÍ. Seguro: solo encola, la confirmación real es de Cosaco.
-      if (remitente !== process.env.COSACO_WHATSAPP) {
+      if (!esOperador(remitente)) {
         return { ok: false, error: 'Solo Cosaco puede cargar pagos de esta forma.' };
       }
       const monto = Number(input.monto);
@@ -886,7 +907,7 @@ async function ejecutarTool(nombre, input, remitente) {
 
     if (nombre === 'enviar_link_grupo') {
       // Exclusivo de Cosaco: manda el link del grupo de WhatsApp a un cliente.
-      if (remitente !== process.env.COSACO_WHATSAPP) {
+      if (!esOperador(remitente)) {
         return { ok: false, error: 'Solo Cosaco puede enviar el link del grupo.' };
       }
       if (!GYM_TOKEN) await loginConReintentos(3, 3000);
@@ -922,7 +943,7 @@ async function ejecutarTool(nombre, input, remitente) {
 
     if (nombre === 'agregar_a_seguimiento') {
       // Exclusivo de Cosaco: agrega un alumno a la lista de seguimiento de conversión.
-      if (remitente !== process.env.COSACO_WHATSAPP) {
+      if (!esOperador(remitente)) {
         return { ok: false, error: 'Solo Cosaco puede anotar alumnos en seguimiento.' };
       }
       if (!GYM_TOKEN) await loginConReintentos(3, 3000);
@@ -1107,7 +1128,7 @@ async function resolverYEncolarPago(remitente, nombreBuscar, monto, metodo) {
 }
 
 // Muestra el siguiente pago pendiente (uno por uno) o avisa que no quedan.
-async function mostrarSiguientePendiente() {
+async function mostrarSiguientePendiente(destino = CONFIRMADOR) {
   const { rows: sig } = await pool.query(
     `SELECT * FROM pagos_pendientes WHERE esperando_confirmacion = true ORDER BY id ASC LIMIT 1`
   );
@@ -1115,10 +1136,10 @@ async function mostrarSiguientePendiente() {
     `SELECT COUNT(*)::int AS n FROM pagos_pendientes WHERE esperando_confirmacion = true`
   );
   if (sig.length > 0) {
-    await enviarWhatsApp(process.env.COSACO_WHATSAPP,
+    await enviarWhatsApp(destino,
       `💰 Pago pendiente (quedan ${cnt[0].n})\nCliente: ${sig[0].cliente_nombre}\nMonto: $${sig[0].monto}\nMétodo: ${sig[0].metodo}\n\n¿Confirmás? SÍ o NO`);
   } else {
-    await enviarWhatsApp(process.env.COSACO_WHATSAPP, '✅ No quedan pagos pendientes de confirmar.');
+    await enviarWhatsApp(destino, '✅ No quedan pagos pendientes de confirmar.');
   }
   return sig.length;
 }
@@ -1194,12 +1215,15 @@ async function finalizarPagoConFecha(remitente, fd, fechaInicio) {
   await enviarWhatsApp(remitente,
     `✅ ${fd.pago.cliente_nombre} reactivada y al día.\n📅 Fecha de inicio: ${fmtFechaAR(fechaInicio)}\n⏳ Vence: ${fmtFechaAR(venc)}`);
   logActividad('pago_confirmado', `${fd.pago.cliente_nombre} (${fd.pago.metodo}, inicio ${fechaInicio})`, fd.pago.monto, fd.pago.cliente_from);
-  await mostrarSiguientePendiente();
+  await mostrarSiguientePendiente(remitente);
 }
 
-async function manejarConfirmacionPago(mensajeUpper, pago) {
+// `destino` = a quién le hablamos durante la confirmación (el operador que
+// respondió SÍ/NO). Por defecto el CONFIRMADOR (admin), que es quien recibe la
+// cola de pagos de clientes.
+async function manejarConfirmacionPago(mensajeUpper, pago, destino = CONFIRMADOR) {
   if (mensajeUpper === 'SIGUIENTE') {
-    await enviarWhatsApp(process.env.COSACO_WHATSAPP,
+    await enviarWhatsApp(destino,
       `💰 *Confirmación de pago*\nCliente: ${pago.cliente_nombre}\nMonto: $${pago.monto}\nMétodo: ${pago.metodo}\n¿Confirmás? SÍ o NO`);
     return;
   }
@@ -1218,7 +1242,7 @@ async function manejarConfirmacionPago(mensajeUpper, pago) {
       clienteInfo = await getClienteConReintento(pago.cliente_id);
     }
     if (!clienteInfo) {
-      const clientes = await ejecutarTool('get_clientes', { buscar: guards.limpiarNombreBuscado(pago.cliente_nombre) || pago.cliente_nombre }, process.env.COSACO_WHATSAPP);
+      const clientes = await ejecutarTool('get_clientes', { buscar: guards.limpiarNombreBuscado(pago.cliente_nombre) || pago.cliente_nombre }, destino);
       const fuertes = guards.filtrarClientesPorNombre(pago.cliente_nombre, clientes);
       if (fuertes.length === 1) {
         clienteInfo = fuertes[0];
@@ -1226,13 +1250,13 @@ async function manejarConfirmacionPago(mensajeUpper, pago) {
         await pool.query(`UPDATE pagos_pendientes SET cliente_id = $1 WHERE id = $2`, [clienteInfo.id, pago.id]).catch(() => {});
         console.log(`Reparado cliente_id del pago ${pago.id}: ${pago.cliente_nombre} → ${clienteInfo.id}`);
       } else if (fuertes.length > 1) {
-        await enviarWhatsApp(process.env.COSACO_WHATSAPP,
+        await enviarWhatsApp(destino,
           `⚠️ El pago de ${pago.cliente_nombre} quedó con la ficha mal cargada y hay VARIAS con ese nombre. Cargalo de nuevo con nombre y apellido completos (o desde el panel). El pago sigue en la cola.`);
         return;
       }
     }
     if (!clienteInfo) {
-      await enviarWhatsApp(process.env.COSACO_WHATSAPP,
+      await enviarWhatsApp(destino,
         `⚠️ No pude encontrar la ficha de ${pago.cliente_nombre} (quedó mal cargada, id inválido). El pago NO se perdió: sigue en la cola. Cargalo de nuevo indicando el nombre completo, o registralo desde el panel.`);
       return;
     }
@@ -1241,8 +1265,8 @@ async function manejarConfirmacionPago(mensajeUpper, pago) {
     if (enSeguimiento) {
       const ultima = await ultimaAsistenciaISO(pago.cliente_id);
       const propuesta = ultima || new Date().toISOString().split('T')[0];
-      fechaInicioPagoPendiente.set(process.env.COSACO_WHATSAPP, { pago, plan: clienteInfo.plan, propuesta });
-      await enviarWhatsApp(process.env.COSACO_WHATSAPP,
+      fechaInicioPagoPendiente.set(destino, { pago, plan: clienteInfo.plan, propuesta });
+      await enviarWhatsApp(destino,
         `📅 Antes de registrar el pago de *${pago.cliente_nombre}*:\nSu fecha de inicio sería su *última asistencia*: ${fmtFechaAR(propuesta)}${ultima ? '' : ' (no tiene asistencias cargadas, usé hoy)'}.\n\n¿Confirmás esa fecha? Respondé *SÍ*, o mandame otra (ej: 20/08/2026).`);
       return; // NO se escribe el pago todavía; el pendiente queda en cola
     }
@@ -1259,7 +1283,7 @@ async function manejarConfirmacionPago(mensajeUpper, pago) {
 
     if (!registrado) {
       // NO se borra el pendiente: el pago sigue en cola para reintentar.
-      await enviarWhatsApp(process.env.COSACO_WHATSAPP,
+      await enviarWhatsApp(destino,
         `⚠️ NO pude registrar el pago de ${pago.cliente_nombre} ($${pago.monto}) en el sistema. Quedó pendiente para reintentar. Probá de nuevo en un minuto o cargalo desde el panel.`);
       return; // no avanza: el mismo pago sigue siendo el primero
     }
@@ -1277,7 +1301,7 @@ async function manejarConfirmacionPago(mensajeUpper, pago) {
   }
 
   // Avanzar al siguiente, de a uno
-  await mostrarSiguientePendiente();
+  await mostrarSiguientePendiente(destino);
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -1315,8 +1339,8 @@ async function encolarPagoDesdeMenu(remitente, clienteId, clienteNombre, monto, 
   const { rows: existing } = await pool.query(`SELECT COUNT(*) AS count FROM pagos_pendientes WHERE esperando_confirmacion = true`);
   if (parseInt(existing[0].count) <= 1) {
     const msg = `💰 ${clienteNombre} - $${monto} - ${metodo}\n¿Confirmás? SÍ o NO`;
-    await twilioClient.messages.create({ from: TWILIO_FROM, to: process.env.COSACO_WHATSAPP, body: msg });
-    guardarMensaje(process.env.COSACO_WHATSAPP, null, msg, 'agente');
+    await twilioClient.messages.create({ from: TWILIO_FROM, to: jefeDe(remitente), body: msg });
+    guardarMensaje(jefeDe(remitente), null, msg, 'agente');
   }
   logActividad('pago_menu', `${clienteNombre} ($${monto} ${metodo})`, monto, remitente);
   await enviarWhatsApp(remitente,
@@ -1548,7 +1572,7 @@ async function manejarMenu(remitente, mensaje, profileName) {
     menuEstado.delete(remitente);
     const cli = await buscarClientePorTelefono(remitente).catch(() => null);
     const quien = cli ? cli.nombre : (profileName || remitente.replace('whatsapp:', ''));
-    await enviarWhatsApp(process.env.COSACO_WHATSAPP, `📅 *${quien}* pide modificar turnos:\n"${mensaje.slice(0, 250)}"`);
+    await enviarWhatsApp(jefeDe(remitente), `📅 *${quien}* pide modificar turnos:\n"${mensaje.slice(0, 250)}"`);
     logActividad('pedido_turnos', quien, null, remitente);
     await enviarWhatsApp(remitente, `¡Listo! Le pasé tu pedido al equipo, en breve te responden 🏑`);
     return;
@@ -1559,7 +1583,7 @@ async function manejarMenu(remitente, mensaje, profileName) {
     menuEstado.delete(remitente);
     const cli = await buscarClientePorTelefono(remitente).catch(() => null);
     const quien = cli ? cli.nombre : (profileName || remitente.replace('whatsapp:', ''));
-    await enviarWhatsApp(process.env.COSACO_WHATSAPP, `✉️ Mensaje de *${quien}* para el equipo:\n"${mensaje.slice(0, 400)}"`);
+    await enviarWhatsApp(jefeDe(remitente), `✉️ Mensaje de *${quien}* para el equipo:\n"${mensaje.slice(0, 400)}"`);
     logActividad('mensaje_equipo', quien, null, remitente);
     await enviarWhatsApp(remitente, `¡Recibido! Le hice llegar tu mensaje al equipo 🏑`);
     return;
@@ -1571,8 +1595,10 @@ async function manejarMenu(remitente, mensaje, profileName) {
 
 async function procesarMensaje(mensaje, remitente, profileName = null) {
   try {
-    const esCosaco = remitente === process.env.COSACO_WHATSAPP;
-    console.log('remitente:', remitente, '| esCosaco:', esCosaco);
+    // "esCosaco" ahora significa "es un OPERADOR" (Cosaco o el administrativo).
+    // Se mantiene el nombre de la variable para no tocar las ~10 ramas de abajo.
+    const esCosaco = esOperador(remitente);
+    console.log('remitente:', remitente, '| esOperador:', esCosaco);
 
     // "Tomar el control": si Cosaco pausó esta conversación, el bot NO responde.
     // El mensaje del cliente ya se guardó en el webhook, así que Cosaco lo ve en
@@ -1609,7 +1635,7 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
             guardarMensaje(remitente, datos.nombre, texto, 'agente');
           } else {
             await enviarWhatsApp(remitente, 'Ya tomamos nota, en breve te confirmamos tu lugar 🏑', datos.nombre);
-            await enviarWhatsApp(process.env.COSACO_WHATSAPP, `⚠️ Error al registrar a ${datos.nombre}: ${resultado.error}`);
+            await enviarWhatsApp(jefeDe(remitente), `⚠️ Error al registrar a ${datos.nombre}: ${resultado.error}`);
           }
           return;
         }
@@ -1637,7 +1663,7 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
         lesionAvisada.set(remitente, Date.now());
         const cliL = await buscarClientePorTelefono(remitente).catch(() => null);
         const quien = cliL ? cliL.nombre : (profileName || String(remitente).replace('whatsapp:', ''));
-        enviarWhatsApp(process.env.COSACO_WHATSAPP,
+        enviarWhatsApp(jefeDe(remitente),
           `🩹 ${quien} mencionó una lesión:\n"${mensaje.slice(0, 180)}"\nRevisá si conviene suspenderle el servicio hasta que se recupere. (Solo aviso — no hice nada automático)`).catch(() => {});
         logActividad('lesion', quien, null, remitente);
       }
@@ -1664,8 +1690,8 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
           const { rows: existing } = await pool.query(`SELECT COUNT(*) AS count FROM pagos_pendientes WHERE esperando_confirmacion = true`);
           if (parseInt(existing[0].count) <= 1) {
             const msg = `💰 ${datos.clienteNombre} - $${monto} - ${datos.metodo || 'Transferencia'}\n¿Confirmás? SÍ o NO`;
-            await twilioClient.messages.create({ from: TWILIO_FROM, to: process.env.COSACO_WHATSAPP, body: msg });
-            guardarMensaje(process.env.COSACO_WHATSAPP, null, msg, 'agente');
+            await twilioClient.messages.create({ from: TWILIO_FROM, to: jefeDe(remitente), body: msg });
+            guardarMensaje(jefeDe(remitente), null, msg, 'agente');
           }
         }
         await enviarWhatsApp(remitente, `¡Perfecto! Ya le avisé al equipo, en breve te confirmamos 🏑`, datos.clienteNombre);
@@ -1737,8 +1763,8 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
         const { rows: existing } = await pool.query(`SELECT COUNT(*) AS count FROM pagos_pendientes WHERE esperando_confirmacion = true`);
         if (parseInt(existing[0].count) <= 1) {
           const msg = `💰 Comprobante de ${clienteNombre} - $${monto} - Transferencia\n¿Confirmás? SÍ o NO`;
-          await twilioClient.messages.create({ from: TWILIO_FROM, to: process.env.COSACO_WHATSAPP, body: msg });
-          guardarMensaje(process.env.COSACO_WHATSAPP, null, msg, 'agente');
+          await twilioClient.messages.create({ from: TWILIO_FROM, to: jefeDe(remitente), body: msg });
+          guardarMensaje(jefeDe(remitente), null, msg, 'agente');
         }
         await enviarWhatsApp(remitente, `¡Gracias! Ya le avisé al equipo, en breve te confirmamos 🏑`, clienteNombre);
         return;
@@ -1869,11 +1895,11 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
           else resumen += `• ${p.nombre} — $${fmt(p.monto)} ${p.metodo}\n`;
         }
         if (cola.length > 0) {
-          await enviarWhatsApp(process.env.COSACO_WHATSAPP, resumen.trim());
-          await mostrarSiguientePendiente();   // arranca la confirmación de a uno (SÍ/NO)
+          await enviarWhatsApp(jefeDe(remitente), resumen.trim());
+          await mostrarSiguientePendiente(remitente);   // arranca la confirmación de a uno (SÍ/NO)
         } else {
           resumen += `\nNo pude encolar ninguno. Escribime "Nombre Apellido $monto" (podés poner varios).`;
-          await enviarWhatsApp(process.env.COSACO_WHATSAPP, resumen.trim());
+          await enviarWhatsApp(jefeDe(remitente), resumen.trim());
         }
         return;
       }
@@ -1889,7 +1915,7 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
         const { rows: susps } = await pool.query(`SELECT * FROM suspensiones_pendientes WHERE esperando_confirmacion = true ORDER BY timestamp ASC`);
         console.log('Pagos pendientes:', pagos.length, '| Suspensiones:', susps.length);
         if (pagos.length === 0 && susps.length === 0) {
-          await enviarWhatsApp(process.env.COSACO_WHATSAPP, '✅ No hay pendientes de confirmación');
+          await enviarWhatsApp(jefeDe(remitente), '✅ No hay pendientes de confirmación');
           return;
         }
         // Resumen breve + arrancar la confirmación de a uno
@@ -1897,14 +1923,14 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
           let res = `📋 Tenés ${pagos.length} pago(s) para confirmar, de a uno:\n`;
           for (const p of pagos) res += `• ${p.cliente_nombre} — $${p.monto} ${p.metodo}\n`;
           res += `\nEmpecemos 👇`;
-          await enviarWhatsApp(process.env.COSACO_WHATSAPP, res);
-          await mostrarSiguientePendiente();
+          await enviarWhatsApp(remitente, res);
+          await mostrarSiguientePendiente(remitente);
         }
         if (susps.length > 0) {
           let res = `⚠️ Suspensiones pendientes (${susps.length}):\n`;
           for (const s of susps) res += `- ${s.cliente_nombre}\n`;
           res += `Respondé SÍ o NO para cada una cuando termines los pagos.`;
-          await enviarWhatsApp(process.env.COSACO_WHATSAPP, res);
+          await enviarWhatsApp(jefeDe(remitente), res);
         }
         return;
       }
@@ -1929,17 +1955,17 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
           }
           logActividad('turnos_asignados', `${datos.clienteNombre}: ${ok.length} turno(s) autorizados`, ok.length, datos.clienteFrom);
           if (mal.length === 0) {
-            await enviarWhatsApp(process.env.COSACO_WHATSAPP, `✅ ${ok.length} turno(s) asignados a ${datos.clienteNombre}`);
+            await enviarWhatsApp(jefeDe(remitente), `✅ ${ok.length} turno(s) asignados a ${datos.clienteNombre}`);
             await enviarWhatsApp(datos.clienteFrom, `¡Listo! Tus ${ok.length} turno(s) fueron autorizados y asignados 🏑`, datos.clienteNombre);
           } else {
-            await enviarWhatsApp(process.env.COSACO_WHATSAPP,
+            await enviarWhatsApp(jefeDe(remitente),
               `⚠️ ${datos.clienteNombre}: asigné ${ok.length}, fallaron ${mal.length} (turnos ${mal.join(', ')} — ¿llenos o bloqueados?). Revisá la grilla.`);
             await enviarWhatsApp(datos.clienteFrom,
               ok.length ? `Se asignaron ${ok.length} de tus turnos; el equipo está revisando el resto 🏑` : `Hubo un problema con la asignación; el equipo lo está revisando 🏑`,
               datos.clienteNombre);
           }
         } else {
-          await enviarWhatsApp(process.env.COSACO_WHATSAPP, `👍 3er turno de ${datos.clienteNombre} no autorizado`);
+          await enviarWhatsApp(jefeDe(remitente), `👍 3er turno de ${datos.clienteNombre} no autorizado`);
           await enviarWhatsApp(datos.clienteFrom,
             `Tu solicitud no fue aprobada por el momento. Podés elegir cambiar uno de tus turnos actuales si querés 🏑`, datos.clienteNombre);
         }
@@ -1951,7 +1977,7 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
         `SELECT * FROM pagos_pendientes WHERE esperando_confirmacion = true ORDER BY id ASC LIMIT 1`
       );
       if (pagosPend.length > 0 && esSiNo) {
-        await manejarConfirmacionPago(mensajeUpper, pagosPend[0]);
+        await manejarConfirmacionPago(mensajeUpper, pagosPend[0], remitente);
         return;
       }
 
@@ -1993,15 +2019,15 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
           await fetch(`${GYM_API}/clientes/${susp.cliente_id}/suspender`, {
             method: 'DELETE', headers: { Authorization: `Bearer ${GYM_TOKEN}` }
           });
-          await enviarWhatsApp(process.env.COSACO_WHATSAPP, `✅ ${susp.cliente_nombre} suspendido correctamente`);
+          await enviarWhatsApp(jefeDe(remitente), `✅ ${susp.cliente_nombre} suspendido correctamente`);
         } else {
-          await enviarWhatsApp(process.env.COSACO_WHATSAPP, `👍 Ok, ${susp.cliente_nombre} no fue suspendido`);
+          await enviarWhatsApp(jefeDe(remitente), `👍 Ok, ${susp.cliente_nombre} no fue suspendido`);
         }
         const { rows: sig } = await pool.query(
           `SELECT * FROM suspensiones_pendientes WHERE esperando_confirmacion = true ORDER BY timestamp ASC LIMIT 1`
         );
         if (sig.length > 0) {
-          await enviarWhatsApp(process.env.COSACO_WHATSAPP,
+          await enviarWhatsApp(jefeDe(remitente),
             `⚠️ Siguiente: ${sig[0].cliente_nombre} lleva días sin pagar. ¿Suspendo? SÍ o NO`);
         }
         return;
@@ -2018,7 +2044,7 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
           : datos.metodo || 'Transferencia';
         if (!(monto > 0)) {
           cobrosPendientesDatos.set(remitente, datos); // seguir esperando un monto válido
-          await enviarWhatsApp(process.env.COSACO_WHATSAPP, `⚠️ Ese monto no es válido. ¿Cuál fue el monto de ${datos.clienteNombre}?`);
+          await enviarWhatsApp(jefeDe(remitente), `⚠️ Ese monto no es válido. ¿Cuál fue el monto de ${datos.clienteNombre}?`);
           return;
         }
         await pool.query(`DELETE FROM pagos_pendientes WHERE esperando_confirmacion = true AND cliente_id = $1`, [datos.clienteId]);
@@ -2028,9 +2054,9 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
         );
         const { rows: existing } = await pool.query(`SELECT COUNT(*) AS count FROM pagos_pendientes WHERE esperando_confirmacion = true`);
         if (parseInt(existing[0].count) > 1) {
-          await enviarWhatsApp(process.env.COSACO_WHATSAPP, `✅ Pago de ${datos.clienteNombre} $${monto} encolado`);
+          await enviarWhatsApp(jefeDe(remitente), `✅ Pago de ${datos.clienteNombre} $${monto} encolado`);
         } else {
-          await enviarWhatsApp(process.env.COSACO_WHATSAPP,
+          await enviarWhatsApp(jefeDe(remitente),
             `💰 ${datos.clienteNombre} - $${monto} - ${metodo}\n¿Confirmás? SÍ o NO`);
         }
         return;
@@ -2061,17 +2087,17 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
           if (fuertes.length === 1) {
             const cliente = fuertes[0];
             cobrosPendientesDatos.set(remitente, { nombreCliente: nombreBuscar, metodo, clienteId: cliente.id, clienteNombre: cliente.nombre });
-            await enviarWhatsApp(process.env.COSACO_WHATSAPP, `Encontré a ${cliente.nombre}. ¿Cuál fue el monto?`);
+            await enviarWhatsApp(jefeDe(remitente), `Encontré a ${cliente.nombre}. ¿Cuál fue el monto?`);
             return;
           }
           if (fuertes.length > 1) {
             seleccionPagoPendiente.set(remitente, { candidatos: fuertes, monto: null, metodo });
             let msg = `Hay ${fuertes.length} fichas de "${nombreBuscar}". ¿Cuál? Respondé el número:\n`;
             fuertes.forEach((c, i) => { msg += `${i + 1}. ${c.nombre}${c.estado ? ' — ' + c.estado : ''}\n`; });
-            await enviarWhatsApp(process.env.COSACO_WHATSAPP, msg.trim());
+            await enviarWhatsApp(jefeDe(remitente), msg.trim());
             return;
           }
-          await enviarWhatsApp(process.env.COSACO_WHATSAPP, `⚠️ No encontré una ficha que coincida con "${nombreBuscar}". Verificá el nombre completo.`);
+          await enviarWhatsApp(jefeDe(remitente), `⚠️ No encontré una ficha que coincida con "${nombreBuscar}". Verificá el nombre completo.`);
           return;
         }
 
@@ -2092,9 +2118,9 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
             `INSERT INTO suspensiones_pendientes (cliente_id, cliente_nombre, esperando_confirmacion) VALUES ($1, $2, true)`,
             [cliente.id, cliente.nombre]
           );
-          await enviarWhatsApp(process.env.COSACO_WHATSAPP, `⚠️ ¿Suspendés a ${cliente.nombre}? SÍ o NO`);
+          await enviarWhatsApp(jefeDe(remitente), `⚠️ ¿Suspendés a ${cliente.nombre}? SÍ o NO`);
         } else {
-          await enviarWhatsApp(process.env.COSACO_WHATSAPP, `⚠️ No encontré cliente con el nombre "${nombreBuscar}"`);
+          await enviarWhatsApp(jefeDe(remitente), `⚠️ No encontré cliente con el nombre "${nombreBuscar}"`);
         }
         return;
       }
@@ -2216,8 +2242,8 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
           const { rows: existing } = await pool.query(`SELECT COUNT(*) AS count FROM pagos_pendientes WHERE esperando_confirmacion = true`);
           if (parseInt(existing[0].count) <= 1) {
             const msg = `💰 ${cliente.nombre} - $${montoDP} - ${datosPago.metodo || 'Transferencia'}\n¿Confirmás? SÍ o NO`;
-            await twilioClient.messages.create({ from: TWILIO_FROM, to: process.env.COSACO_WHATSAPP, body: msg });
-            guardarMensaje(process.env.COSACO_WHATSAPP, null, msg, 'agente');
+            await twilioClient.messages.create({ from: TWILIO_FROM, to: jefeDe(remitente), body: msg });
+            guardarMensaje(jefeDe(remitente), null, msg, 'agente');
           }
           await enviarWhatsApp(remitente, `Gracias! Ya le avisé al equipo, en breve te confirmamos 🏑`, cliente.nombre);
         } else {
@@ -2238,7 +2264,7 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
         if (Date.now() - ultimo > 6 * 3600000) {
           ausenciaAvisada.set(remitente, Date.now());
           const estado = cliA ? ` (estado: ${cliA.estado})` : '';
-          enviarWhatsApp(process.env.COSACO_WHATSAPP,
+          enviarWhatsApp(jefeDe(remitente),
             `⏸️ ${quien}${estado} avisó que dejaría de asistir / no viene un tiempo:\n"${mensaje.slice(0, 160)}"\n\nRevisá la conversación por si conviene suspender el servicio. (Solo aviso — no hice nada automático)`).catch(() => {});
           logActividad('aviso_ausencia', quien, null, remitente);
         }
@@ -2261,7 +2287,7 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
         const ultimo = promesaAvisada.get(remitente) || 0;
         if (Date.now() - ultimo > 3600000) {
           promesaAvisada.set(remitente, Date.now());
-          enviarWhatsApp(process.env.COSACO_WHATSAPP,
+          enviarWhatsApp(jefeDe(remitente),
             `📣 ${quien} avisó que va a pagar más adelante: "${mensaje.slice(0, 120)}"\n(Solo aviso — no hay nada que confirmar)`).catch(() => {});
           logActividad('promesa_pago', quien, null, remitente);
         }
@@ -2299,8 +2325,8 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
           const { rows: existing } = await pool.query(`SELECT COUNT(*) AS count FROM pagos_pendientes WHERE esperando_confirmacion = true`);
           if (parseInt(existing[0].count) <= 1) {
             const msg = `💰 ${cliente.nombre} - $${montoMsg} - Transferencia\n¿Confirmás? SÍ o NO`;
-            await twilioClient.messages.create({ from: TWILIO_FROM, to: process.env.COSACO_WHATSAPP, body: msg });
-            guardarMensaje(process.env.COSACO_WHATSAPP, null, msg, 'agente');
+            await twilioClient.messages.create({ from: TWILIO_FROM, to: jefeDe(remitente), body: msg });
+            guardarMensaje(jefeDe(remitente), null, msg, 'agente');
           }
           await enviarWhatsApp(remitente, `Gracias! Ya le avisé al equipo, en breve te confirmamos 🏑`, cliente.nombre);
         } else {
@@ -2335,7 +2361,7 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
           );
         }
 
-        await enviarWhatsApp(process.env.COSACO_WHATSAPP,
+        await enviarWhatsApp(jefeDe(remitente),
           `⚠️ ${nombreMostrar} quiere darse de baja. ¿Confirmás la suspensión? Respondé SÍ o NO`);
         return;
       }
@@ -2488,7 +2514,7 @@ cron.schedule('*/15 * * * *', async () => {
       ORDER BY timestamp ASC
     `);
     for (const s of rows) {
-      await enviarWhatsApp(process.env.COSACO_WHATSAPP,
+      await enviarWhatsApp(CONFIRMADOR,
         `⚠️ ${s.cliente_nombre} lleva 10 días sin pagar. ¿Suspendo su servicio?\nRespondé SÍ o NO`);
       await pool.query(
         `UPDATE suspensiones_pendientes SET notificado_cosaco = true, esperando_confirmacion = true WHERE id = $1`,
@@ -2510,7 +2536,7 @@ cron.schedule('0 12 * * *', async () => {
     });
     for (const c of cumpleaneros) {
       await enviarTemplate(c.telefono, process.env.TEMPLATE_CUMPLEANOS, { "1": c.nombre.split(' ')[0] }, `¡Hola ${c.nombre.split(' ')[0]}! 🎂 Todo el equipo de Hockey Vivo te desea un muy feliz cumpleaños. ¡Que tengas un día increíble! 🏑`);
-      await enviarWhatsApp(process.env.COSACO_WHATSAPP, `🎂 Hoy es el cumpleaños de ${c.nombre}! Saludalo desde tu celular 🏑`);
+      await enviarWhatsApp(CONFIRMADOR, `🎂 Hoy es el cumpleaños de ${c.nombre}! Saludalo desde tu celular 🏑`);
     }
     console.log(`Cumpleaños enviados: ${cumpleaneros.length}`);
   } catch (err) { console.error('Error cron cumpleaños:', err.message); }
@@ -2555,23 +2581,25 @@ async function generarInforme() {
   partes.push(`Turnos asignados: ${g('turnos_asignados').total}`);
   const nPend = pend.rows[0]?.n || 0;
   if (nPend) partes.push(`PENDIENTE: ${nPend} pago(s) esperando tu SI/NO`);
-  partes.push('Buen dia Cosaco!');
+  partes.push('Cierre del día, Cosaco 🏑');
 
   return partes.join(' | ');
 }
 
-cron.schedule('5 12 * * *', async () => {
+// Resumen/auditoría diaria para Cosaco (AUDITOR) a las 22:00 hora de Argentina.
+// Cosaco delegó el día a día en el administrativo pero conserva este control diario.
+cron.schedule('0 22 * * *', async () => {
   try {
     const informe = await generarInforme();
     console.log('[INFORME]', informe);
     await enviarTemplate(
-      process.env.COSACO_WHATSAPP,
+      AUDITOR,
       process.env.TEMPLATE_NOTIFICACION_COSACO,
       { "1": informe }, informe
     );
-    console.log('Informe diario enviado');
+    console.log('Informe diario enviado (22h ART)');
   } catch (err) { console.error('Error cron informe:', err.message); }
-});
+}, { timezone: 'America/Argentina/Buenos_Aires' });
 
 // ────────────────────────────────────────────────────────────────────────────
 //  LISTA DE SEGUIMIENTO (conversión de nuevos / reactivados)
@@ -2645,7 +2673,7 @@ async function suspenderSeguimientoVencido() {
     }
   }
   if (suspendidos.length) {
-    await enviarWhatsApp(process.env.COSACO_WHATSAPP,
+    await enviarWhatsApp(CONFIRMADOR,
       `⛔ Suspendí automáticamente a ${suspendidos.length} alumno(s) con +${DIAS_MAX} días en seguimiento sin pagar:\n• ${suspendidos.join('\n• ')}`).catch(() => {});
   }
   console.log(`[SEG-SUSP] ${suspendidos.length} suspendido(s) por vencer el seguimiento`);
@@ -2669,7 +2697,7 @@ app.post('/webhook', (req, res) => {
   res.type('text/xml').send(new twilio.twiml.MessagingResponse().toString());
   if (numMedia > 0 && (!mensaje || !mensaje.trim())) {
     // Comprobante (imagen sin texto) de un cliente → pedir nombre y monto.
-    if (remitente !== process.env.COSACO_WHATSAPP) {
+    if (!esOperador(remitente)) {
       comprobantePendiente.set(remitente, true);
       const resp = '¡Recibí el comprobante de transferencia! 🏑 Para registrar el pago necesito:\n- Nombre y apellido de la jugadora (tal como está registrada — si sos el papá o la mamá, es el nombre de tu hija, no el tuyo)\n- El monto que transferiste\n\nEscribime los dos datos y listo 😊';
       twilioClient.messages.create({ from: TWILIO_FROM, to: remitente, body: resp })
@@ -3438,7 +3466,7 @@ app.get('/test-jobs', async (req, res) => {
       if (!sid) return res.status(400).json({ error: `Falta la variable de entorno para ${job}` });
       const nombre = req.query.nombre || 'Cosaco';
       const tipoReal = job.replace('test-', ''); // recordatorio | mora | suspension
-      await enviarTemplate(process.env.COSACO_WHATSAPP, sid, { "1": nombre }, textoParaTipo(tipoReal, nombre));
+      await enviarTemplate(AUDITOR, sid, { "1": nombre }, textoParaTipo(tipoReal, nombre));
       return res.json({ ok: true, job, enviado_a: 'Cosaco (solo prueba)', sid });
     }
     if (job === 'cumpleanos') {
@@ -3460,7 +3488,7 @@ app.get('/test-jobs', async (req, res) => {
       // ?preview=1 → solo devuelve el texto sin mandar WhatsApp (para probar)
       if (req.query.preview === '1') return res.json({ ok: true, preview: informe });
       await enviarTemplate(
-        process.env.COSACO_WHATSAPP,
+        AUDITOR,
         process.env.TEMPLATE_NOTIFICACION_COSACO,
         { "1": informe }, informe
       );
@@ -3517,6 +3545,13 @@ app.get('/test-jobs', async (req, res) => {
         const { rows } = await pool.query(`SELECT id, cliente_id, cliente_nombre, monto FROM pagos_pendientes WHERE esperando_confirmacion = true ORDER BY id ASC`);
         out.pendientes = rows;
       } catch (e) { out.pendientes = { error: e.message }; }
+      // 5) Config de operadores (para verificar la delegación tras el deploy)
+      out.roles = {
+        operadores: OPERADORES.length,
+        admin_seteado: !!process.env.ADMIN_WHATSAPP,
+        confirmador_ult4: String(CONFIRMADOR || '').slice(-4),
+        auditor_ult4: String(AUDITOR || '').slice(-4),
+      };
       return res.json(out);
     }
     res.status(400).json({ error: `Job desconocido: ${job}` });
