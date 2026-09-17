@@ -23,6 +23,7 @@ const TWILIO_FROM = process.env.TWILIO_WHATSAPP_NUMBER?.startsWith('whatsapp:')
   ? process.env.TWILIO_WHATSAPP_NUMBER
   : `whatsapp:${process.env.TWILIO_WHATSAPP_NUMBER}`;
 let GYM_TOKEN = null;
+let _ultimoAvisoFalloBot = 0; // throttle del aviso "el bot falló al responder"
 
 // ── OPERADORES DEL BOT ───────────────────────────────────────────────────────
 // Quiénes pueden operar el bot por WhatsApp (registrar pagos, asignar turnos…) y
@@ -2387,7 +2388,11 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
     let derivado = false; // si la IA derivó a Cosaco, NO le respondemos al cliente
     while (true) {
       const respuesta = await anthropic.messages.create({
-        model: 'claude-sonnet-4-6',
+        // El modelo anterior (claude-sonnet-4-6) fue RETIRADO por Anthropic y las
+        // llamadas empezaron a fallar → el bot recibía pero no respondía. Se usa un
+        // modelo vigente y se deja configurable por env para no depender de un deploy
+        // si Anthropic retira otro en el futuro.
+        model: process.env.ANTHROPIC_MODEL || 'claude-sonnet-5',
         max_tokens: 1024,
         system: [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }],
         tools: TOOLS,
@@ -2421,6 +2426,17 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
     }
   } catch (err) {
     console.error(`Error procesando mensaje de ${remitente}:`, err);
+    // Aviso al admin si el bot falló al responderle a un CLIENTE. Antes esto era
+    // 100% silencioso (el cliente no recibía nada y nadie se enteraba). Throttle
+    // de 10 min para no inundar si el error es masivo (ej: un modelo retirado).
+    try {
+      if (!esOperador(remitente) && Date.now() - _ultimoAvisoFalloBot > 10 * 60000) {
+        _ultimoAvisoFalloBot = Date.now();
+        const quien = String(remitente).replace('whatsapp:', '');
+        await enviarWhatsApp(CONFIRMADOR,
+          `⚠️ El bot tuvo un error y no pudo responderle a un cliente (${quien}). Revisá esa conversación.\n(Técnico: ${String(err && err.message || err).slice(0, 140)})`).catch(() => {});
+      }
+    } catch (_) { /* nunca romper por el aviso */ }
   }
 }
 
