@@ -2020,6 +2020,11 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
           await fetch(`${GYM_API}/clientes/${susp.cliente_id}/suspender`, {
             method: 'DELETE', headers: { Authorization: `Bearer ${GYM_TOKEN}` }
           });
+          // Si estaba en seguimiento, sacarlo de la lista también (no-op si no lo estaba).
+          await fetch(`${GYM_API}/clientes/${susp.cliente_id}/seguimiento`, {
+            method: 'DELETE', headers: { Authorization: `Bearer ${GYM_TOKEN}` }
+          }).catch(() => {});
+          logActividad('seguimiento_suspendido', `${susp.cliente_nombre} (autorizado)`, null, susp.telefono);
           await enviarWhatsApp(jefeDe(remitente), `✅ ${susp.cliente_nombre} suspendido correctamente`);
         } else {
           await enviarWhatsApp(jefeDe(remitente), `👍 Ok, ${susp.cliente_nombre} no fue suspendido`);
@@ -2673,26 +2678,36 @@ async function suspenderSeguimientoVencido() {
     lista = await r.json();
   } catch (e) { console.error('[SEG-SUSP] error:', e.message); return; }
   const hoy = new Date();
-  const suspendidos = [];
+  const nuevos = [];
   for (const c of (Array.isArray(lista) ? lista : [])) {
     if (!c.desde) continue;
     const dias = Math.floor((hoy - new Date(c.desde + 'T00:00:00')) / 86400000);
-    if (dias >= DIAS_MAX) {
-      try {
-        const rs = await fetch(`${GYM_API}/clientes/${c.id}/suspender`, { method: 'DELETE', headers: hdrs });
-        if (rs.ok) {
-          await fetch(`${GYM_API}/clientes/${c.id}/seguimiento`, { method: 'DELETE', headers: hdrs }).catch(() => {});
-          suspendidos.push(`${c.nombre} (${dias} días)`);
-          logActividad('seguimiento_suspendido', `${c.nombre} (${dias} días sin pagar)`, null, c.telefono);
-        }
-      } catch (e) { console.error('[SEG-SUSP] fallo', c.nombre, e.message); }
-    }
+    if (dias < DIAS_MAX) continue;
+    // Ya NO suspendemos solos: encolamos un pedido de autorización (SÍ/NO) y se lo
+    // mandamos a Cosaco. Evitamos encolar dos veces al mismo alumno.
+    try {
+      const yaPend = await pool.query(
+        `SELECT 1 FROM suspensiones_pendientes WHERE cliente_id = $1 AND esperando_confirmacion = true`, [c.id]);
+      if (yaPend.rows.length) continue;
+      await pool.query(
+        `INSERT INTO suspensiones_pendientes (cliente_id, cliente_nombre, telefono, notificado_cosaco, esperando_confirmacion)
+         VALUES ($1, $2, $3, true, true)`,
+        [c.id, c.nombre, c.telefono || null]);
+      nuevos.push(`${c.nombre} (${dias} días)`);
+    } catch (e) { console.error('[SEG-SUSP] encolar', c.nombre, e.message); }
   }
-  if (suspendidos.length) {
-    await enviarWhatsApp(CONFIRMADOR,
-      `⛔ Suspendí automáticamente a ${suspendidos.length} alumno(s) con +${DIAS_MAX} días en seguimiento sin pagar:\n• ${suspendidos.join('\n• ')}`).catch(() => {});
+  if (nuevos.length) {
+    const { rows: prim } = await pool.query(
+      `SELECT * FROM suspensiones_pendientes WHERE esperando_confirmacion = true ORDER BY timestamp ASC LIMIT 1`);
+    let msg = `⚠️ ${nuevos.length} alumno(s) llevan +${DIAS_MAX} días en seguimiento sin pagar:\n• ${nuevos.join('\n• ')}\n\n¿Los suspendo? Respondé SÍ o NO (de a uno).`;
+    if (prim.length) msg += `\n\nEmpecemos: ¿suspendo a ${prim[0].cliente_nombre}? SÍ o NO`;
+    // Va a Cosaco (AUDITOR) por plantilla aprobada, para que llegue aunque su
+    // ventana de 24 h esté cerrada (es un mensaje programado del cron).
+    const sidNotif = process.env.TEMPLATE_NOTIFICACION_COSACO;
+    if (sidNotif) await enviarTemplate(AUDITOR, sidNotif, { "1": msg }, msg).catch(() => {});
+    else await enviarWhatsApp(AUDITOR, msg).catch(() => {});
   }
-  console.log(`[SEG-SUSP] ${suspendidos.length} suspendido(s) por vencer el seguimiento`);
+  console.log(`[SEG-SUSP] ${nuevos.length} suspension(es) encolada(s) para que Cosaco autorice`);
 }
 
 cron.schedule('0 12 * * *', async () => {
