@@ -201,6 +201,38 @@ function parsearPagosPorTerceros(texto) {
   });
 }
 
+// ── SEGUIMIENTO: días hábiles y respuesta a "¿querés mantener tu turno?" ────
+
+// Días hábiles (lunes a viernes) transcurridos desde `desdeISO` (excluido) hasta
+// `hoyISO` (incluido). Ej: desde viernes → el lunes siguiente da 1.
+function diasHabilesDesde(desdeISO, hoyISO) {
+  if (!desdeISO || !hoyISO) return 0;
+  const d = new Date(String(desdeISO).slice(0, 10) + 'T12:00:00Z');
+  const h = new Date(String(hoyISO).slice(0, 10) + 'T12:00:00Z');
+  if (!(d < h)) return 0;
+  let n = 0;
+  for (const x = new Date(d.getTime() + 86400000); x <= h; x.setUTCDate(x.getUTCDate() + 1)) {
+    const wd = x.getUTCDay();
+    if (wd !== 0 && wd !== 6) n++;
+  }
+  return n;
+}
+
+// Respuesta a "¿querés mantener tu turno?": 'si', 'no' o null (no queda claro).
+function respuestaMantenerTurno(texto) {
+  const t = normalizarTexto(texto).replace(/[!.,¿?]+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!t) return null;
+  const no = /^(no+|nop|nope|no gracias|no quiero|no puedo|no voy a (seguir|ir|poder)|no lo quiero|no lo voy a usar|lo dejo|dejalo|liberalo|libéralo|mejor no|no por ahora|por ahora no|no la verdad|la verdad no)\b|\b(no (quiero|voy a) seguir|lo (dejo|libero)|liber(a|á)(lo|r) el turno|prefiero dejar(lo)?|me doy de baja|darme de baja|dejo de (ir|venir|entrenar))\b/;
+  const si = /^(si+|sip|dale|ok|oka|okey|okay|obvio|claro|por supuesto|seguro|sisi|si si|quiero|lo quiero|lo mantengo|mantenelo|confirmo)\b|\b(s[ií] quiero|quiero (seguir|mantener|mi turno|el turno|conservar)|lo (quiero )?mantener|voy a seguir|sigo yendo|me lo guardas|guardamelo|tuve que faltar|no pude ir|me surgio|me surgió)\b/;
+  // "No pude ir / tuve que faltar" = faltó pero QUIERE el turno (va primero,
+  // porque arranca con "no" y si no se confundiría con un rechazo).
+  const faltoPeroSigue = /\b(tuve que faltar|no pude (ir|venir|asistir|entrenar)|me surgio|me enferme|estaba enferm[ao]|s[ií] quiero|quiero (seguir|mantener|mi turno|el turno|conservar))\b/;
+  if (faltoPeroSigue.test(t) && !/\b(no (quiero|voy a) seguir|me doy de baja)\b/.test(t)) return 'si';
+  if (no.test(t)) return 'no';
+  if (si.test(t)) return 'si';
+  return null;
+}
+
 // ── RESOLUCIÓN DE NOMBRES (evitar registrar pagos al cliente equivocado) ─────
 // Bug histórico: el bot buscaba "Martina Munar", la API devolvía también a
 // "Martina Chaparro" (match por el nombre de pila) y el código agarraba el
@@ -463,6 +495,8 @@ module.exports = {
   parsearMetodo,
   esAfirmacion,
   parsearPagosPorTerceros,
+  diasHabilesDesde,
+  respuestaMantenerTurno,
   parsearPagosLibres,
   esPedidoDeRegistroPago,
   montoValido,

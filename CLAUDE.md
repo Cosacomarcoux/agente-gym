@@ -47,6 +47,19 @@ dueño). Es hoy el **operador principal** del gimnasio.
    - M4 (Cosaco) "Pago Clara Marcoux 35000 efectivo" o lista por renglón ("... beca 50").
      El monto se registra TAL CUAL está escrito (la beca solo se anota).
 
+## Lista de seguimiento (alumnos nuevos/reactivados que todavía no pagaron)
+
+- Cron cada 10 min (8–22 h AR) `revisarAsistenciasSeguimiento`: lee `GET /seguimiento` y
+  `GET /asistencias/{id}`; cada asistencia nueva (hoy/ayer, posterior a `desde`) se procesa
+  una sola vez (tabla `seguimiento_asist_vistas`).
+  - Presente → plantilla de seguimiento (con el cobro).
+  - Ausente → "¿querés mantener tu turno?" (tabla `consulta_ausencia`). "No" → suspender
+    (el sistema la saca de todos los turnos) y avisarle. "Sí" → reiniciar los 5 días
+    hábiles (`POST /clientes/{id}/seguimiento`) UNA sola vez (tabla `seguimiento_reinicio`).
+- 9 h AR lun–vie `suspenderSeguimientoVencido`: 5 días HÁBILES sin pagar → SÍ/NO a Cosaco.
+- Variables de plantilla SIEMPRE en una sola línea (los `\n` dan "Content Variables
+  parameter is invalid" y el mensaje no sale). Usar `avisarCosaco()` para avisos.
+
 ## Otras reglas
 
 - **Duplicados de clientes**: al volver un ex-alumno, se reutiliza su ficha

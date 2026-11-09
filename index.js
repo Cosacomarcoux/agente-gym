@@ -167,6 +167,23 @@ async function initDB() {
     ALTER TABLE conversaciones ADD COLUMN IF NOT EXISTS media_type VARCHAR(60);
     -- Estado de un pago "en curso" (el cliente está a mitad de cargarlo). Se
     -- persiste para que sobreviva a un reinicio del bot (antes vivía en memoria).
+    -- Seguimiento en tiempo (casi) real: asistencias ya avisadas, consultas de
+    -- "¿querés mantener tu turno?" esperando respuesta, y reinicio único de los
+    -- 5 días hábiles por alumno.
+    CREATE TABLE IF NOT EXISTS seguimiento_asist_vistas (
+      clave VARCHAR(80) PRIMARY KEY,
+      visto TIMESTAMPTZ DEFAULT NOW()
+    );
+    CREATE TABLE IF NOT EXISTS consulta_ausencia (
+      telefono VARCHAR(50) PRIMARY KEY,
+      cliente_id INTEGER NOT NULL,
+      cliente_nombre VARCHAR(200),
+      creada TIMESTAMPTZ DEFAULT NOW()
+    );
+    CREATE TABLE IF NOT EXISTS seguimiento_reinicio (
+      cliente_id INTEGER PRIMARY KEY,
+      usado_en TIMESTAMPTZ DEFAULT NOW()
+    );
     CREATE TABLE IF NOT EXISTS estado_cliente (
       telefono VARCHAR(50) NOT NULL,
       tipo VARCHAR(20) NOT NULL,
@@ -411,7 +428,7 @@ async function enviarWhatsApp(telefono, mensaje, nombre = null) {
   }
 }
 
-async function enviarTemplate(telefono, templateSid, variables, textoGuardar = '[Mensaje automático]') {
+async function enviarTemplate(telefono, templateSid, variables, textoGuardar = '[Mensaje automático]', nombreGuardar = undefined) {
   console.log('enviarTemplate recibió telefono:', telefono);
   try {
     let to;
@@ -435,7 +452,7 @@ async function enviarTemplate(telefono, templateSid, variables, textoGuardar = '
       contentSid: templateSid,
       contentVariables: JSON.stringify(variables),
     });
-    guardarMensaje(to, variables['1'] || null, textoGuardar, 'agente');
+    guardarMensaje(to, nombreGuardar !== undefined ? nombreGuardar : (variables['1'] || null), textoGuardar, 'agente');
   } catch (err) {
     console.error(`Error enviando template a ${telefono}:`, err.message);
   }
@@ -568,7 +585,7 @@ CARGA DE PAGOS POR COSACO: si Cosaco te pide registrar/cargar/anotar un pago de 
 
 LINK DEL GRUPO: si Cosaco pide "mandale el link del grupo a [nombre]", "enviá el grupo a [nombre]" o similar, llamá enviar_link_grupo con el nombre. Busca al cliente y le manda el link del grupo de WhatsApp del gimnasio. Exclusivo de Cosaco.
 
-LISTA DE SEGUIMIENTO: los alumnos NUEVOS y los que REACTIVAN (ex-alumnos que vuelven) entran solos a la lista de seguimiento. Si Cosaco pide "anotá a Fulana en seguimiento", "poné a Juan en la lista" o similar, llamá agregar_a_seguimiento con el nombre. Cada mañana, a quien esté en la lista y haya sumado una asistencia nueva sin pagar, el sistema le manda el mensaje de seguimiento. El alumno sale de la lista SOLO cuando se registra su pago (es automático). Esto es exclusivo de Cosaco.
+LISTA DE SEGUIMIENTO: los alumnos NUEVOS y los que REACTIVAN (ex-alumnos que vuelven) entran solos a la lista de seguimiento. Si Cosaco pide "anotá a Fulana en seguimiento", "poné a Juan en la lista" o similar, llamá agregar_a_seguimiento con el nombre. Ni bien se le carga una asistencia a alguien de la lista, el sistema le escribe solo: si vino, el mensaje de seguimiento con el cobro; si faltó, le pregunta si quiere mantener el turno (si dice que no, se la suspende; si dice que sí, se le reinician los 5 días hábiles una única vez). A los 5 días hábiles sin pagar, se le pide a Cosaco autorización para suspender. El alumno sale de la lista SOLO cuando se registra su pago (es automático). Esto es exclusivo de Cosaco.
 
 CONFIRMACIÓN DE PAGOS (CRÍTICO): vos NO confirmás ni registrás pagos, y NUNCA digas que confirmaste, registraste o notificaste un pago. Ese proceso es automático y va de a uno. Si Cosaco dice "confirmar", "confirmar pagos", "pendientes" o similar, el sistema ya lo maneja solo (no tenés que hacer nada). Si te pregunta por pagos pendientes, decile que escriba "pendientes" y el sistema los muestra de a uno para confirmar con SÍ o NO. Jamás inventes que un pago quedó confirmado.`;
 
@@ -695,7 +712,7 @@ const TOOLS = [
   },
   {
     name: 'agregar_a_seguimiento',
-    description: 'SOLO para Cosaco (el dueño): agrega un alumno a la LISTA DE SEGUIMIENTO de conversión. Usala cuando Cosaco dice cosas como "anotá a Fulana en seguimiento", "poné a Juan en la lista", "agregá a María para hacerle seguimiento", o cuando indica que un ex-alumno volvió y hay que seguirlo. Mientras el alumno esté en la lista y sume una asistencia nueva sin pagar, el bot le manda el mensaje de seguimiento cada mañana. Sale de la lista SOLO cuando se registra su pago.',
+    description: 'SOLO para Cosaco (el dueño): agrega un alumno a la LISTA DE SEGUIMIENTO de conversión. Usala cuando Cosaco dice cosas como "anotá a Fulana en seguimiento", "poné a Juan en la lista", "agregá a María para hacerle seguimiento", o cuando indica que un ex-alumno volvió y hay que seguirlo. Mientras el alumno esté en la lista, cada asistencia nueva dispara un mensaje (presente: seguimiento con cobro; ausente: si quiere mantener el turno). Sale de la lista SOLO cuando se registra su pago.',
     input_schema: {
       type: 'object',
       properties: {
@@ -1120,7 +1137,7 @@ async function ejecutarTool(nombre, input, remitente) {
       if (!r.ok) return { ok: false, error: `No se pudo agregar: ${await r.text()}` };
       logActividad('seguimiento_alta', cli.nombre, null, cli.telefono);
       return { ok: true, cliente: cli.nombre,
-        instruccion: `${cli.nombre} quedó en la lista de seguimiento. Cada mañana, si suma una asistencia nueva sin pagar, se le manda el mensaje. Sale de la lista al registrarse su pago.` };
+        instruccion: `${cli.nombre} quedó en la lista de seguimiento. Cada asistencia nueva le dispara un mensaje automático. Sale de la lista al registrarse su pago.` };
     }
 
     if (nombre === 'guardar_registro_pendiente') {
@@ -1832,6 +1849,11 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
         logActividad('lesion', quien, null, remitente);
       }
       // NO return: el bot le responde igual (la IA responde con empatía).
+    }
+
+    // ── SEGUIMIENTO: respuesta a "¿querés mantener tu turno?" (faltó) ──────
+    if (!esCosaco && await manejarRespuestaAusencia(remitente, mensaje).catch(e => { console.error('[AUSENCIA]', e.message); return false; })) {
+      return;
     }
 
     // ── 0-bis. ESPERANDO EL MONTO (le preguntamos "¿cuánto pagaste?") ─────
@@ -2815,49 +2837,154 @@ cron.schedule('0 22 * * *', async () => {
 
 // ────────────────────────────────────────────────────────────────────────────
 //  LISTA DE SEGUIMIENTO (conversión de nuevos / reactivados)
-//  Cada mañana (9:00 AR = 12:00 UTC): el sistema revisa SOLO a los alumnos que
-//  están en la lista de seguimiento y sumaron una asistencia nueva sin pagar
-//  todavía. A cada uno se le manda el mensaje de seguimiento. Opción B: se envía
-//  CADA VEZ que suma una asistencia nueva (persistente), no una sola vez. El
-//  alumno sale de la lista SOLO cuando se registra su pago (auto en el sistema).
-//  Requiere una plantilla de WhatsApp aprobada: TEMPLATE_CLASE_PRUEBA.
+//  Cada 10 minutos el bot revisa las asistencias de los alumnos en seguimiento
+//  (los que todavía no pagaron). NI BIEN se carga una asistencia:
+//   • PRESENTE → se le manda el mensaje de seguimiento (con el cobro).
+//   • AUSENTE  → se le pregunta si quiere mantener el turno.
+//       - "No"  → se lo suspende (el sistema lo saca de todos los turnos) y se le avisa.
+//       - "Sí"  → se reinician sus 5 días hábiles (UNA sola vez por alumno).
+//  A los 5 días hábiles en seguimiento sin pagar → se le pide a Cosaco SÍ/NO para suspender.
+//  El alumno sale de la lista SOLO cuando se registra su pago (auto en el sistema).
 // ────────────────────────────────────────────────────────────────────────────
-async function enviarSeguimiento() {
-  // Plantilla de SEGUIMIENTO (distinta de la de vencimiento). SID fijo para que
-  // siempre mande el mensaje correcto; se puede sobrescribir con TEMPLATE_SEGUIMIENTO.
-  const SID = process.env.TEMPLATE_SEGUIMIENTO || 'HX9df9508ac29c10f582f02af1dc266b0b';
-  if (!SID) { console.warn('[SEGUIMIENTO] Falta TEMPLATE_SEGUIMIENTO — no se envía nada.'); return; }
-  if (!GYM_TOKEN) await loginConReintentos(3, 5000);
-  const hdrs = { Authorization: `Bearer ${GYM_TOKEN}` };
-  let alumnos = [];
-  try {
-    const r = await fetch(`${GYM_API}/seguimiento/a-notificar`, { headers: hdrs });
-    if (!r.ok) { console.error('[SEGUIMIENTO] API', r.status); return; }
-    alumnos = (await r.json()).alumnos || [];
-  } catch (e) { console.error('[SEGUIMIENTO] error consultando:', e.message); return; }
+const SID_SEGUIMIENTO = () => process.env.TEMPLATE_SEGUIMIENTO || 'HX9df9508ac29c10f582f02af1dc266b0b';
+// Plantilla general aprobada para iniciar conversación, con UNA variable ({{1}}).
+const SID_CONSULTA_AUSENCIA = () => process.env.TEMPLATE_CONSULTA_AUSENCIA || 'HX60558fb413fdcec4a3b98145fdebc178';
+const hoyISOart = (desplazDias = 0) => {
+  const d = new Date(Date.now() + desplazDias * 86400000);
+  return d.toLocaleDateString('en-CA', { timeZone: 'America/Argentina/Buenos_Aires' });
+};
+const fechaCorta = iso => { const [y, m, d] = String(iso).split('-'); return `${d}/${m}`; };
 
-  console.log(`[SEGUIMIENTO] ${alumnos.length} alumno(s) a notificar`);
-  for (const a of alumnos) {
-    if (!a.telefono) continue;
-    try {
-      const nombre1 = (a.nombre || '').split(' ')[0];
-      const textoSeg = `Hola ${nombre1}! 🏑 ¡Nos encanta verte entrenando en Hockey Vivo! Para asegurar tu lugar y seguir sumándote, coordinemos el pago de tu plan cuando puedas. Cualquier consulta, escribinos por acá 💪`;
-      await enviarTemplate(a.telefono, SID, { "1": nombre1 }, textoSeg);
-      // Marcar el envío de HOY SOLO si el mensaje salió (Opción B: al próximo
-      // presente nuevo se vuelve a enviar; sale de la lista sólo al pagar).
-      await fetch(`${GYM_API}/clientes/${a.id}/seguimiento-enviado`, { method: 'POST', headers: hdrs });
-      logActividad('seguimiento', a.nombre, null, a.telefono);
-      console.log(`[SEGUIMIENTO] enviado a ${a.nombre}`);
-    } catch (e) {
-      console.error(`[SEGUIMIENTO] falló con ${a.nombre}:`, e.message);
+async function enviarMensajeSeguimiento(a, hdrs) {
+  const nombre1 = (a.nombre || '').split(' ')[0];
+  const textoSeg = `Hola ${nombre1}! 👋 ¿Cómo te fue en tu entrenamiento? Para asegurar tu lugar, recordá que se abona el mes por adelantado: transferencia al alias hockeyvivo o en efectivo, como te quede cómodo 🏑`;
+  await enviarTemplate(a.telefono, SID_SEGUIMIENTO(), { "1": nombre1 }, textoSeg, a.nombre);
+  await fetch(`${GYM_API}/clientes/${a.id}/seguimiento-enviado`, { method: 'POST', headers: hdrs }).catch(() => {});
+  logActividad('seguimiento', a.nombre, null, a.telefono);
+  console.log(`[SEGUIMIENTO] presente → mensaje a ${a.nombre}`);
+}
+
+async function preguntarSiMantieneTurno(a, fecha) {
+  const nombre1 = (a.nombre || '').split(' ')[0];
+  // Una sola línea: los saltos de línea dentro de variables rompen la plantilla.
+  const pregunta = `${nombre1}, vimos que faltaste al entrenamiento del ${fechaCorta(fecha)}. ¿Querés mantener tu turno? Respondé SÍ para guardarlo o NO si preferís dejarlo.`;
+  await pool.query(
+    `INSERT INTO consulta_ausencia (telefono, cliente_id, cliente_nombre) VALUES ($1, $2, $3)
+     ON CONFLICT (telefono) DO UPDATE SET cliente_id = $2, cliente_nombre = $3, creada = NOW()`,
+    [guards.normalizarWhatsApp(a.telefono), a.id, a.nombre]);
+  await enviarTemplate(a.telefono, SID_CONSULTA_AUSENCIA(), { "1": pregunta }, pregunta, a.nombre);
+  logActividad('seguimiento_ausente', a.nombre, null, a.telefono);
+  console.log(`[SEGUIMIENTO] ausente → consulta a ${a.nombre}`);
+}
+
+let _revisandoSeguimiento = false;
+async function revisarAsistenciasSeguimiento() {
+  if (_revisandoSeguimiento) return;
+  _revisandoSeguimiento = true;
+  try {
+    if (!GYM_TOKEN) await loginConReintentos(3, 5000);
+    const hdrs = { Authorization: `Bearer ${GYM_TOKEN}` };
+    const r = await fetch(`${GYM_API}/seguimiento`, { headers: hdrs });
+    if (!r.ok) { console.error('[SEGUIMIENTO] API', r.status); return; }
+    const lista = await r.json();
+    const ayer = hoyISOart(-1);
+    for (const c of (Array.isArray(lista) ? lista : [])) {
+      if (!c.telefono) continue;
+      let asist = [];
+      try {
+        const ra = await fetch(`${GYM_API}/asistencias/${c.id}`, { headers: hdrs });
+        if (!ra.ok) continue;
+        asist = await ra.json();
+      } catch { continue; }
+      let avisoPresente = false;
+      // De la más vieja a la más nueva; solo hoy/ayer y posteriores a entrar a la lista.
+      for (const a of (Array.isArray(asist) ? asist : []).slice().reverse()) {
+        if (!a.fecha || a.fecha < ayer) continue;
+        if (c.desde && a.fecha < c.desde) continue;
+        // Presente ya avisado por el sistema anterior (envío del mismo día o posterior)
+        if (a.presente && c.ultimo_envio && a.fecha <= c.ultimo_envio) continue;
+        const clave = `${c.id}|${a.turno_id}|${a.fecha}|${a.presente ? 'P' : 'A'}`;
+        const ins = await pool.query(
+          `INSERT INTO seguimiento_asist_vistas (clave) VALUES ($1) ON CONFLICT DO NOTHING RETURNING clave`, [clave]);
+        if (!ins.rows.length) continue; // ya procesada
+        try {
+          if (a.presente) {
+            if (!avisoPresente) { await enviarMensajeSeguimiento(c, hdrs); avisoPresente = true; }
+          } else {
+            await preguntarSiMantieneTurno(c, a.fecha);
+          }
+        } catch (e) { console.error(`[SEGUIMIENTO] ${c.nombre}:`, e.message); }
+      }
     }
+    await pool.query(`DELETE FROM seguimiento_asist_vistas WHERE visto < NOW() - INTERVAL '30 days'`).catch(() => {});
+    await pool.query(`DELETE FROM consulta_ausencia WHERE creada < NOW() - INTERVAL '5 days'`).catch(() => {});
+  } catch (e) {
+    console.error('[SEGUIMIENTO] error:', e.message);
+  } finally {
+    _revisandoSeguimiento = false;
   }
 }
-// Alias por compatibilidad con llamadas existentes (comando manual de Cosaco).
-const enviarIncentivosPrueba = enviarSeguimiento;
+// Alias por compatibilidad con llamadas existentes (comando manual / test-jobs).
+const enviarSeguimiento = revisarAsistenciasSeguimiento;
+const enviarIncentivosPrueba = revisarAsistenciasSeguimiento;
 
-// Suspende automáticamente a quienes llevan 5+ días en seguimiento sin pagar.
-// (El pago los saca de la lista antes; si no pagaron en 5 días, se suspenden.)
+// Aviso informativo a Cosaco que llega aunque su ventana de 24 h esté cerrada
+// (plantilla aprobada, UNA línea). Si no hay plantilla, texto libre.
+async function avisarCosaco(msg) {
+  const linea = String(msg).replace(/\s*\n+\s*/g, ' | ');
+  const sid = process.env.TEMPLATE_NOTIFICACION_COSACO;
+  if (sid) return enviarTemplate(AUDITOR, sid, { "1": linea }, linea, 'Cosaco').catch(() => {});
+  return enviarWhatsApp(AUDITOR, linea).catch(() => {});
+}
+
+// Respuesta del alumno a "¿querés mantener tu turno?". Devuelve true si la manejó.
+async function manejarRespuestaAusencia(remitente, mensaje) {
+  const { rows } = await pool.query(`SELECT * FROM consulta_ausencia WHERE telefono = $1`, [guards.normalizarWhatsApp(remitente)]);
+  if (!rows.length) return false;
+  const resp = guards.respuestaMantenerTurno(mensaje);
+  if (!resp) return false; // no quedó claro → sigue la conversación normal (la consulta queda abierta)
+  const c = rows[0];
+  const nombre1 = String(c.cliente_nombre || '').split(' ')[0];
+  await pool.query(`DELETE FROM consulta_ausencia WHERE telefono = $1`, [c.telefono]);
+  if (!GYM_TOKEN) await loginConReintentos(3, 3000);
+  const hdrs = { Authorization: `Bearer ${GYM_TOKEN}` };
+  if (resp === 'no') {
+    const r = await fetch(`${GYM_API}/clientes/${c.cliente_id}/suspender`, { method: 'DELETE', headers: hdrs });
+    if (!r.ok) {
+      await enviarWhatsApp(remitente, `Gracias por avisar, ${nombre1}. Le paso tu respuesta al equipo 🏑`, c.cliente_nombre);
+      await avisarCosaco(`⚠️ ${c.cliente_nombre} dijo que NO quiere mantener el turno, pero no pude suspenderla (error ${r.status}). Revisalo a mano.`);
+      return true;
+    }
+    await fetch(`${GYM_API}/clientes/${c.cliente_id}/seguimiento`, { method: 'DELETE', headers: hdrs }).catch(() => {});
+    await pool.query(`DELETE FROM suspensiones_pendientes WHERE cliente_id = $1`, [c.cliente_id]).catch(() => {});
+    logActividad('seguimiento_suspendido', `${c.cliente_nombre} (no quiso el turno)`, null, remitente);
+    await enviarWhatsApp(remitente,
+      `Entendido, ${nombre1}. Te sacamos de todos los turnos para liberar el lugar. Las puertas siempre están abiertas: cuando quieras volver, escribinos y te buscamos un horario 🏑`,
+      c.cliente_nombre);
+    await avisarCosaco(`ℹ️ ${c.cliente_nombre} faltó y respondió que NO quiere mantener el turno → la suspendí y quedó fuera de todos los turnos.`);
+    return true;
+  }
+  // resp === 'si' → reiniciar los 5 días hábiles, UNA sola vez por alumno
+  const ya = await pool.query(`SELECT 1 FROM seguimiento_reinicio WHERE cliente_id = $1`, [c.cliente_id]);
+  if (!ya.rows.length) {
+    await fetch(`${GYM_API}/clientes/${c.cliente_id}/seguimiento`, { method: 'POST', headers: hdrs }).catch(() => {});
+    await pool.query(`INSERT INTO seguimiento_reinicio (cliente_id) VALUES ($1) ON CONFLICT DO NOTHING`, [c.cliente_id]);
+    await pool.query(`DELETE FROM suspensiones_pendientes WHERE cliente_id = $1`, [c.cliente_id]).catch(() => {});
+    logActividad('seguimiento_reinicio', c.cliente_nombre, null, remitente);
+    await enviarWhatsApp(remitente,
+      `¡Genial, ${nombre1}! Te guardamos el turno 🏑 Recordá que para asegurar tu lugar el mes se abona por adelantado (alias hockeyvivo o efectivo). ¡Te esperamos!`,
+      c.cliente_nombre);
+    await avisarCosaco(`ℹ️ ${c.cliente_nombre} faltó pero quiere mantener el turno → le reinicié los 5 días hábiles (única vez).`);
+  } else {
+    await enviarWhatsApp(remitente,
+      `¡Perfecto, ${nombre1}! Te esperamos en el próximo entrenamiento 🏑 Acordate de abonar el mes para asegurar tu lugar.`,
+      c.cliente_nombre);
+    await avisarCosaco(`ℹ️ ${c.cliente_nombre} faltó otra vez y dice que quiere el turno. Ya usó su reinicio de 5 días hábiles, así que no se lo reinicié.`);
+  }
+  return true;
+}
+
+// A los 5 días HÁBILES en seguimiento sin pagar → pedirle a Cosaco SÍ/NO para suspender.
 async function suspenderSeguimientoVencido() {
   const DIAS_MAX = 5;
   if (!GYM_TOKEN) await loginConReintentos(3, 5000);
@@ -2868,14 +2995,12 @@ async function suspenderSeguimientoVencido() {
     if (!r.ok) { console.error('[SEG-SUSP] API', r.status); return; }
     lista = await r.json();
   } catch (e) { console.error('[SEG-SUSP] error:', e.message); return; }
-  const hoy = new Date();
+  const hoy = hoyISOart();
   const nuevos = [];
   for (const c of (Array.isArray(lista) ? lista : [])) {
     if (!c.desde) continue;
-    const dias = Math.floor((hoy - new Date(c.desde + 'T00:00:00')) / 86400000);
+    const dias = guards.diasHabilesDesde(c.desde, hoy);
     if (dias < DIAS_MAX) continue;
-    // Ya NO suspendemos solos: encolamos un pedido de autorización (SÍ/NO) y se lo
-    // mandamos a Cosaco. Evitamos encolar dos veces al mismo alumno.
     try {
       const yaPend = await pool.query(
         `SELECT 1 FROM suspensiones_pendientes WHERE cliente_id = $1 AND esperando_confirmacion = true`, [c.id]);
@@ -2884,27 +3009,32 @@ async function suspenderSeguimientoVencido() {
         `INSERT INTO suspensiones_pendientes (cliente_id, cliente_nombre, telefono, notificado_cosaco, esperando_confirmacion)
          VALUES ($1, $2, $3, true, true)`,
         [c.id, c.nombre, c.telefono || null]);
-      nuevos.push(`${c.nombre} (${dias} días)`);
+      nuevos.push(`${c.nombre} (${dias} días hábiles)`);
     } catch (e) { console.error('[SEG-SUSP] encolar', c.nombre, e.message); }
   }
   if (nuevos.length) {
     const { rows: prim } = await pool.query(
       `SELECT * FROM suspensiones_pendientes WHERE esperando_confirmacion = true ORDER BY timestamp ASC LIMIT 1`);
-    let msg = `⚠️ ${nuevos.length} alumno(s) llevan +${DIAS_MAX} días en seguimiento sin pagar:\n• ${nuevos.join('\n• ')}\n\n¿Los suspendo? Respondé SÍ o NO (de a uno).`;
-    if (prim.length) msg += `\n\nEmpecemos: ¿suspendo a ${prim[0].cliente_nombre}? SÍ o NO`;
-    // Va a Cosaco (AUDITOR) por plantilla aprobada, para que llegue aunque su
-    // ventana de 24 h esté cerrada (es un mensaje programado del cron).
+    // UNA sola línea: los saltos de línea dentro de la variable rompen la plantilla
+    // ("Content Variables parameter is invalid") y el aviso nunca llegaba.
+    let msg = `${nuevos.length} alumno(s) con +${DIAS_MAX} días hábiles en seguimiento sin pagar: ${nuevos.join(', ')}.`;
+    if (prim.length) msg += ` Empecemos: ¿suspendo a ${prim[0].cliente_nombre}? Respondé SI o NO.`;
     const sidNotif = process.env.TEMPLATE_NOTIFICACION_COSACO;
-    if (sidNotif) await enviarTemplate(AUDITOR, sidNotif, { "1": msg }, msg).catch(() => {});
+    if (sidNotif) await enviarTemplate(AUDITOR, sidNotif, { "1": msg }, msg, 'Cosaco').catch(() => {});
     else await enviarWhatsApp(AUDITOR, msg).catch(() => {});
   }
   console.log(`[SEG-SUSP] ${nuevos.length} suspension(es) encolada(s) para que Cosaco autorice`);
 }
 
-cron.schedule('0 12 * * *', async () => {
+// 9:00 AR: control de los 5 días hábiles.
+cron.schedule('0 9 * * 1-5', async () => {
   try { await suspenderSeguimientoVencido(); } catch (e) { console.error('cron seg-susp:', e.message); }
-  try { await enviarSeguimiento(); } catch (e) { console.error('cron seguimiento:', e.message); }
-});
+}, { timezone: 'America/Argentina/Buenos_Aires' });
+
+// Cada 10 min (8 a 22:50 h AR): asistencias nuevas de alumnos en seguimiento.
+cron.schedule('*/10 8-22 * * *', async () => {
+  try { await revisarAsistenciasSeguimiento(); } catch (e) { console.error('cron seguimiento:', e.message); }
+}, { timezone: 'America/Argentina/Buenos_Aires' });
 
 app.post('/webhook', (req, res) => {
   const mensaje = req.body.Body;

@@ -431,3 +431,19 @@ test('parsearPagosLibres: lista de Cosaco con beca no ensucia el nombre siguient
   assert.strictEqual(r[1].beca, 50);
   assert.strictEqual(r[2].beca, null);
 });
+
+// ── Seguimiento: días hábiles y respuesta a "¿querés mantener tu turno?" ─────
+test('diasHabilesDesde: cuenta lunes a viernes', () => {
+  assert.strictEqual(g.diasHabilesDesde('2026-11-06', '2026-11-09'), 1); // vie → lun
+  assert.strictEqual(g.diasHabilesDesde('2026-11-06', '2026-11-13'), 5); // vie → vie siguiente
+  assert.strictEqual(g.diasHabilesDesde('2026-11-09', '2026-11-09'), 0);
+});
+
+test('respuestaMantenerTurno: si / no / sin definir', () => {
+  for (const t of ['Sí', 'si quiero', 'dale', 'quiero mantener el turno', 'tuve que faltar pero sigo', 'no pude ir porque estaba enferma'])
+    assert.strictEqual(g.respuestaMantenerTurno(t), 'si', t);
+  for (const t of ['no', 'No, gracias', 'mejor no, lo dejo', 'no voy a seguir', 'me doy de baja'])
+    assert.strictEqual(g.respuestaMantenerTurno(t), 'no', t);
+  for (const t of ['hola', 'cuánto sale el plan?'])
+    assert.strictEqual(g.respuestaMantenerTurno(t), null, t);
+});
