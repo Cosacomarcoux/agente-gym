@@ -54,9 +54,11 @@ dueño). Es hoy el **operador principal** del gimnasio.
   una sola vez (tabla `seguimiento_asist_vistas`).
   - Presente → plantilla de seguimiento (con el cobro).
   - Ausente → "¿querés mantener tu turno?" (tabla `consulta_ausencia`). "No" → suspender
-    (el sistema la saca de todos los turnos) y avisarle. "Sí" → reiniciar los 5 días
-    hábiles (`POST /clientes/{id}/seguimiento`) UNA sola vez (tabla `seguimiento_reinicio`).
-- Mismo cron (10 h, antes) `suspenderSeguimientoVencido`: 5 días HÁBILES sin pagar → SÍ/NO a Cosaco.
+    (el sistema la saca de todos los turnos) y avisarle. "Sí" → reiniciar el conteo
+    (`POST /clientes/{id}/seguimiento`) UNA sola vez (tabla `seguimiento_reinicio`).
+- Mismo cron (10 h, antes) `suspenderSeguimientoVencido`: NADIE sale de seguimiento por días.
+  Con más de 3 semanas (21 días) sin pagar → SÍ/NO a Cosaco; si dice NO, se re-pregunta
+  a los 7 días (tabla `seguimiento_aviso_susp`).
 - Variables de plantilla SIEMPRE en una sola línea (los `\n` dan "Content Variables
   parameter is invalid" y el mensaje no sale). Usar `avisarCosaco()` para avisos.
 

@@ -169,7 +169,7 @@ async function initDB() {
     -- persiste para que sobreviva a un reinicio del bot (antes vivía en memoria).
     -- Seguimiento en tiempo (casi) real: asistencias ya avisadas, consultas de
     -- "¿querés mantener tu turno?" esperando respuesta, y reinicio único de los
-    -- 5 días hábiles por alumno.
+    -- conteo de seguimiento por alumno; aviso de 3 semanas a Cosaco (1 cada 7 días).
     CREATE TABLE IF NOT EXISTS seguimiento_asist_vistas (
       clave VARCHAR(80) PRIMARY KEY,
       visto TIMESTAMPTZ DEFAULT NOW()
@@ -179,6 +179,10 @@ async function initDB() {
       cliente_id INTEGER NOT NULL,
       cliente_nombre VARCHAR(200),
       creada TIMESTAMPTZ DEFAULT NOW()
+    );
+    CREATE TABLE IF NOT EXISTS seguimiento_aviso_susp (
+      cliente_id INTEGER PRIMARY KEY,
+      avisado_en TIMESTAMPTZ DEFAULT NOW()
     );
     CREATE TABLE IF NOT EXISTS seguimiento_reinicio (
       cliente_id INTEGER PRIMARY KEY,
@@ -585,7 +589,7 @@ CARGA DE PAGOS POR COSACO: si Cosaco te pide registrar/cargar/anotar un pago de 
 
 LINK DEL GRUPO: si Cosaco pide "mandale el link del grupo a [nombre]", "enviá el grupo a [nombre]" o similar, llamá enviar_link_grupo con el nombre. Busca al cliente y le manda el link del grupo de WhatsApp del gimnasio. Exclusivo de Cosaco.
 
-LISTA DE SEGUIMIENTO: los alumnos NUEVOS y los que REACTIVAN (ex-alumnos que vuelven) entran solos a la lista de seguimiento. Si Cosaco pide "anotá a Fulana en seguimiento", "poné a Juan en la lista" o similar, llamá agregar_a_seguimiento con el nombre. Todos los días hábiles a las 10 de la mañana el sistema revisa las asistencias nuevas de la lista y le escribe a cada uno: si vino, el mensaje de seguimiento con el cobro; si faltó, le pregunta si quiere mantener el turno (si dice que no, se la suspende; si dice que sí, se le reinician los 5 días hábiles una única vez). A los 5 días hábiles sin pagar, se le pide a Cosaco autorización para suspender. El alumno sale de la lista SOLO cuando se registra su pago (es automático). Esto es exclusivo de Cosaco.
+LISTA DE SEGUIMIENTO: los alumnos NUEVOS y los que REACTIVAN (ex-alumnos que vuelven) entran solos a la lista de seguimiento. Si Cosaco pide "anotá a Fulana en seguimiento", "poné a Juan en la lista" o similar, llamá agregar_a_seguimiento con el nombre. Todos los días hábiles a las 10 de la mañana el sistema revisa las asistencias nuevas de la lista y le escribe a cada uno: si vino, el mensaje de seguimiento con el cobro; si faltó, le pregunta si quiere mantener el turno (si dice que no, se la suspende; si dice que sí, se le reinicia el conteo una única vez). Nadie sale de la lista por cumplir días: con más de 3 semanas sin pagar, se le pide a Cosaco autorización para suspender. El alumno sale de la lista SOLO cuando se registra su pago (es automático). Esto es exclusivo de Cosaco.
 
 CONFIRMACIÓN DE PAGOS (CRÍTICO): vos NO confirmás ni registrás pagos, y NUNCA digas que confirmaste, registraste o notificaste un pago. Ese proceso es automático y va de a uno. Si Cosaco dice "confirmar", "confirmar pagos", "pendientes" o similar, el sistema ya lo maneja solo (no tenés que hacer nada). Si te pregunta por pagos pendientes, decile que escriba "pendientes" y el sistema los muestra de a uno para confirmar con SÍ o NO. Jamás inventes que un pago quedó confirmado.`;
 
@@ -2842,8 +2846,8 @@ cron.schedule('0 22 * * *', async () => {
 //   • PRESENTE → se le manda el mensaje de seguimiento (con el cobro).
 //   • AUSENTE  → se le pregunta si quiere mantener el turno.
 //       - "No"  → se lo suspende (el sistema lo saca de todos los turnos) y se le avisa.
-//       - "Sí"  → se reinician sus 5 días hábiles (UNA sola vez por alumno).
-//  A los 5 días hábiles en seguimiento sin pagar → se le pide a Cosaco SÍ/NO para suspender.
+//       - "Sí"  → se reinicia su conteo de seguimiento (UNA sola vez por alumno).
+//  Con más de 3 semanas en seguimiento sin pagar → se le pide a Cosaco SÍ/NO para suspender.
 //  El alumno sale de la lista SOLO cuando se registra su pago (auto en el sistema).
 // ────────────────────────────────────────────────────────────────────────────
 const SID_SEGUIMIENTO = () => process.env.TEMPLATE_SEGUIMIENTO || 'HX9df9508ac29c10f582f02af1dc266b0b';
@@ -2964,7 +2968,7 @@ async function manejarRespuestaAusencia(remitente, mensaje) {
     await avisarCosaco(`ℹ️ ${c.cliente_nombre} faltó y respondió que NO quiere mantener el turno → la suspendí y quedó fuera de todos los turnos.`);
     return true;
   }
-  // resp === 'si' → reiniciar los 5 días hábiles, UNA sola vez por alumno
+  // resp === 'si' → reiniciar el conteo de seguimiento, UNA sola vez por alumno
   const ya = await pool.query(`SELECT 1 FROM seguimiento_reinicio WHERE cliente_id = $1`, [c.cliente_id]);
   if (!ya.rows.length) {
     await fetch(`${GYM_API}/clientes/${c.cliente_id}/seguimiento`, { method: 'POST', headers: hdrs }).catch(() => {});
@@ -2974,19 +2978,22 @@ async function manejarRespuestaAusencia(remitente, mensaje) {
     await enviarWhatsApp(remitente,
       `¡Genial, ${nombre1}! Te guardamos el turno 🏑 Recordá que para asegurar tu lugar el mes se abona por adelantado (alias hockeyvivo o efectivo). ¡Te esperamos!`,
       c.cliente_nombre);
-    await avisarCosaco(`ℹ️ ${c.cliente_nombre} faltó pero quiere mantener el turno → le reinicié los 5 días hábiles (única vez).`);
+    await avisarCosaco(`ℹ️ ${c.cliente_nombre} faltó pero quiere mantener el turno → le reinicié el conteo de seguimiento (única vez).`);
   } else {
     await enviarWhatsApp(remitente,
       `¡Perfecto, ${nombre1}! Te esperamos en el próximo entrenamiento 🏑 Acordate de abonar el mes para asegurar tu lugar.`,
       c.cliente_nombre);
-    await avisarCosaco(`ℹ️ ${c.cliente_nombre} faltó otra vez y dice que quiere el turno. Ya usó su reinicio de 5 días hábiles, así que no se lo reinicié.`);
+    await avisarCosaco(`ℹ️ ${c.cliente_nombre} faltó otra vez y dice que quiere el turno. Ya usó su reinicio, así que no se lo volví a reiniciar.`);
   }
   return true;
 }
 
-// A los 5 días HÁBILES en seguimiento sin pagar → pedirle a Cosaco SÍ/NO para suspender.
+// Más de 3 SEMANAS en seguimiento sin pagar → pedirle a Cosaco SÍ/NO para suspender.
+// (Los 5 días hábiles ya NO sacan a nadie de seguimiento: la jugadora sigue en la
+// lista recibiendo sus mensajes hasta que pague o Cosaco autorice suspenderla.)
+// Si Cosaco dice NO, no se le vuelve a preguntar por esa jugadora hasta 7 días después.
 async function suspenderSeguimientoVencido() {
-  const DIAS_MAX = 5;
+  const DIAS_MAX = 21;
   if (!GYM_TOKEN) await loginConReintentos(3, 5000);
   const hdrs = { Authorization: `Bearer ${GYM_TOKEN}`, 'Content-Type': 'application/json' };
   let lista = [];
@@ -2995,38 +3002,41 @@ async function suspenderSeguimientoVencido() {
     if (!r.ok) { console.error('[SEG-SUSP] API', r.status); return; }
     lista = await r.json();
   } catch (e) { console.error('[SEG-SUSP] error:', e.message); return; }
-  const hoy = hoyISOart();
+  const hoy = new Date(hoyISOart() + 'T12:00:00Z');
   const nuevos = [];
   for (const c of (Array.isArray(lista) ? lista : [])) {
     if (!c.desde) continue;
-    const dias = guards.diasHabilesDesde(c.desde, hoy);
-    if (dias < DIAS_MAX) continue;
+    const dias = Math.floor((hoy - new Date(c.desde + 'T12:00:00Z')) / 86400000);
+    if (dias <= DIAS_MAX) continue;
     try {
       const yaPend = await pool.query(
         `SELECT 1 FROM suspensiones_pendientes WHERE cliente_id = $1 AND esperando_confirmacion = true`, [c.id]);
       if (yaPend.rows.length) continue;
+      const reciente = await pool.query(
+        `SELECT 1 FROM seguimiento_aviso_susp WHERE cliente_id = $1 AND avisado_en > NOW() - INTERVAL '7 days'`, [c.id]);
+      if (reciente.rows.length) continue;
       await pool.query(
         `INSERT INTO suspensiones_pendientes (cliente_id, cliente_nombre, telefono, notificado_cosaco, esperando_confirmacion)
          VALUES ($1, $2, $3, true, true)`,
         [c.id, c.nombre, c.telefono || null]);
-      nuevos.push(`${c.nombre} (${dias} días hábiles)`);
+      await pool.query(
+        `INSERT INTO seguimiento_aviso_susp (cliente_id) VALUES ($1)
+         ON CONFLICT (cliente_id) DO UPDATE SET avisado_en = NOW()`, [c.id]);
+      nuevos.push(`${c.nombre} (${dias} días)`);
     } catch (e) { console.error('[SEG-SUSP] encolar', c.nombre, e.message); }
   }
   if (nuevos.length) {
     const { rows: prim } = await pool.query(
       `SELECT * FROM suspensiones_pendientes WHERE esperando_confirmacion = true ORDER BY timestamp ASC LIMIT 1`);
-    // UNA sola línea: los saltos de línea dentro de la variable rompen la plantilla
-    // ("Content Variables parameter is invalid") y el aviso nunca llegaba.
-    let msg = `${nuevos.length} alumno(s) con +${DIAS_MAX} días hábiles en seguimiento sin pagar: ${nuevos.join(', ')}.`;
+    // UNA sola línea: los saltos de línea dentro de la variable rompen la plantilla.
+    let msg = `${nuevos.length} alumno(s) con más de 3 semanas en seguimiento sin pagar: ${nuevos.join(', ')}.`;
     if (prim.length) msg += ` Empecemos: ¿suspendo a ${prim[0].cliente_nombre}? Respondé SI o NO.`;
-    const sidNotif = process.env.TEMPLATE_NOTIFICACION_COSACO;
-    if (sidNotif) await enviarTemplate(AUDITOR, sidNotif, { "1": msg }, msg, 'Cosaco').catch(() => {});
-    else await enviarWhatsApp(AUDITOR, msg).catch(() => {});
+    await avisarCosaco(msg);
   }
   console.log(`[SEG-SUSP] ${nuevos.length} suspension(es) encolada(s) para que Cosaco autorice`);
 }
 
-// 10:00 AR, lunes a viernes: primero el control de los 5 días hábiles y después
+// 10:00 AR, lunes a viernes: primero el control de las 3 semanas y después
 // los mensajes por las asistencias nuevas (presente → cobro, ausente → consulta).
 cron.schedule('0 10 * * 1-5', async () => {
   try { await suspenderSeguimientoVencido(); } catch (e) { console.error('cron seg-susp:', e.message); }
