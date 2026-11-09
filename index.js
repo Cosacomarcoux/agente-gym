@@ -45,11 +45,49 @@ function esOperador(tel) {
 // (está operando); si lo dispara un cliente, al CONFIRMADOR (admin).
 function jefeDe(remitente) { return esOperador(remitente) ? remitente : CONFIRMADOR; }
 
-const pagosEsperandoNombre = new Map(); // telefono → { monto, metodo }
-const comprobantePendiente = new Map(); // telefono → true (mandó imagen/comprobante)
+// ── Estados de pago "en curso", persistidos en la base ───────────────────────
+// Antes estos estados vivían SOLO en memoria: si el bot se reiniciaba (deploy o
+// crash) mientras un cliente cargaba un pago, se perdía todo y había que empezar
+// de cero (preguntaba nombre y monto de nuevo). MapaPersistente los espeja a la
+// tabla estado_cliente y se restauran al arrancar. Como solo se usan .set/.get/
+// .has/.delete, el resto del código no cambia.
+function _persistirEstado(tipo, tel, val) {
+  pool.query(
+    `INSERT INTO estado_cliente (telefono, tipo, datos, actualizado) VALUES ($1, $2, $3, NOW())
+     ON CONFLICT (telefono, tipo) DO UPDATE SET datos = $3, actualizado = NOW()`,
+    [tel, tipo, JSON.stringify(val === undefined ? null : val)]
+  ).catch(() => {});
+}
+function _borrarEstado(tipo, tel) {
+  pool.query(`DELETE FROM estado_cliente WHERE telefono = $1 AND tipo = $2`, [tel, tipo]).catch(() => {});
+}
+class MapaPersistente {
+  constructor(tipo) { this.m = new Map(); this.tipo = tipo; }
+  has(k) { return this.m.has(k); }
+  get(k) { return this.m.get(k); }
+  set(k, v) { this.m.set(k, v); _persistirEstado(this.tipo, k, v); return this; }
+  delete(k) { const r = this.m.delete(k); _borrarEstado(this.tipo, k); return r; }
+}
+async function restaurarEstados() {
+  try {
+    const { rows } = await pool.query(
+      `SELECT telefono, tipo, datos FROM estado_cliente WHERE actualizado > NOW() - INTERVAL '24 hours'`);
+    const mapas = { nombre: pagosEsperandoNombre, comprobante: comprobantePendiente, monto: montoPendiente };
+    let n = 0;
+    for (const r of rows) {
+      const mp = mapas[r.tipo];
+      if (mp) { mp.m.set(r.telefono, r.datos); n++; } // set DIRECTO al Map interno (no re-persistir)
+    }
+    await pool.query(`DELETE FROM estado_cliente WHERE actualizado <= NOW() - INTERVAL '24 hours'`).catch(() => {});
+    console.log(`[ESTADO] ${n} pago(s) en curso restaurados tras reiniciar`);
+  } catch (e) { console.error('[ESTADO] restaurar:', e.message); }
+}
+
+const pagosEsperandoNombre = new MapaPersistente('nombre'); // telefono → { monto, metodo }
+const comprobantePendiente = new MapaPersistente('comprobante'); // telefono → true (mandó comprobante)
 const cobrosPendientesDatos = new Map(); // telefonoCosaco → { nombreCliente, metodo, clienteId, clienteNombre }
 const tercerTurnoPendiente = new Map(); // telefonoCosaco → { clienteId, clienteNombre, turnoIds, clienteFrom }
-const montoPendiente = new Map();       // remitente → { clienteId, clienteNombre, metodo } esperando que diga el monto
+const montoPendiente = new MapaPersistente('monto'); // remitente → { clienteId, clienteNombre, metodo } esperando el monto
 const promesaAvisada = new Map();       // remitente → timestamp del último aviso de "paga después" (throttle 1h)
 const ausenciaAvisada = new Map();      // remitente → timestamp del último aviso de "deja de venir" (throttle 6h)
 const derivacionAvisada = new Map();    // remitente → timestamp del último aviso de "no entendí, tomá vos" (throttle 20min)
@@ -127,6 +165,15 @@ async function initDB() {
     -- Comprobantes/imágenes: guardamos la URL de Twilio (se sirve luego por proxy)
     ALTER TABLE conversaciones ADD COLUMN IF NOT EXISTS media_url TEXT;
     ALTER TABLE conversaciones ADD COLUMN IF NOT EXISTS media_type VARCHAR(60);
+    -- Estado de un pago "en curso" (el cliente está a mitad de cargarlo). Se
+    -- persiste para que sobreviva a un reinicio del bot (antes vivía en memoria).
+    CREATE TABLE IF NOT EXISTS estado_cliente (
+      telefono VARCHAR(50) NOT NULL,
+      tipo VARCHAR(20) NOT NULL,
+      datos JSONB,
+      actualizado TIMESTAMPTZ DEFAULT NOW(),
+      PRIMARY KEY (telefono, tipo)
+    );
   `);
   console.log('Tablas listas');
 }
@@ -3601,6 +3648,6 @@ app.get('/test-jobs', async (req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Servidor en puerto ${PORT}`);
-  initDB().catch(err => console.error('Error initDB:', err.message));
+  initDB().then(() => restaurarEstados()).catch(err => console.error('Error initDB:', err.message));
   loginConReintentos().catch(() => {});
 });
