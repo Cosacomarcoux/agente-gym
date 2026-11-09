@@ -258,6 +258,122 @@ async function hayPagoPendiente(clienteId) {
   return rows.length > 0;
 }
 
+// ── PAGOS DEL CLIENTE: helpers únicos (modelos de pago simples) ──────────
+const PLAN_TEXTO = { 1: '1 vez por semana', 2: '2 veces por semana', 3: '3 veces por semana' };
+const PLAN_MONTO = { 1: 29000, 2: 35000, 3: 39000 };
+const fmtPesos = n => Number(n).toLocaleString('es-AR');
+
+// Monto del plan de la jugadora, para PROPONERLO ("¿pagaste $35.000?"). Solo es
+// una sugerencia: el pago se encola únicamente si la jugadora responde SÍ, y
+// después igual lo confirma Cosaco. Con beca no se sugiere (el monto varía).
+async function montoSugeridoDe(cliente) {
+  try {
+    let c = cliente;
+    if (!c || !c.id) return null;
+    if (c.costo == null && c.plan == null) {
+      const r = await fetch(`${GYM_API}/clientes/${c.id}`, { headers: { Authorization: `Bearer ${GYM_TOKEN}` }, signal: AbortSignal.timeout(15000) });
+      if (!r.ok) return null;
+      c = await r.json();
+    }
+    if (c.beca) return null;
+    const monto = Number(c.costo) || PLAN_MONTO[c.plan] || null;
+    return monto ? { monto, planTexto: PLAN_TEXTO[c.plan] || null } : null;
+  } catch { return null; }
+}
+
+// MODELO 1: la jugadora (ya identificada) avisó que pagó pero sin monto →
+// le proponemos el monto de su plan; con un "sí" queda listo.
+async function pedirMontoConSugerencia(remitente, cliente, metodo, intro) {
+  const sug = await montoSugeridoDe(cliente);
+  const nombre1 = String(cliente.nombre || '').split(' ')[0];
+  montoPendiente.set(remitente, {
+    clienteId: cliente.id, clienteNombre: cliente.nombre, metodo: metodo || 'Transferencia',
+    montoSugerido: sug ? sug.monto : undefined,
+  });
+  const saludo = intro || `¡Gracias por avisar, ${nombre1}! 🏑`;
+  if (sug) {
+    await enviarWhatsApp(remitente,
+      `${saludo}
+¿Pagaste *$${fmtPesos(sug.monto)}*${sug.planTexto ? ` de tu plan (${sug.planTexto})` : ''}? Respondé *SÍ* o escribime el monto.`,
+      cliente.nombre);
+  } else {
+    await enviarWhatsApp(remitente, `${saludo}
+¿Cuánto pagaste? (ej: 35000)`, cliente.nombre);
+  }
+}
+
+// Encola un pago de cliente para que Cosaco lo confirme. Único punto de entrada
+// para los modelos simples. Devuelve 'duplicado' si ya había uno esperando.
+async function encolarPagoCliente(remitente, cliente, monto, metodo) {
+  if (!(Number(monto) > 0)) throw new Error('monto inválido');
+  if (await hayPagoPendiente(cliente.id)) return 'duplicado';
+  await pool.query(
+    `INSERT INTO pagos_pendientes (cliente_id, cliente_nombre, cliente_from, monto, metodo) VALUES ($1, $2, $3, $4, $5)`,
+    [cliente.id, cliente.nombre, remitente, monto, metodo || 'Transferencia']
+  );
+  const { rows: existing } = await pool.query(`SELECT COUNT(*) AS count FROM pagos_pendientes WHERE esperando_confirmacion = true`);
+  if (parseInt(existing[0].count) <= 1) {
+    const msg = `💰 ${cliente.nombre} - $${monto} - ${metodo || 'Transferencia'}\n¿Confirmás? SÍ o NO`;
+    await twilioClient.messages.create({ from: TWILIO_FROM, to: jefeDe(remitente), body: msg });
+    guardarMensaje(jefeDe(remitente), null, msg, 'agente');
+  }
+  return 'ok';
+}
+
+// Busca UNA ficha por nombre (coincidencia fuerte, con fallback de 2do nombre).
+// Devuelve el cliente, 'varios' o null. Nunca adivina.
+async function resolverClientePorNombre(nombre, remitente) {
+  const buscado = guards.limpiarNombreBuscado(nombre) || nombre;
+  const clientes = await ejecutarTool('get_clientes', { buscar: buscado }, remitente);
+  let fuertes = guards.filtrarClientesPorNombre(buscado, clientes);
+  if (fuertes.length === 0) {
+    fuertes = (Array.isArray(clientes) ? clientes : []).filter(c => guards.nombreCoincide(c && c.nombre, buscado));
+  }
+  if (fuertes.length === 1) return fuertes[0];
+  if (fuertes.length > 1) return 'varios';
+  return null;
+}
+
+// MODELO 3: "Pagué 35000 por Emilia Medina [y 35000 por Sol Medina]".
+// Resuelve cada nombre por coincidencia fuerte y encola cada pago. Devuelve true
+// si manejó el mensaje (siempre, cuando hay al menos un nombre).
+async function manejarPagosPorTerceros(remitente, terceros) {
+  if (!GYM_TOKEN) await loginConReintentos(3, 3000);
+  const ok = [], dup = [], noEnc = [], varios = [];
+  for (const t of terceros) {
+    const cli = await resolverClientePorNombre(t.nombre, remitente);
+    if (!cli) { noEnc.push(t); continue; }
+    if (cli === 'varios') { varios.push(t); continue; }
+    if (!(t.monto > 0)) {
+      if (terceros.length === 1) {
+        await pedirMontoConSugerencia(remitente, cli, t.metodo, `¡Gracias! Encontré a ${cli.nombre} 🏑`);
+        return true;
+      }
+      noEnc.push({ ...t, sinMonto: true, nombre: cli.nombre });
+      continue;
+    }
+    const r = await encolarPagoCliente(remitente, cli, t.monto, t.metodo);
+    (r === 'duplicado' ? dup : ok).push({ nombre: cli.nombre, monto: t.monto });
+  }
+  // Un solo nombre y no lo encontramos → seguir esperando el nombre correcto.
+  if (terceros.length === 1 && (noEnc.length || varios.length)) {
+    const t = terceros[0];
+    pagosEsperandoNombre.set(remitente, { monto: t.monto || undefined, metodo: t.metodo });
+    await enviarWhatsApp(remitente, varios.length
+      ? `Hay varias jugadoras que coinciden con "${t.nombre}" 🤔 Pasame el nombre y apellido completos tal como está registrada.`
+      : `No encontré a "${t.nombre}" en el sistema 🤔 Pasame el nombre y apellido de la jugadora tal como está registrada.`);
+    return true;
+  }
+  let msg = '';
+  if (ok.length) msg += `¡Gracias! Ya le avisé al equipo para confirmar:\n${ok.map(p => `• ${p.nombre} — $${fmtPesos(p.monto)}`).join('\n')}\n`;
+  if (dup.length) msg += `Ya tenía registrado (en espera de confirmación): ${dup.map(p => p.nombre).join(', ')}\n`;
+  for (const t of noEnc) msg += t.sinMonto ? `⚠️ Me falta el monto de ${t.nombre}\n` : `⚠️ No encontré a "${t.nombre}" — revisá cómo está registrada\n`;
+  for (const t of varios) msg += `⚠️ Hay varias fichas de "${t.nombre}" — pasame el nombre completo\n`;
+  msg += `En breve te confirmamos 🏑`;
+  await enviarWhatsApp(remitente, msg.trim());
+  return true;
+}
+
 function guardarMensaje(from, nombre, texto, rol, contentJson = null, media = null) {
   const textoFinal = (!texto || !texto.trim() || texto.trim().startsWith('[')) ? '[sin texto]' : texto;
   pool.query(
@@ -1721,6 +1837,28 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
     // ── 0-bis. ESPERANDO EL MONTO (le preguntamos "¿cuánto pagaste?") ─────
     if (!esCosaco && montoPendiente.has(remitente)) {
       const datos = montoPendiente.get(remitente);
+      // Si en vez del monto mandó "Pagué 35000 por Otra Jugadora" → Modelo 3
+      const tercerosM = guards.parsearPagosPorTerceros(mensaje);
+      if (tercerosM.length >= 1) {
+        montoPendiente.delete(remitente);
+        await manejarPagosPorTerceros(remitente, tercerosM);
+        return;
+      }
+      // MODELO 1: le propusimos el monto de su plan → "sí" lo acepta.
+      if (datos.montoSugerido && guards.esAfirmacion(mensaje)) {
+        montoPendiente.delete(remitente);
+        const r = await encolarPagoCliente(remitente, { id: datos.clienteId, nombre: datos.clienteNombre }, datos.montoSugerido, datos.metodo);
+        await enviarWhatsApp(remitente, r === 'duplicado'
+          ? `¡Ya lo tengo registrado! En breve te confirmamos 🏑`
+          : `¡Perfecto! Ya le avisé al equipo, en breve te confirmamos 🏑`, datos.clienteNombre);
+        return;
+      }
+      // "No" al monto sugerido → seguimos esperando el monto real.
+      if (datos.montoSugerido && /^no\b/i.test(guards.normalizarTexto(mensaje)) && !(guards.parsearMontoPago(mensaje) > 0)) {
+        montoPendiente.set(remitente, { ...datos, montoSugerido: undefined });
+        await enviarWhatsApp(remitente, `Dale, ¿cuánto pagaste entonces? (ej: 29000)`, datos.clienteNombre);
+        return;
+      }
       // Cortesía mientras esperamos el monto → limpiar y cortar (no insistir).
       if (guards.esCortesia(mensaje)) {
         montoPendiente.delete(remitente);
@@ -1730,21 +1868,11 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
       const monto = guards.parsearMontoPago(mensaje) || 0;
       if (monto > 0) {
         montoPendiente.delete(remitente);
-        if (!(await hayPagoPendiente(datos.clienteId))) {
-          await pool.query(
-            `INSERT INTO pagos_pendientes (cliente_id, cliente_nombre, cliente_from, monto, metodo) VALUES ($1, $2, $3, $4, $5)`,
-            [datos.clienteId, datos.clienteNombre, remitente, monto, datos.metodo || 'Transferencia']
-          );
-          const { rows: existing } = await pool.query(`SELECT COUNT(*) AS count FROM pagos_pendientes WHERE esperando_confirmacion = true`);
-          if (parseInt(existing[0].count) <= 1) {
-            const msg = `💰 ${datos.clienteNombre} - $${monto} - ${datos.metodo || 'Transferencia'}\n¿Confirmás? SÍ o NO`;
-            await twilioClient.messages.create({ from: TWILIO_FROM, to: jefeDe(remitente), body: msg });
-            guardarMensaje(jefeDe(remitente), null, msg, 'agente');
-          }
-        }
+        const metodoMsg = /efectivo|efvo/i.test(mensaje) ? 'Efectivo' : (datos.metodo || 'Transferencia');
+        await encolarPagoCliente(remitente, { id: datos.clienteId, nombre: datos.clienteNombre }, monto, metodoMsg);
         await enviarWhatsApp(remitente, `¡Perfecto! Ya le avisé al equipo, en breve te confirmamos 🏑`, datos.clienteNombre);
       } else {
-        await enviarWhatsApp(remitente, `No pude leer el monto 😅 ¿Me lo decís en números? Ej: 35000`, datos.clienteNombre);
+        await enviarWhatsApp(remitente, `No pude leer el monto 😅 Escribímelo en números, ej: *35000*${datos.montoSugerido ? ` (o respondé *SÍ* si fueron $${fmtPesos(datos.montoSugerido)})` : ''}`, datos.clienteNombre);
       }
       return;
     }
@@ -1756,6 +1884,14 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
         comprobantePendiente.delete(remitente);
         pagosEsperandoNombre.delete(remitente);
         await enviarWhatsApp(remitente, `¡De nada! Cualquier cosa escribinos 🏑`);
+        return;
+      }
+      // "Pagué 35000 por Emilia Medina (y 35000 por Sol Medina)" → Modelo 3.
+      const tercerosC = guards.parsearPagosPorTerceros(mensaje);
+      if (tercerosC.length >= 1) {
+        comprobantePendiente.delete(remitente);
+        pagosEsperandoNombre.delete(remitente);
+        await manejarPagosPorTerceros(remitente, tercerosC);
         return;
       }
       // ACUMULAR datos entre mensajes: guardamos lo que ya sabemos (ficha y/o
@@ -1818,6 +1954,15 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
         return;
       }
 
+      // Ya sabemos QUIÉN es pero falta el monto → Modelo 1 (proponer el del plan).
+      if (clienteId && !monto) {
+        comprobantePendiente.delete(remitente);
+        pagosEsperandoNombre.delete(remitente);
+        await pedirMontoConSugerencia(remitente, { id: clienteId, nombre: clienteNombre }, 'Transferencia',
+          `¡Gracias ${String(clienteNombre).split(' ')[0]}! 🏑`);
+        return;
+      }
+
       // Falta algo: guardar lo que tengamos y pedir SOLO lo que falta.
       pagosEsperandoNombre.set(remitente, {
         clienteId: clienteId || undefined,
@@ -1826,7 +1971,7 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
       });
       comprobantePendiente.set(remitente, true);
       if (!clienteId) {
-        await enviarWhatsApp(remitente, `Para registrar el pago necesito el nombre y apellido de la jugadora, tal como está registrada. Si escribís por tu hija, pasame el nombre de ella (no el tuyo) 🏑`);
+        await enviarWhatsApp(remitente, `Para registrarlo rápido escribime así 👇\n*Pagué 35000 por Nombre Apellido*\n(el nombre de la jugadora tal como está registrada; si escribís por tu hija, el de ella) 🏑`);
       } else {
         await enviarWhatsApp(remitente, `¡Gracias ${clienteNombre.split(' ')[0]}! ¿Cuál fue el monto que transferiste? (ej: 35000)`, clienteNombre);
       }
@@ -1919,7 +2064,8 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
           const fuertes = guards.filtrarClientesPorNombre(nombreBusca, clientes);
           if (fuertes.length === 1) {
             const cliente = fuertes[0];
-            const metodo = mBeca ? `${p.metodo} (Beca ${mBeca[1]}%)` : p.metodo;
+            const becaPct = p.beca || (mBeca ? mBeca[1] : null);
+            const metodo = becaPct ? `${p.metodo} (Beca ${becaPct}%)` : p.metodo;
             await pool.query(`DELETE FROM pagos_pendientes WHERE esperando_confirmacion = true AND cliente_id = $1`, [cliente.id]);
             await pool.query(
               `INSERT INTO pagos_pendientes (cliente_id, cliente_nombre, cliente_from, monto, metodo) VALUES ($1, $2, $3, $4, $5)`,
@@ -2267,6 +2413,13 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
         }
         pagosEsperandoNombre.delete(remitente);
         if (!GYM_TOKEN) await loginConReintentos(3, 3000);
+        // Respondió con el formato "Pagué 35000 por Nombre Apellido" → Modelo 3
+        const tercerosN = guards.parsearPagosPorTerceros(mensaje);
+        if (tercerosN.length >= 1) {
+          if (tercerosN.length === 1 && !tercerosN[0].monto && datosPago.monto) tercerosN[0].monto = Number(datosPago.monto);
+          await manejarPagosPorTerceros(remitente, tercerosN);
+          return;
+        }
         const nombreDado = guards.limpiarNombreBuscado(mensaje.replace(/\$?\d[\d.,]*\w*/g, ' ')) || mensaje.trim();
         const clientes = await ejecutarTool('get_clientes', { buscar: nombreDado }, remitente);
         let fuertes = guards.filtrarClientesPorNombre(nombreDado, clientes);
@@ -2278,10 +2431,9 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
           const cliente = fuertes[0];
           // Monto: el que ya sabíamos, o si el cliente lo mandó junto con el nombre.
           const montoDP = Number(datosPago.monto) || guards.parsearMontoPago(mensaje) || 0;
-          // FIX $0: si no sabemos el monto, preguntarlo en vez de encolar $0
+          // FIX $0: si no sabemos el monto, preguntarlo (Modelo 1: proponer el del plan)
           if (!(montoDP > 0)) {
-            montoPendiente.set(remitente, { clienteId: cliente.id, clienteNombre: cliente.nombre, metodo: datosPago.metodo || 'Transferencia' });
-            await enviarWhatsApp(remitente, `Gracias ${cliente.nombre.split(' ')[0]}! ¿Cuál fue el monto que pagaste? 🏑`, cliente.nombre);
+            await pedirMontoConSugerencia(remitente, cliente, datosPago.metodo || 'Transferencia', `¡Gracias! Encontré a ${cliente.nombre} 🏑`);
             return;
           }
           if (await hayPagoPendiente(cliente.id)) {
@@ -2357,37 +2509,29 @@ async function procesarMensaje(mensaje, remitente, profileName = null) {
       // El cliente dice que YA pagó → encolar para que Cosaco confirme.
       if (esPagoRealizado && !esIntFutura) {
         if (!GYM_TOKEN) await loginConReintentos(3, 3000);
+        // MODELO 3: pago a nombre de otra(s) jugadora(s) ("por Emilia Medina")
+        const terceros = guards.parsearPagosPorTerceros(mensaje);
+        if (terceros.length >= 1) {
+          await manejarPagosPorTerceros(remitente, terceros);
+          return;
+        }
         const cliente = await buscarClientePorTelefono(remitente);
+        const montoMsg = guards.parsearMontoFrase(mensaje) || 0;
+        const metodoMsg = guards.parsearMetodo(mensaje);
         if (cliente) {
-          // FIX $0: intentar leer el monto del propio mensaje ("transferí 35000")
-          const mMonto = mensaje.match(/\$?\s*([\d]{4,}[\d.,]*)/);
-          const montoMsg = mMonto ? parseFloat(mMonto[1].replace(/\./g, '').replace(',', '.')) : 0;
+          // MODELO 1: "ya pagué" sin monto → proponer el monto de su plan
           if (!(montoMsg > 0)) {
-            montoPendiente.set(remitente, { clienteId: cliente.id, clienteNombre: cliente.nombre, metodo: 'Transferencia' });
-            await enviarWhatsApp(remitente, `¡Gracias por avisar! ¿Cuál fue el monto que pagaste? 🏑`, cliente.nombre);
+            await pedirMontoConSugerencia(remitente, cliente, metodoMsg);
             return;
           }
-          if (await hayPagoPendiente(cliente.id)) {
-            await enviarWhatsApp(remitente, `¡Ya lo tengo registrado! En breve te confirmamos 🏑`, cliente.nombre);
-            return;
-          }
-          await pool.query(
-            `INSERT INTO pagos_pendientes (cliente_id, cliente_nombre, cliente_from, monto, metodo) VALUES ($1, $2, $3, $4, $5)`,
-            [cliente.id, cliente.nombre, remitente, montoMsg, 'Transferencia']
-          );
-          const { rows: existing } = await pool.query(`SELECT COUNT(*) AS count FROM pagos_pendientes WHERE esperando_confirmacion = true`);
-          if (parseInt(existing[0].count) <= 1) {
-            const msg = `💰 ${cliente.nombre} - $${montoMsg} - Transferencia\n¿Confirmás? SÍ o NO`;
-            await twilioClient.messages.create({ from: TWILIO_FROM, to: jefeDe(remitente), body: msg });
-            guardarMensaje(jefeDe(remitente), null, msg, 'agente');
-          }
-          await enviarWhatsApp(remitente, `Gracias! Ya le avisé al equipo, en breve te confirmamos 🏑`, cliente.nombre);
+          // MODELO 2: "Pagué 35000 transferencia" → todo en una línea
+          const r = await encolarPagoCliente(remitente, cliente, montoMsg, metodoMsg);
+          await enviarWhatsApp(remitente, r === 'duplicado'
+            ? `¡Ya lo tengo registrado! En breve te confirmamos 🏑`
+            : `Gracias! Ya le avisé al equipo, en breve te confirmamos 🏑`, cliente.nombre);
         } else {
-          const matchMonto = mensaje.match(/\$?(\d[\d.,]*)\s*(transferencia|efectivo)?/i);
-          const montoDetectado = matchMonto ? parseFloat(matchMonto[1].replace(/\./g, '').replace(',', '.')) : 0;
-          const metodoDetectado = matchMonto && matchMonto[2] ? (matchMonto[2].charAt(0).toUpperCase() + matchMonto[2].slice(1).toLowerCase()) : 'Transferencia';
-          pagosEsperandoNombre.set(remitente, { monto: montoDetectado, metodo: metodoDetectado });
-          await enviarWhatsApp(remitente, `¡Gracias por avisarnos! Para identificar el pago, pasame el nombre y apellido de la jugadora tal como está registrada. Si escribís por tu hija, es el nombre de ella (no el tuyo) 🏑`);
+          pagosEsperandoNombre.set(remitente, { monto: montoMsg || undefined, metodo: metodoMsg });
+          await enviarWhatsApp(remitente, `¡Gracias por avisarnos! Para registrarlo rápido escribime así 👇\n*Pagué 35000 por Nombre Apellido*\n(el nombre de la jugadora tal como está registrada; si escribís por tu hija, el de ella) 🏑`);
         }
         return;
       }
@@ -2782,11 +2926,10 @@ app.post('/webhook', (req, res) => {
         try {
           const cli = await buscarClientePorTelefono(remitente).catch(() => null);
           if (cli && cli.id) {
-            montoPendiente.set(remitente, { clienteId: cli.id, clienteNombre: cli.nombre, metodo: 'Transferencia' });
-            await enviarWhatsApp(remitente, `¡Recibí tu comprobante, ${cli.nombre.split(' ')[0]}! 🏑 ¿Cuánto transferiste? (ej: 35000)`, cli.nombre);
+            await pedirMontoConSugerencia(remitente, cli, 'Transferencia', `¡Recibí tu comprobante, ${cli.nombre.split(' ')[0]}! 🏑`);
           } else {
             comprobantePendiente.set(remitente, true);
-            await enviarWhatsApp(remitente, '¡Recibí el comprobante! 🏑 Para registrar el pago, pasame el *nombre y apellido* de la jugadora (si sos el papá/mamá, el de tu hija) y el *monto* que transferiste.');
+            await enviarWhatsApp(remitente, '¡Recibí el comprobante! 🏑 Para registrarlo escribime así 👇\n*Pagué 35000 por Nombre Apellido*\n(el nombre de la jugadora; si sos el papá/mamá, el de tu hija)');
           }
         } catch (e) { console.error('Error respondiendo comprobante:', e.message); }
       })();

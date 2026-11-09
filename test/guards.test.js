@@ -391,3 +391,43 @@ test('parsearPagosLibres acepta el monto ANTES del nombre ("cobré X a Fulano")'
   assert.strictEqual(p[0].monto, 35000);
   assert.strictEqual(p[0].metodo, 'Efectivo');
 });
+
+// ── Modelos simples de pago (nov 2026) ──────────────────────────────────────
+test('parsearMontoFrase: montos en frase, sin confundir números cortos', () => {
+  assert.strictEqual(g.parsearMontoFrase('pagué 35000 transferencia'), 35000);
+  assert.strictEqual(g.parsearMontoFrase('pagué 35 mil'), 35000);
+  assert.strictEqual(g.parsearMontoFrase('transferí $35.000'), 35000);
+  assert.strictEqual(g.parsearMontoFrase('pagué el 5'), null);
+  assert.strictEqual(g.parsearMontoFrase('ya pagué'), null);
+});
+
+test('parsearMetodo: efectivo o transferencia por defecto', () => {
+  assert.strictEqual(g.parsearMetodo('pagué 35000 en efectivo'), 'Efectivo');
+  assert.strictEqual(g.parsearMetodo('pagué 35000'), 'Transferencia');
+});
+
+test('esAfirmacion: sí al monto sugerido (y no a montos ni cortesías)', () => {
+  for (const t of ['si', 'Sí', 'dale', 'correcto', 'si ese', 'exacto']) assert.ok(g.esAfirmacion(t), t);
+  for (const t of ['no', '35000', 'gracias', 'si pero pagué 29000']) assert.ok(!g.esAfirmacion(t), t);
+});
+
+test('parsearPagosPorTerceros: pagos a nombre de otra jugadora', () => {
+  assert.deepStrictEqual(g.parsearPagosPorTerceros('Pagué 35000 por Emilia Medina'),
+    [{ nombre: 'Emilia Medina', monto: 35000, metodo: 'Transferencia' }]);
+  const dos = g.parsearPagosPorTerceros('Pagué 35000 por Emilia Medina y 29000 por Sol Medina en efectivo');
+  assert.strictEqual(dos.length, 2);
+  assert.strictEqual(dos[1].nombre, 'Sol Medina');
+  assert.strictEqual(dos[1].monto, 29000);
+  assert.strictEqual(g.parsearPagosPorTerceros('Transferencia de Alfonsina Farhat Nazar')[0].monto, null);
+  for (const t of ['pagué 35000 de julio', 'pagué 35000 por transferencia', 'ya pagué por mi hija', 'pagué 35000 por favor', 'pagué por mercado pago 35000']) {
+    assert.deepStrictEqual(g.parsearPagosPorTerceros(t), [], t);
+  }
+});
+
+test('parsearPagosLibres: lista de Cosaco con beca no ensucia el nombre siguiente', () => {
+  const r = g.parsearPagosLibres('Clara Marcoux 35000 efectivo\nDolores Costas 17500 beca 50\nMilagros Montenegro 29000');
+  assert.deepStrictEqual(r.map(p => p.nombre), ['Clara Marcoux', 'Dolores Costas', 'Milagros Montenegro']);
+  assert.strictEqual(r[0].metodo, 'Efectivo');
+  assert.strictEqual(r[1].beca, 50);
+  assert.strictEqual(r[2].beca, null);
+});

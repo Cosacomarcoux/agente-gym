@@ -120,6 +120,87 @@ function parsearMontoPago(texto) {
   return null;
 }
 
+// Monto DENTRO DE UNA FRASE de pago ("pagué 35000", "pagué 35 mil", "$35.000").
+// A diferencia de parsearMontoPago NO toma números pelados cortos: en una frase
+// como "pagué el 5" o "pagué la cuota 2" ese número no es un monto. Se usa en el
+// primer mensaje del cliente; parsearMontoPago queda para cuando YA le
+// preguntamos "¿cuánto pagaste?" y responde "35".
+function parsearMontoFrase(texto) {
+  const t = String(texto || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+  if (!t.trim()) return null;
+  let m = t.match(/\$?\s*(\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{1,2})?|\d{4,})/);
+  if (m) {
+    const n = parseFloat(m[1].replace(/[.,](?=\d{3}\b)/g, '').replace(',', '.'));
+    if (Number.isFinite(n)) return n;
+  }
+  m = t.match(/(\d{1,3})\s*(mil\w*|lucas?|k)\b/);
+  if (m) return parseInt(m[1], 10) * 1000;
+  m = t.match(/\$\s*(\d{2,3})\b/);                 // "$35" → 35000
+  if (m) return parseInt(m[1], 10) * 1000;
+  return null;
+}
+
+// Método de pago mencionado en el texto (por defecto, transferencia).
+function parsearMetodo(texto) {
+  return /efectivo|efvo|\bcash\b|en mano/i.test(String(texto || '')) ? 'Efectivo' : 'Transferencia';
+}
+
+// ¿Respondió que SÍ a una pregunta de confirmación? ("sí", "dale", "correcto"...)
+function esAfirmacion(texto) {
+  const t = normalizarTexto(texto).replace(/[!.,]+/g, ' ').trim();
+  return /^(si+|sip|dale|ok|oka|okey|okay|correcto|exacto|eso|ese|asi es|confirmo|afirmativo|claro|si si|si ese|si correcto|si eso|si dale)( (gracias|graciass*|che|bro|perfecto))?$/.test(t);
+}
+
+// "Pagué 35000 por Emilia Medina" / "Pagué 35000 por Emilia Medina y 35000 por
+// Sol Medina" / "transferencia de Alfonsina Farhat Nazar". Pagos hechos A NOMBRE
+// DE OTRA PERSONA (la mamá que paga la cuota de la hija, dos hermanas, etc.).
+// Devuelve [{ nombre, monto|null, metodo }] — solo nombres de 2+ palabras, así
+// "pagué 35000 de julio" o "por transferencia" no se confunden con nombres.
+function parsearPagosPorTerceros(texto) {
+  const s = String(texto || '');
+  if (!s.trim()) return [];
+  const STOP = new Set(['y', 'e', 'o', 'transferencia', 'transfe', 'transf', 'efectivo', 'efvo', 'mercado', 'pago', 'pagos',
+    'mp', 'alias', 'cbu', 'cvu', 'banco', 'cuenta', 'favor', 'mes', 'cuota', 'plan', 'del', 'de', 'con', 'en', 'que', 'el',
+    'la', 'los', 'las', 'este', 'esta', 'mi', 'su', 'tu', 'hija', 'hijo', 'hijas', 'hijos', 'nena', 'nene', 'sobrina', 'sobrino',
+    'enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'setiembre', 'octubre',
+    'noviembre', 'diciembre', 'ya', 'hoy', 'ayer', 'recien', 'gracias', 'porfa', 'saludos', 'pesos', 'mil', 'lucas']);
+  const SALTAR_INICIO = new Set(['mi', 'la', 'el', 'las', 'los', 'su', 'hija', 'hijo', 'hijas', 'nena', 'nene', 'sobrina', 'sobrino', 'nombre', 'a']);
+  // Dónde arranca cada "por/para/de/a nombre de" seguido de un nombre
+  const re = /\b(por|para|de)\s+/gi;
+  const encontrados = [];
+  let m;
+  while ((m = re.exec(s)) !== null) {
+    const resto = s.slice(re.lastIndex);
+    const palabras = resto.split(/\s+/);
+    const nombre = [];
+    let i = 0;
+    while (i < palabras.length && SALTAR_INICIO.has(normalizarTexto(palabras[i]))) i++;
+    let consumido = 0;
+    for (; i < palabras.length && nombre.length < 4; i++) {
+      const crudo = palabras[i];
+      const limpio = crudo.replace(/[^a-záéíóúñü]/gi, '');
+      const norm = normalizarTexto(limpio);
+      if (!limpio || STOP.has(norm) || /\d/.test(crudo)) break;
+      nombre.push(limpio);
+      if (/[.,;:!?\n]$/.test(crudo)) { i++; break; }
+    }
+    consumido = palabras.slice(0, i).join(' ').length;
+    if (nombre.length >= 2) {
+      encontrados.push({ nombre: capitalizarNombre(nombre.join(' ')), desde: m.index, hasta: re.lastIndex + consumido });
+    }
+  }
+  if (!encontrados.length) return [];
+  return encontrados.map((e, idx) => {
+    const antesDesde = idx === 0 ? 0 : encontrados[idx - 1].hasta;
+    const despuesHasta = idx + 1 < encontrados.length ? encontrados[idx + 1].desde : s.length;
+    const antes = s.slice(antesDesde, e.desde);
+    const despues = s.slice(e.hasta, despuesHasta);
+    const monto = parsearMontoFrase(antes) || parsearMontoFrase(despues) ||
+      (encontrados.length === 1 ? parsearMontoFrase(s) : null);
+    return { nombre: e.nombre, monto: monto || null, metodo: parsearMetodo(antes + ' ' + despues) };
+  });
+}
+
 // ── RESOLUCIÓN DE NOMBRES (evitar registrar pagos al cliente equivocado) ─────
 // Bug histórico: el bot buscaba "Martina Munar", la API devolvía también a
 // "Martina Chaparro" (match por el nombre de pila) y el código agarraba el
@@ -303,9 +384,18 @@ function parsearPagosLibres(texto) {
   let cursor = c0 >= 0 ? c0 + 1 : 0;
   const pagos = [];
   for (let i = 0; i < ms.length; i++) {
-    const seg = s.slice(cursor, ms[i].start);                 // texto del nombre (antes del monto)
-    const post = s.slice(ms[i].end, i + 1 < ms.length ? ms[i + 1].start : s.length); // método (después)
-    const metodo = /efectivo|efvo|cash/i.test(post) ? 'Efectivo' : 'Transferencia';
+    // Nombre: lo que hay antes del monto, pero SOLO de su propio renglón (en una
+    // lista, el "beca 50" del renglón anterior se pegaba al nombre siguiente).
+    let segCrudo = s.slice(cursor, ms[i].start);
+    if (segCrudo.includes('\n')) segCrudo = segCrudo.slice(segCrudo.lastIndexOf('\n') + 1);
+    let seg = segCrudo.replace(/\b(con\s+)?beca\s*(del\s+|de\s+)?\d{1,3}\s*%?/gi, ' ');
+    // Lo que viene después del monto, hasta el fin del renglón (método / beca)
+    let post = s.slice(ms[i].end, i + 1 < ms.length ? ms[i + 1].start : s.length);
+    const postLinea = post.includes('\n') ? post.slice(0, post.indexOf('\n')) : post;
+    const metodo = /efectivo|efvo|cash/i.test(postLinea) ? 'Efectivo' : 'Transferencia';
+    const mBeca = (postLinea + ' ' + segCrudo).match(/beca\s*(?:del\s+|de\s+)?(\d{1,3})\s*%?/i);
+    const beca = mBeca ? parseInt(mBeca[1], 10) : null;
+    post = postLinea.replace(/\b(con\s+)?beca\s*(del\s+|de\s+)?\d{1,3}\s*%?/gi, ' ');
     // Limpia conectores sueltos al INICIO ("a/el/la") y al FINAL ("...de $42000" →
     // saca el "de", que no es parte del nombre).
     const limpiar = (txt) => limpiarNombreBuscado(txt)
@@ -320,7 +410,7 @@ function parsearPagosLibres(texto) {
       if (mPost) nombre = limpiar(mPost[1]);
     }
     if (valido(nombre)) {
-      pagos.push({ nombre: capitalizarNombre(nombre), monto: ms[i].monto, metodo });
+      pagos.push({ nombre: capitalizarNombre(nombre), monto: ms[i].monto, metodo, beca });
     }
     cursor = ms[i].end;
   }
@@ -369,6 +459,10 @@ module.exports = {
   esComandoConfirmarPagos,
   parsearMonto,
   parsearMontoPago,
+  parsearMontoFrase,
+  parsearMetodo,
+  esAfirmacion,
+  parsearPagosPorTerceros,
   parsearPagosLibres,
   esPedidoDeRegistroPago,
   montoValido,

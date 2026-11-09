@@ -37,6 +37,15 @@ dueño). Es hoy el **operador principal** del gimnasio.
    solo si sale bien se borra el pendiente. Si falla, queda en cola. (Antes se
    borraba antes de registrar → se perdían pagos.)
 5. **Promesa de pago futuro** ("te pago el viernes") → solo aviso a Cosaco, no encola.
+6. **Modelos simples de pago** (determinísticos, sin IA; helpers `pedirMontoConSugerencia`,
+   `encolarPagoCliente`, `manejarPagosPorTerceros` en `index.js`):
+   - M1 "ya pagué"/comprobante de jugadora identificada → se le PROPONE el monto de su
+     plan ("¿Pagaste $35.000? SÍ o el monto"). Solo se encola si responde SÍ (y después
+     Cosaco confirma igual). Es la única excepción a "nunca sacar el monto del plan".
+   - M2 "Pagué 35000 transferencia" → una línea.
+   - M3 "Pagué 35000 por Emilia Medina [y 35000 por Sol Medina]" → pago por otra(s).
+   - M4 (Cosaco) "Pago Clara Marcoux 35000 efectivo" o lista por renglón ("... beca 50").
+     El monto se registra TAL CUAL está escrito (la beca solo se anota).
 
 ## Otras reglas
 
