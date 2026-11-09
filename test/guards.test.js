@@ -376,3 +376,18 @@ test('parsearMontoPago devuelve null cuando no hay monto', () => {
     assert.strictEqual(g.parsearMontoPago(txt), null, `"${txt}" no debería tener monto`);
   }
 });
+
+// ── parsearPagosLibres: conectores al final y monto antes del nombre ─────────
+test('parsearPagosLibres saca el "de" antes del monto (bug real de Cosaco)', () => {
+  const p = g.parsearPagosLibres('registra el pago de Clara Marcoux de $42000 por transferencia');
+  assert.strictEqual(p.length, 1);
+  assert.strictEqual(p[0].nombre, 'Clara Marcoux');
+  assert.strictEqual(p[0].monto, 42000);
+});
+test('parsearPagosLibres acepta el monto ANTES del nombre ("cobré X a Fulano")', () => {
+  const p = g.parsearPagosLibres('cobré 35000 a Delfina Coronel en efectivo');
+  assert.strictEqual(p.length, 1);
+  assert.strictEqual(p[0].nombre, 'Delfina Coronel');
+  assert.strictEqual(p[0].monto, 35000);
+  assert.strictEqual(p[0].metodo, 'Efectivo');
+});

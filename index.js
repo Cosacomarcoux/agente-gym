@@ -2727,13 +2727,22 @@ app.post('/webhook', (req, res) => {
   guardarMensaje(remitente, profileName, mensaje || (media ? '📎 Imagen' : '[imagen]'), 'cliente', null, media);
   res.type('text/xml').send(new twilio.twiml.MessagingResponse().toString());
   if (numMedia > 0 && (!mensaje || !mensaje.trim())) {
-    // Comprobante (imagen sin texto) de un cliente → pedir nombre y monto.
+    // Comprobante (imagen sin texto) de un cliente. Primero intentamos RECONOCERLO
+    // por su teléfono: si está registrado, solo le pedimos el monto (un paso menos).
+    // Si no lo reconocemos, recién ahí le pedimos nombre + monto.
     if (!esOperador(remitente)) {
-      comprobantePendiente.set(remitente, true);
-      const resp = '¡Recibí el comprobante de transferencia! 🏑 Para registrar el pago necesito:\n- Nombre y apellido de la jugadora (tal como está registrada — si sos el papá o la mamá, es el nombre de tu hija, no el tuyo)\n- El monto que transferiste\n\nEscribime los dos datos y listo 😊';
-      twilioClient.messages.create({ from: TWILIO_FROM, to: remitente, body: resp })
-        .then(() => guardarMensaje(remitente, null, resp, 'agente'))
-        .catch(err => console.error('Error respondiendo comprobante:', err.message));
+      (async () => {
+        try {
+          const cli = await buscarClientePorTelefono(remitente).catch(() => null);
+          if (cli && cli.id) {
+            montoPendiente.set(remitente, { clienteId: cli.id, clienteNombre: cli.nombre, metodo: 'Transferencia' });
+            await enviarWhatsApp(remitente, `¡Recibí tu comprobante, ${cli.nombre.split(' ')[0]}! 🏑 ¿Cuánto transferiste? (ej: 35000)`, cli.nombre);
+          } else {
+            comprobantePendiente.set(remitente, true);
+            await enviarWhatsApp(remitente, '¡Recibí el comprobante! 🏑 Para registrar el pago, pasame el *nombre y apellido* de la jugadora (si sos el papá/mamá, el de tu hija) y el *monto* que transferiste.');
+          }
+        } catch (e) { console.error('Error respondiendo comprobante:', e.message); }
+      })();
     }
     return;
   }

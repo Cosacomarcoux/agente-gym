@@ -174,7 +174,7 @@ function limpiarNombreBuscado(texto) {
     'monto', 'porfa', 'porfis', 'porfavor', 'por', 'favor',
     'gracias', 'hola', 'buenas', 'buenos', 'buen', 'dia', 'dias', 'tardes', 'noches',
     'registra', 'registrar', 'registrame', 'registrá', 'confirma', 'confirmar', 'puedes', 'podes', 'podrias',
-    'carga', 'cargar', 'cargá', 'cargale', 'anota', 'anotar', 'anotá', 'cobre', 'cobrar', 'cobré',
+    'carga', 'cargar', 'cargá', 'cargale', 'anota', 'anotar', 'anotá', 'cobra', 'cobre', 'cobrar', 'cobré',
     'siguiente', 'siguientes', 'jugadora', 'jugadoras', 'jugador', 'jugadores',
     'alumna', 'alumnas', 'alumno', 'alumnos', 'chica', 'chicas', 'chico', 'chicos',
     'mil', 'miles', 'mio', 'mik', 'mils', 'luca', 'lucas', 'palo', 'palos', 'k',
@@ -306,9 +306,20 @@ function parsearPagosLibres(texto) {
     const seg = s.slice(cursor, ms[i].start);                 // texto del nombre (antes del monto)
     const post = s.slice(ms[i].end, i + 1 < ms.length ? ms[i + 1].start : s.length); // método (después)
     const metodo = /efectivo|efvo|cash/i.test(post) ? 'Efectivo' : 'Transferencia';
-    // Limpiar y sacar restos de conectores/artículos al principio ("a", "el", "la").
-    const nombre = limpiarNombreBuscado(seg).replace(/^((el|la|a)\s+)+/g, '').trim();
-    if (nombre && nombre.split(' ').filter(Boolean).length >= 2) {
+    // Limpia conectores sueltos al INICIO ("a/el/la") y al FINAL ("...de $42000" →
+    // saca el "de", que no es parte del nombre).
+    const limpiar = (txt) => limpiarNombreBuscado(txt)
+      .replace(/^((el|la|a)\s+)+/g, '')
+      .replace(/(\s+(de|del|por|para|a|con|en|y|mediante|via))+$/i, '')
+      .trim();
+    const valido = (n) => n && n.split(' ').filter(Boolean).length >= 2;
+    let nombre = limpiar(seg);
+    // Si no hay nombre ANTES del monto, probamos DESPUÉS ("cobré 42000 a Clara Marcoux").
+    if (!valido(nombre)) {
+      const mPost = post.match(/^\s*(?:a|al|para)\s+([a-záéíóúñ].*)$/i);
+      if (mPost) nombre = limpiar(mPost[1]);
+    }
+    if (valido(nombre)) {
       pagos.push({ nombre: capitalizarNombre(nombre), monto: ms[i].monto, metodo });
     }
     cursor = ms[i].end;
