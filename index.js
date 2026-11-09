@@ -585,7 +585,7 @@ CARGA DE PAGOS POR COSACO: si Cosaco te pide registrar/cargar/anotar un pago de 
 
 LINK DEL GRUPO: si Cosaco pide "mandale el link del grupo a [nombre]", "enviá el grupo a [nombre]" o similar, llamá enviar_link_grupo con el nombre. Busca al cliente y le manda el link del grupo de WhatsApp del gimnasio. Exclusivo de Cosaco.
 
-LISTA DE SEGUIMIENTO: los alumnos NUEVOS y los que REACTIVAN (ex-alumnos que vuelven) entran solos a la lista de seguimiento. Si Cosaco pide "anotá a Fulana en seguimiento", "poné a Juan en la lista" o similar, llamá agregar_a_seguimiento con el nombre. Ni bien se le carga una asistencia a alguien de la lista, el sistema le escribe solo: si vino, el mensaje de seguimiento con el cobro; si faltó, le pregunta si quiere mantener el turno (si dice que no, se la suspende; si dice que sí, se le reinician los 5 días hábiles una única vez). A los 5 días hábiles sin pagar, se le pide a Cosaco autorización para suspender. El alumno sale de la lista SOLO cuando se registra su pago (es automático). Esto es exclusivo de Cosaco.
+LISTA DE SEGUIMIENTO: los alumnos NUEVOS y los que REACTIVAN (ex-alumnos que vuelven) entran solos a la lista de seguimiento. Si Cosaco pide "anotá a Fulana en seguimiento", "poné a Juan en la lista" o similar, llamá agregar_a_seguimiento con el nombre. Todos los días hábiles a las 10 de la mañana el sistema revisa las asistencias nuevas de la lista y le escribe a cada uno: si vino, el mensaje de seguimiento con el cobro; si faltó, le pregunta si quiere mantener el turno (si dice que no, se la suspende; si dice que sí, se le reinician los 5 días hábiles una única vez). A los 5 días hábiles sin pagar, se le pide a Cosaco autorización para suspender. El alumno sale de la lista SOLO cuando se registra su pago (es automático). Esto es exclusivo de Cosaco.
 
 CONFIRMACIÓN DE PAGOS (CRÍTICO): vos NO confirmás ni registrás pagos, y NUNCA digas que confirmaste, registraste o notificaste un pago. Ese proceso es automático y va de a uno. Si Cosaco dice "confirmar", "confirmar pagos", "pendientes" o similar, el sistema ya lo maneja solo (no tenés que hacer nada). Si te pregunta por pagos pendientes, decile que escriba "pendientes" y el sistema los muestra de a uno para confirmar con SÍ o NO. Jamás inventes que un pago quedó confirmado.`;
 
@@ -2837,8 +2837,8 @@ cron.schedule('0 22 * * *', async () => {
 
 // ────────────────────────────────────────────────────────────────────────────
 //  LISTA DE SEGUIMIENTO (conversión de nuevos / reactivados)
-//  Cada 10 minutos el bot revisa las asistencias de los alumnos en seguimiento
-//  (los que todavía no pagaron). NI BIEN se carga una asistencia:
+//  Todos los días hábiles a las 10:00 el bot revisa las asistencias nuevas de los
+//  alumnos en seguimiento (los que todavía no pagaron). Por cada una:
 //   • PRESENTE → se le manda el mensaje de seguimiento (con el cobro).
 //   • AUSENTE  → se le pregunta si quiere mantener el turno.
 //       - "No"  → se lo suspende (el sistema lo saca de todos los turnos) y se le avisa.
@@ -2887,7 +2887,7 @@ async function revisarAsistenciasSeguimiento() {
     const r = await fetch(`${GYM_API}/seguimiento`, { headers: hdrs });
     if (!r.ok) { console.error('[SEGUIMIENTO] API', r.status); return; }
     const lista = await r.json();
-    const ayer = hoyISOart(-1);
+    const ayer = hoyISOart(-3); // 3 días atrás: el lunes cubre el viernes
     for (const c of (Array.isArray(lista) ? lista : [])) {
       if (!c.telefono) continue;
       let asist = [];
@@ -3026,13 +3026,10 @@ async function suspenderSeguimientoVencido() {
   console.log(`[SEG-SUSP] ${nuevos.length} suspension(es) encolada(s) para que Cosaco autorice`);
 }
 
-// 9:00 AR: control de los 5 días hábiles.
-cron.schedule('0 9 * * 1-5', async () => {
+// 10:00 AR, lunes a viernes: primero el control de los 5 días hábiles y después
+// los mensajes por las asistencias nuevas (presente → cobro, ausente → consulta).
+cron.schedule('0 10 * * 1-5', async () => {
   try { await suspenderSeguimientoVencido(); } catch (e) { console.error('cron seg-susp:', e.message); }
-}, { timezone: 'America/Argentina/Buenos_Aires' });
-
-// Cada 10 min (8 a 22:50 h AR): asistencias nuevas de alumnos en seguimiento.
-cron.schedule('*/10 8-22 * * *', async () => {
   try { await revisarAsistenciasSeguimiento(); } catch (e) { console.error('cron seguimiento:', e.message); }
 }, { timezone: 'America/Argentina/Buenos_Aires' });
 
