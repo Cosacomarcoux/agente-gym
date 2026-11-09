@@ -54,8 +54,8 @@ dueño). Es hoy el **operador principal** del gimnasio.
   una sola vez (tabla `seguimiento_asist_vistas`).
   - Presente → plantilla de seguimiento (con el cobro).
   - Ausente → "¿querés mantener tu turno?" (tabla `consulta_ausencia`). "No" → suspender
-    (el sistema la saca de todos los turnos) y avisarle. "Sí" → reiniciar el conteo
-    (`POST /clientes/{id}/seguimiento`) UNA sola vez (tabla `seguimiento_reinicio`).
+    (el sistema la saca de todos los turnos) y avisarle. "Sí" → solo se le guarda el turno;
+    NO se reinicia nada (sigue su conteo original de 3 semanas).
 - Mismo cron (10 h, antes) `suspenderSeguimientoVencido`: NADIE sale de seguimiento por días.
   Con más de 3 semanas (21 días) sin pagar → SÍ/NO a Cosaco; si dice NO, se re-pregunta
   a los 7 días (tabla `seguimiento_aviso_susp`).

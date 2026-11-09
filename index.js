@@ -589,7 +589,7 @@ CARGA DE PAGOS POR COSACO: si Cosaco te pide registrar/cargar/anotar un pago de 
 
 LINK DEL GRUPO: si Cosaco pide "mandale el link del grupo a [nombre]", "enviá el grupo a [nombre]" o similar, llamá enviar_link_grupo con el nombre. Busca al cliente y le manda el link del grupo de WhatsApp del gimnasio. Exclusivo de Cosaco.
 
-LISTA DE SEGUIMIENTO: los alumnos NUEVOS y los que REACTIVAN (ex-alumnos que vuelven) entran solos a la lista de seguimiento. Si Cosaco pide "anotá a Fulana en seguimiento", "poné a Juan en la lista" o similar, llamá agregar_a_seguimiento con el nombre. Todos los días hábiles a las 10 de la mañana el sistema revisa las asistencias nuevas de la lista y le escribe a cada uno: si vino, el mensaje de seguimiento con el cobro; si faltó, le pregunta si quiere mantener el turno (si dice que no, se la suspende; si dice que sí, se le reinicia el conteo una única vez). Nadie sale de la lista por cumplir días: con más de 3 semanas sin pagar, se le pide a Cosaco autorización para suspender. El alumno sale de la lista SOLO cuando se registra su pago (es automático). Esto es exclusivo de Cosaco.
+LISTA DE SEGUIMIENTO: los alumnos NUEVOS y los que REACTIVAN (ex-alumnos que vuelven) entran solos a la lista de seguimiento. Si Cosaco pide "anotá a Fulana en seguimiento", "poné a Juan en la lista" o similar, llamá agregar_a_seguimiento con el nombre. Todos los días hábiles a las 10 de la mañana el sistema revisa las asistencias nuevas de la lista y le escribe a cada uno: si vino, el mensaje de seguimiento con el cobro; si faltó, le pregunta si quiere mantener el turno (si dice que no, se la suspende; si dice que sí, se le guarda el turno sin reiniciar nada). Nadie sale de la lista por cumplir días: con más de 3 semanas sin pagar, se le pide a Cosaco autorización para suspender. El alumno sale de la lista SOLO cuando se registra su pago (es automático). Esto es exclusivo de Cosaco.
 
 CONFIRMACIÓN DE PAGOS (CRÍTICO): vos NO confirmás ni registrás pagos, y NUNCA digas que confirmaste, registraste o notificaste un pago. Ese proceso es automático y va de a uno. Si Cosaco dice "confirmar", "confirmar pagos", "pendientes" o similar, el sistema ya lo maneja solo (no tenés que hacer nada). Si te pregunta por pagos pendientes, decile que escriba "pendientes" y el sistema los muestra de a uno para confirmar con SÍ o NO. Jamás inventes que un pago quedó confirmado.`;
 
@@ -2846,7 +2846,7 @@ cron.schedule('0 22 * * *', async () => {
 //   • PRESENTE → se le manda el mensaje de seguimiento (con el cobro).
 //   • AUSENTE  → se le pregunta si quiere mantener el turno.
 //       - "No"  → se lo suspende (el sistema lo saca de todos los turnos) y se le avisa.
-//       - "Sí"  → se reinicia su conteo de seguimiento (UNA sola vez por alumno).
+//       - "Sí"  → se le guarda el turno (no se reinicia nada).
 //  Con más de 3 semanas en seguimiento sin pagar → se le pide a Cosaco SÍ/NO para suspender.
 //  El alumno sale de la lista SOLO cuando se registra su pago (auto en el sistema).
 // ────────────────────────────────────────────────────────────────────────────
@@ -2968,23 +2968,13 @@ async function manejarRespuestaAusencia(remitente, mensaje) {
     await avisarCosaco(`ℹ️ ${c.cliente_nombre} faltó y respondió que NO quiere mantener el turno → la suspendí y quedó fuera de todos los turnos.`);
     return true;
   }
-  // resp === 'si' → reiniciar el conteo de seguimiento, UNA sola vez por alumno
-  const ya = await pool.query(`SELECT 1 FROM seguimiento_reinicio WHERE cliente_id = $1`, [c.cliente_id]);
-  if (!ya.rows.length) {
-    await fetch(`${GYM_API}/clientes/${c.cliente_id}/seguimiento`, { method: 'POST', headers: hdrs }).catch(() => {});
-    await pool.query(`INSERT INTO seguimiento_reinicio (cliente_id) VALUES ($1) ON CONFLICT DO NOTHING`, [c.cliente_id]);
-    await pool.query(`DELETE FROM suspensiones_pendientes WHERE cliente_id = $1`, [c.cliente_id]).catch(() => {});
-    logActividad('seguimiento_reinicio', c.cliente_nombre, null, remitente);
-    await enviarWhatsApp(remitente,
-      `¡Genial, ${nombre1}! Te guardamos el turno 🏑 Recordá que para asegurar tu lugar el mes se abona por adelantado (alias hockeyvivo o efectivo). ¡Te esperamos!`,
-      c.cliente_nombre);
-    await avisarCosaco(`ℹ️ ${c.cliente_nombre} faltó pero quiere mantener el turno → le reinicié el conteo de seguimiento (única vez).`);
-  } else {
-    await enviarWhatsApp(remitente,
-      `¡Perfecto, ${nombre1}! Te esperamos en el próximo entrenamiento 🏑 Acordate de abonar el mes para asegurar tu lugar.`,
-      c.cliente_nombre);
-    await avisarCosaco(`ℹ️ ${c.cliente_nombre} faltó otra vez y dice que quiere el turno. Ya usó su reinicio, así que no se lo volví a reiniciar.`);
-  }
+  // resp === 'si' → solo le guardamos el turno. NO se reinicia nada: sigue en
+  // seguimiento con su conteo original (a las 3 semanas sin pagar, Cosaco decide).
+  logActividad('seguimiento_mantiene_turno', c.cliente_nombre, null, remitente);
+  await enviarWhatsApp(remitente,
+    `¡Genial, ${nombre1}! Te guardamos el turno 🏑 Recordá que para asegurar tu lugar el mes se abona por adelantado (alias hockeyvivo o efectivo). ¡Te esperamos!`,
+    c.cliente_nombre);
+  await avisarCosaco(`ℹ️ ${c.cliente_nombre} faltó pero quiere mantener el turno. Sigue en seguimiento (sin reiniciar nada).`);
   return true;
 }
 
