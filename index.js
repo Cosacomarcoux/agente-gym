@@ -2852,7 +2852,9 @@ cron.schedule('0 22 * * *', async () => {
 // ────────────────────────────────────────────────────────────────────────────
 const SID_SEGUIMIENTO = () => process.env.TEMPLATE_SEGUIMIENTO || 'HX9df9508ac29c10f582f02af1dc266b0b';
 // Plantilla general aprobada para iniciar conversación, con UNA variable ({{1}}).
-const SID_CONSULTA_AUSENCIA = () => process.env.TEMPLATE_CONSULTA_AUSENCIA || 'HX60558fb413fdcec4a3b98145fdebc178';
+// Si existe TEMPLATE_CONSULTA_AUSENCIA (plantilla propia: {{1}} nombre, {{2}} fecha) se usa
+// esa; si no, la plantilla general (una sola variable con todo el texto).
+const SID_AUSENCIA_GENERAL = 'HX60558fb413fdcec4a3b98145fdebc178';
 const hoyISOart = (desplazDias = 0) => {
   const d = new Date(Date.now() + desplazDias * 86400000);
   return d.toLocaleDateString('en-CA', { timeZone: 'America/Argentina/Buenos_Aires' });
@@ -2876,7 +2878,13 @@ async function preguntarSiMantieneTurno(a, fecha) {
     `INSERT INTO consulta_ausencia (telefono, cliente_id, cliente_nombre) VALUES ($1, $2, $3)
      ON CONFLICT (telefono) DO UPDATE SET cliente_id = $2, cliente_nombre = $3, creada = NOW()`,
     [guards.normalizarWhatsApp(a.telefono), a.id, a.nombre]);
-  await enviarTemplate(a.telefono, SID_CONSULTA_AUSENCIA(), { "1": pregunta }, pregunta, a.nombre);
+  const sidPropia = process.env.TEMPLATE_CONSULTA_AUSENCIA;
+  if (sidPropia) {
+    const textoGuardar = `Hola ${nombre1}! 👋 Vimos que faltaste al entrenamiento del ${fechaCorta(fecha)}. ¿Querés mantener tu turno en Hockey Vivo? Respondé SÍ para guardarlo o NO si preferís dejarlo libre para otra jugadora. 🏑`;
+    await enviarTemplate(a.telefono, sidPropia, { "1": nombre1, "2": fechaCorta(fecha) }, textoGuardar, a.nombre);
+  } else {
+    await enviarTemplate(a.telefono, SID_AUSENCIA_GENERAL, { "1": pregunta }, pregunta, a.nombre);
+  }
   logActividad('seguimiento_ausente', a.nombre, null, a.telefono);
   console.log(`[SEGUIMIENTO] ausente → consulta a ${a.nombre}`);
 }
